@@ -52,7 +52,7 @@ Total wall clock time: 3h51m
 
 ---
 
-(Your table might be missing the RL number by default). For a lot more information around the speedrun script and what to look for and expect, please refer to the walkthrough that I posted in Discussions of the repo: ["nanochat: the best ChatGPT that $100 can buy"]().
+(Your table might be missing the RL number by default). For a lot more information around the speedrun script and what to look for and expect, please refer to the walkthrough that I posted in Discussions of the repo: ["Introducing nanochat: The best ChatGPT that $100 can buy"](https://github.com/karpathy/nanochat/discussions/1).
 
 ## Bigger models
 
