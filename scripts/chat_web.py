@@ -257,6 +257,11 @@ async def generate_stream(
     assistant_end = worker.tokenizer.encode_special("<|assistant_end|>")
     bos = worker.tokenizer.get_bos_token_id()
 
+    # Accumulate tokens to properly handle multi-byte UTF-8 characters (like emojis)
+    accumulated_tokens = []
+    # Track the last complete UTF-8 string (without replacement characters)
+    last_clean_text = ""
+
     with worker.autocast_ctx:
         for token_column, token_masks in worker.engine.generate(
             tokens,
@@ -267,11 +272,23 @@ async def generate_stream(
         ):
             token = token_column[0]
 
+            # Stopping criteria
             if token == assistant_end or token == bos:
                 break
 
-            token_text = worker.tokenizer.decode([token])
-            yield f"data: {json.dumps({'token': token_text, 'gpu': worker.gpu_id})}\n\n"
+            # Append the token to sequence
+            accumulated_tokens.append(token)
+            # Decode all accumulated tokens to get proper UTF-8 handling
+            # Note that decode is a quite efficient operation, basically table lookup and string concat
+            current_text = worker.tokenizer.decode(accumulated_tokens)
+            # Only emit text if it doesn't end with a replacement character
+            # This ensures we don't emit incomplete UTF-8 sequences
+            if not current_text.endswith('�'):
+                # Extract only the new text since last clean decode
+                new_text = current_text[len(last_clean_text):]
+                if new_text:  # Only yield if there's new content
+                    yield f"data: {json.dumps({'token': new_text, 'gpu': worker.gpu_id}, ensure_ascii=False)}\n\n"
+                    last_clean_text = current_text
 
     yield f"data: {json.dumps({'done': True})}\n\n"
 
