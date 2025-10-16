@@ -93,9 +93,10 @@ def autodetect_device_type():
     # prefer to use CUDA if available, otherwise use MPS, otherwise fallback on CPU
     if torch.cuda.is_available():
         device_type = "cuda"
-    if torch.backends.mps.is_available():
+    elif torch.backends.mps.is_available():
         device_type = "mps"
-    device_type = "cpu"
+    else:
+        device_type = "cpu"
     print0(f"Autodetected device type: {device_type}")
     return device_type
 

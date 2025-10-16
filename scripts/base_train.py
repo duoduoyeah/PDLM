@@ -7,13 +7,15 @@ or distributed as:
 
 torchrun --nproc_per_node=8 base_train.py
 
-python -m scripts.base_train --device_type=cpu --depth=4 --max_seq_len=512 --device_batch_size=1 --eval_tokens=512 --core_metric_max_per_task=8 --total_batch_size=512 --num_iterations=500
-If you have a Macbook, you're better off using device_type=mps instead of cpu
+If you are only on CPU/Macbook, you'll want to train a much much smaller LLM. Example:
+python -m scripts.base_train --depth=4 --max_seq_len=512 --device_batch_size=1 --eval_tokens=512 --core_metric_every=-1 --total_batch_size=512 --num_iterations=20
 """
 
 import os
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import time
+from contextlib import nullcontext
+
 import wandb
 import torch
 
@@ -50,7 +52,7 @@ grad_clip = 1.0 # gradient clipping value (0.0 = disabled)
 # Evaluation
 eval_every = 250 # every how many steps to evaluate the model for val bpb
 eval_tokens = 20*524288 # number of tokens to evaluate val loss on
-core_metric_every = 2000 # every how many steps to evaluate the core metric
+core_metric_every = 2000 # every how many steps to evaluate the core metric (-1 = disable)
 core_metric_max_per_task = 500 # examples per task in estimating the core metric
 sample_every = 2000 # every how many steps to sample from the model
 # Output
@@ -65,8 +67,7 @@ user_config = {k: globals()[k] for k in config_keys} # will be useful for loggin
 device_type = autodetect_device_type() if device_type == "" else device_type
 ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
 master_process = ddp_rank == 0 # this process will do logging, checkpointing etc.
-dtype = torch.bfloat16 if device_type == "cuda" else torch.float32 # use fp32 on CPU|MPS
-autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=dtype)
+autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=torch.bfloat16) if device_type == "cuda" else nullcontext()
 synchronize = torch.cuda.synchronize if device_type == "cuda" else lambda: None
 get_max_memory = torch.cuda.max_memory_allocated if device_type == "cuda" else lambda: 0
 
@@ -202,7 +203,8 @@ for step in range(num_iterations + 1):
 
     # once in a while: estimate the CORE metric (all ranks participate)
     # use the original uncompiled model because the inputs keep changing shape
-    if last_step or (step > 0 and step % core_metric_every == 0):
+    results = {}
+    if core_metric_every > 0 and (last_step or (step > 0 and step % core_metric_every == 0)):
         model.eval()
         with autocast_ctx:
             results = evaluate_model(orig_model, tokenizer, device, max_per_task=core_metric_max_per_task)
@@ -228,7 +230,7 @@ for step in range(num_iterations + 1):
             "My favorite color is",
             "If 5*x + 3 = 13, then x is",
         ]
-        engine = Engine(model, tokenizer)
+        engine = Engine(orig_model, tokenizer)
         for prompt in prompts:
             tokens = tokenizer(prompt, prepend="<|bos|>")
             with autocast_ctx:
@@ -335,7 +337,7 @@ get_report().log(section="Base model training", data=[
     { # stats about training outcomes
         "Minimum validation bpb": min_val_bpb,
         "Final validation bpb": val_bpb,
-        "CORE metric estimate": results["core_metric"],
+        "CORE metric estimate": results.get("core_metric", None),
         "MFU %": f"{mfu:.2f}%",
         "Total training flops": f"{flops_so_far:e}",
         "Total training time": f"{total_training_time/60:.2f}m",
