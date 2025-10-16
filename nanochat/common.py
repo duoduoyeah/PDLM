@@ -89,6 +89,16 @@ def get_dist_info():
     else:
         return False, 0, 0, 1
 
+def autodetect_device_type():
+    # prefer to use CUDA if available, otherwise use MPS, otherwise fallback on CPU
+    if torch.cuda.is_available():
+        device_type = "cuda"
+    if torch.backends.mps.is_available():
+        device_type = "mps"
+    device_type = "cpu"
+    print0(f"Autodetected device type: {device_type}")
+    return device_type
+
 def compute_init(device_type="cuda"): # cuda|cpu|mps
     """Basic initialization that we keep doing over and over, so make common."""
 
