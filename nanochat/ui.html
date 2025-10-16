@@ -115,6 +115,12 @@
             border-radius: 1.25rem;
             padding: 0.8rem 1rem;
             max-width: 65%;
+            cursor: pointer;
+            transition: background-color 0.2s ease;
+        }
+
+        .message.user .message-content:hover {
+            background-color: #e5e7eb;
         }
 
         .message.console .message-content {
@@ -300,7 +306,7 @@
             chatInput.focus();
         }
 
-        function addMessage(role, content) {
+        function addMessage(role, content, messageIndex = null) {
             const messageDiv = document.createElement('div');
             messageDiv.className = `message ${role}`;
 
@@ -308,11 +314,48 @@
             contentDiv.className = 'message-content';
             contentDiv.textContent = content;
 
+            // Add click handler for user messages to enable editing
+            if (role === 'user' && messageIndex !== null) {
+                contentDiv.setAttribute('data-message-index', messageIndex);
+                contentDiv.setAttribute('title', 'Click to edit and restart from here');
+                contentDiv.addEventListener('click', function() {
+                    if (!isGenerating) {
+                        editMessage(messageIndex);
+                    }
+                });
+            }
+
             messageDiv.appendChild(contentDiv);
             chatWrapper.appendChild(messageDiv);
 
             chatContainer.scrollTop = chatContainer.scrollHeight;
             return contentDiv;
+        }
+
+        function editMessage(messageIndex) {
+            // Find the message in the messages array
+            if (messageIndex < 0 || messageIndex >= messages.length) return;
+
+            const messageToEdit = messages[messageIndex];
+            if (messageToEdit.role !== 'user') return;
+
+            // Copy message content to input
+            chatInput.value = messageToEdit.content;
+            chatInput.style.height = 'auto';
+            chatInput.style.height = Math.min(chatInput.scrollHeight, 200) + 'px';
+
+            // Remove this message and all subsequent messages from the array
+            messages = messages.slice(0, messageIndex);
+
+            // Remove message elements from DOM starting from messageIndex
+            const allMessages = chatWrapper.querySelectorAll('.message');
+            for (let i = messageIndex; i < allMessages.length; i++) {
+                allMessages[i].remove();
+            }
+
+            // Enable send button and focus input
+            sendButton.disabled = false;
+            chatInput.focus();
         }
 
         function handleSlashCommand(command) {
@@ -381,8 +424,9 @@
             chatInput.style.height = 'auto';
             sendButton.disabled = true;
 
+            const userMessageIndex = messages.length;
             messages.push({ role: 'user', content: message });
-            addMessage('user', message);
+            addMessage('user', message, userMessageIndex);
 
             const assistantContent = addMessage('assistant', '');
             assistantContent.innerHTML = '<span class="typing-indicator"></span>';
