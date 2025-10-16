@@ -36,6 +36,7 @@ import os
 import torch
 import asyncio
 import logging
+import random
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -268,7 +269,8 @@ async def generate_stream(
             num_samples=1,
             max_tokens=max_new_tokens,
             temperature=temperature,
-            top_k=top_k
+            top_k=top_k,
+            seed=random.randint(0, 2**31 - 1)
         ):
             token = token_column[0]
 
