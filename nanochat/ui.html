@@ -117,6 +117,15 @@
             max-width: 65%;
         }
 
+        .message.console .message-content {
+            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', 'Courier New', monospace;
+            font-size: 0.875rem;
+            background-color: #fafafa;
+            padding: 0.75rem 1rem;
+            color: #374151;
+            max-width: 80%;
+        }
+
         .input-container {
             background-color: #ffffff;
             padding: 1rem;
@@ -255,6 +264,8 @@
 
         let messages = [];
         let isGenerating = false;
+        let currentTemperature = 0.8;
+        let currentTopK = 50;
 
         chatInput.addEventListener('input', function() {
             this.style.height = 'auto';
@@ -304,9 +315,66 @@
             return contentDiv;
         }
 
+        function handleSlashCommand(command) {
+            const parts = command.trim().split(/\s+/);
+            const cmd = parts[0].toLowerCase();
+            const arg = parts[1];
+
+            if (cmd === '/temperature') {
+                if (arg === undefined) {
+                    addMessage('console', `Current temperature: ${currentTemperature}`);
+                } else {
+                    const temp = parseFloat(arg);
+                    if (isNaN(temp) || temp < 0 || temp > 2) {
+                        addMessage('console', 'Invalid temperature. Must be between 0.0 and 2.0');
+                    } else {
+                        currentTemperature = temp;
+                        addMessage('console', `Temperature set to ${currentTemperature}`);
+                    }
+                }
+                return true;
+            } else if (cmd === '/topk') {
+                if (arg === undefined) {
+                    addMessage('console', `Current top-k: ${currentTopK}`);
+                } else {
+                    const topk = parseInt(arg);
+                    if (isNaN(topk) || topk < 1 || topk > 200) {
+                        addMessage('console', 'Invalid top-k. Must be between 1 and 200');
+                    } else {
+                        currentTopK = topk;
+                        addMessage('console', `Top-k set to ${currentTopK}`);
+                    }
+                }
+                return true;
+            } else if (cmd === '/clear') {
+                newConversation();
+                return true;
+            } else if (cmd === '/help') {
+                addMessage('console',
+                    'Available commands:\n' +
+                    '/temperature - Show current temperature\n' +
+                    '/temperature <value> - Set temperature (0.0-2.0)\n' +
+                    '/topk - Show current top-k\n' +
+                    '/topk <value> - Set top-k (1-200)\n' +
+                    '/clear - Clear conversation\n' +
+                    '/help - Show this help message'
+                );
+                return true;
+            }
+            return false;
+        }
+
         async function sendMessage() {
             const message = chatInput.value.trim();
             if (!message || isGenerating) return;
+
+            // Handle slash commands
+            if (message.startsWith('/')) {
+                chatInput.value = '';
+                chatInput.style.height = 'auto';
+                handleSlashCommand(message);
+                return;
+            }
 
             isGenerating = true;
             chatInput.value = '';
@@ -327,7 +395,8 @@
                     },
                     body: JSON.stringify({
                         messages: messages,
-                        temperature: 0.8,
+                        temperature: currentTemperature,
+                        top_k: currentTopK,
                         max_tokens: 512
                     }),
                 });
