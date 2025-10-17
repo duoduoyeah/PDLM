@@ -128,7 +128,7 @@ def compute_init(device_type="cuda"): # cuda|cpu|mps
         dist.init_process_group(backend="nccl", device_id=device)
         dist.barrier()
     else:
-        device = torch.device(device_type) # cuda|cpu
+        device = torch.device(device_type) # mps|cpu
 
     if ddp_rank == 0:
         logger.info(f"Distributed world size: {ddp_world_size}")
