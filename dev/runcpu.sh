@@ -53,7 +53,7 @@ python -m scripts.base_train \
     --sample_every=50 \
     --num_iterations=50
 python -m scripts.base_loss --device_batch_size=1 --split_tokens=4096
-python -m scripts.base_eval --max-per-task=5
+python -m scripts.base_eval --max-per-task=16
 
 # midtraining
 python -m scripts.mid_train \
