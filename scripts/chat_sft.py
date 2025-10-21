@@ -26,6 +26,7 @@ from tasks.common import TaskMixture
 from tasks.arc import ARC
 from tasks.gsm8k import GSM8K
 from tasks.smoltalk import SmolTalk
+from tasks.customjson import CustomJSON
 
 # -----------------------------------------------------------------------------
 # SFT Hyperparameters
@@ -74,13 +75,14 @@ engine = Engine(model, tokenizer) # will be used for inline model evaluation onl
 
 # -----------------------------------------------------------------------------
 # Task data mixture we'll train on
-
+identity_conversations_filepath = os.path.join(get_base_dir(), "identity_conversations.jsonl")
 train_ds = TaskMixture([
     ARC(subset="ARC-Easy", split="train"), # 2.3K rows
     ARC(subset="ARC-Challenge", split="train"), # 1.1K rows
     GSM8K(subset="main", split="train"), # 8K rows
     SmolTalk(split="train", stop=10_000), # 10K rows of smoltalk
-]) # 2.3K + 1.1K + 8K + 10K = 21.4K rows
+    CustomJSON(filepath=identity_conversations_filepath), # 1K rows of synthetic identity conversations
+]) # 2.3K + 1.1K + 8K + 10K + 1K = 22.4K rows
 val_ds = SmolTalk(split="test") # general conversations, 24K rows (though we don't actually use all of it)
 
 # -----------------------------------------------------------------------------
