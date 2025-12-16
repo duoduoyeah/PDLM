@@ -22,9 +22,9 @@ import pyarrow as pa
 
 # Source dataset
 dataset_kwargs = {
-    "path": "HuggingFaceFW/fineweb-edu",
+    "path": "SimpleStories/SimpleStories",
     "split": "train",
-    "name": "sample-100BT", # ~100B GPT-2 tokens at ~3 chars/token => ~300B chars total
+    # "name": "sample-100BT", # ~100B GPT-2 tokens at ~3 chars/token => ~300B chars total
 }
 ds = load_dataset(**dataset_kwargs)
 
@@ -34,7 +34,7 @@ ndocs = len(ds) # total number of documents to process
 print(f"Total number of documents: {ndocs}")
 
 # Repackage into parquet files
-output_dir = "/home/ubuntu/.cache/nanochat/base_data"
+output_dir = "/content/cache/nanochat/base_data"
 os.makedirs(output_dir, exist_ok=True)
 
 # Write to parquet files
@@ -47,7 +47,7 @@ total_docs_processed = 0
 total_time_spent = 0
 t0 = time.time()
 for doc in ds:
-    text = doc['text']
+    text = doc.get('text') or doc.get('story', '')
     shard_docs.append(text)
     shard_characters += len(text)
     collected_enough_chars = shard_characters >= chars_per_shard
@@ -86,7 +86,7 @@ def upload():
     api = HfApi(token=token)
     api.upload_large_folder(
         folder_path=output_dir,
-        repo_id="karpathy/fineweb-edu-100b-shuffle",
+        repo_id="duoduoyeah/tiny-story-shuffle",
         repo_type="dataset",
     )
 # upload()
