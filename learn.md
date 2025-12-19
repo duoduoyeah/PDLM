@@ -1,4 +1,9 @@
 
+---12/16
+1. if we just expand the tokenizer space, is there a way to avoid pretrain?
+
+2.
+
 ---12/15
 1. how to modify the code here to let us train in block diffusion style? This one is important
 

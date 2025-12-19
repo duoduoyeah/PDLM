@@ -1,14 +1,6 @@
+
 """
-GPT model (rewrite, a lot simpler)
-Notable features:
-- rotary embeddings (and no positional embeddings)
-- QK norm
-- untied weights for token embedding and lm_head
-- relu^2 activation in MLP
-- norm after token embedding
-- no learnable params in rmsnorm
-- no bias in linear layers
-- Group-Query Attention (GQA) support for more efficient inference
+Parallel Denosing Language Model
 """
 
 import math
@@ -19,14 +11,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from nanochat.common import get_dist_info, print0
+from nanochat.common import get_dist_info
 from nanochat.muon import Muon, DistMuon
 from nanochat.adamw import DistAdamW
 
 @dataclass
-class GPTConfig:
+class PDLMConfig:
     sequence_len: int = 1024
     vocab_size: int = 50304
+    vocab_group_size: int = -1
     n_layer: int = 12
     n_head: int = 6 # number of query heads
     n_kv_head: int = 6 # number of key/value heads (GQA)
@@ -134,20 +127,16 @@ class Block(nn.Module):
         return x
 
 
-class GPT(nn.Module):
+class PDLM(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
         self.transformer = nn.ModuleDict({
-            "wte": nn.Embedding(config.vocab_size, config.n_embd),
+            "wte": nn.Embedding(config.vocab_size + config.vocab_group_size, config.n_embd), # wte changed by vocab_group_size
             "h": nn.ModuleList([Block(config, layer_idx) for layer_idx in range(config.n_layer)]),
         })
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        # To support meta device initialization, we init the rotary embeddings here, but it's fake
-        # As for rotary_seq_len, these rotary embeddings are pretty small/cheap in memory,
-        # so let's just over-compute them, but assert fail if we ever reach that amount.
-        # In the future we can dynamically grow the cache, for now it's fine.
-        self.rotary_seq_len = max(config.sequence_len, 1024) * 10 # 10X over-compute should be enough, TODO make nicer?
+        self.rotary_seq_len = max(config.sequence_len, 1024) * 10
         head_dim = config.n_embd // config.n_head
         cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim)
         self.register_buffer("cos", cos, persistent=False) # persistent=False means it's not saved to the checkpoint
@@ -202,7 +191,9 @@ class GPT(nn.Module):
         return self.transformer.wte.weight.device
 
     def estimate_flops(self):
-        """ Return the estimated FLOPs per token for the model. Ref: https://arxiv.org/abs/2204.02311 """
+        """ 
+        This may be not accurate for our model
+        Return the estimated FLOPs per token for the model. Ref: https://arxiv.org/abs/2204.02311 """
         nparams = sum(p.numel() for p in self.parameters())
         nparams_embedding = self.transformer.wte.weight.numel()
         l, h, q, t = self.config.n_layer, self.config.n_head, self.config.n_embd // self.config.n_head, self.config.sequence_len
@@ -274,32 +265,30 @@ class GPT(nn.Module):
             return logits
 
     @torch.inference_mode()
-    def generate(self, tokens, max_tokens, temperature=1.0, top_k=None, seed=42):
+    def generate(self, tokens, max_tokens, bucket_size=8):
         """
         Naive autoregressive streaming inference.
         To make it super simple, let's assume:
         - batch size is 1
         - ids and the yielded tokens are simple Python lists and ints
         """
-        assert isinstance(tokens, list)
+        assert isinstance(tokens, list) # B == 1
         device = self.get_device()
-        rng = None
-        if temperature > 0:
-            rng = torch.Generator(device=device)
-            rng.manual_seed(seed)
+
         ids = torch.tensor([tokens], dtype=torch.long, device=device) # add batch dim
-        for _ in range(max_tokens):
+        mask_id = -1 # This should be the mask_id later
+        ids = F.pad(ids, (0, bucket_size), value=mask_id) # add bucket
+        assert max_tokens % bucket_size == 0
+        while True:
             logits = self.forward(ids) # (B, T, vocab_size)
-            logits = logits[:, -1, :] # (B, vocab_size)
-            if top_k is not None:
-                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                logits[logits < v[:, [-1]]] = -float('Inf')
-            if temperature > 0:
-                logits = logits / temperature
-                probs = F.softmax(logits, dim=-1)
-                next_ids = torch.multinomial(probs, num_samples=1, generator=rng)
-            else:
-                next_ids = torch.argmax(logits, dim=-1, keepdim=True)
-            ids = torch.cat((ids, next_ids), dim=1)
-            token = next_ids.item()
-            yield token
+            logits = logits[:, -bucket_size:, :] # (B, bucket_size, vocab_size)
+            next_ids = torch.argmax(logits, dim=-1, keepdim=True) # (B, bucket)
+            noisy_ids = ids[:, -bucket_size:] # (B, bucket)
+            next_ids = transit_noisy_tokens(next_ids.squeeze(-1), noisy_ids)
+            ids = torch.cat((ids[:, :-next_ids.size(1)], next_ids), dim=1)
+            if is_all_pure_tokens(next_ids):
+                if ids.numel() >= max_tokens:
+                    break
+                else:
+                    ids = F.pad(ids, (0, bucket_size), value=mask_id)
+        return ids
