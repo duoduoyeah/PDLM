@@ -41,3 +41,7 @@ class TokenMap:
         pure_ids = self.tokens_to_pure_map[ids]
         # Compare pure_ids with ids, if every item is the same, then all tokens are pure.
         return torch.all(torch.eq(pure_ids, ids)).item()
+
+    def get_random_noisy_level(self, ids: torch.tensor) -> torch.tensor:
+        #TODO
+        pass
