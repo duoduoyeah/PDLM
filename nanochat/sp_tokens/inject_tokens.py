@@ -8,9 +8,9 @@ from nanochat.common import autodetect_device_type
 from nanochat.tokenizer import RustBPETokenizer
 from nanochat.sp_tokens.kmeans import kmeans
 
-# ---------------------------------------
+# --------------------------------------- 
 # Configuration for loading the model checkpoint
-# ---------------------------------------
+# --------------------------------------- 
 
 # Set the base directory to "model" in the current folder.
 # This folder should contain 'tokenizer/' and 'base_checkpoints/'
@@ -37,9 +37,9 @@ def get_model_and_tokenizer():
     
     return model, tokenizer
 
-# ---------------------------------------
+# --------------------------------------- 
 # Hierarchical Clustering Logic
-# ---------------------------------------
+# --------------------------------------- 
 
 def perform_hierarchical_kmeans(X, k=4, max_depth=6):
     """
@@ -90,26 +90,25 @@ def perform_hierarchical_kmeans(X, k=4, max_depth=6):
 
     return ancestry
 
-# ---------------------------------------
+# --------------------------------------- 
 # Token Generation & Saving
-# ---------------------------------------
+# --------------------------------------- 
 
-def generate_and_save_tokenizer(base_tokenizer, ancestry, k, output_dir):
+def identify_new_tokens(ancestry, base_tokenizer):
     """
-    Generates special tokens based on ancestry and creates a new tokenizer.
+    Identifies new group tokens from ancestry and assigns IDs.
+    Returns:
+        new_tokens_list: List of new token strings.
+        path_to_id: Dict mapping ancestry path tuple -> token ID.
+        final_special_tokens: Dict of all special tokens (old + new) -> token ID.
     """
     print("Generating new special tokens...")
     
     # 1. Collect all unique paths present in the ancestry
-    # A path is a tuple of indices (c_0, c_1, ..., c_d)
     unique_paths = set()
-    
-    # Add Root explicitly
-    # We will represent root as empty tuple ()
+    # Add Root explicitly (empty tuple)
     unique_paths.add(())
     
-    # Iterate over all tokens and all depths
-    # ancestry shape: (N, D)
     ancestry_cpu = ancestry.cpu()
     N, D = ancestry_cpu.shape
     
@@ -117,46 +116,22 @@ def generate_and_save_tokenizer(base_tokenizer, ancestry, k, output_dir):
         path = []
         for d in range(D):
             cluster_id = ancestry_cpu[i, d].item()
-            if cluster_id == -1: break # Should not happen with our logic
+            if cluster_id == -1: break 
             path.append(cluster_id)
             unique_paths.add(tuple(path))
             
-    # 2. Create Token Strings
-    # Scheme: 
-    # Root -> "<|MASK|>"
-    # Path (0, 3) -> "<|G_03|>"
-    # Path (1, 2, 0) -> "<|G_120|>"
-    
+    # 2. Sort paths and create token strings
+    # Scheme: Root -> "<|MASK|>", Path (0, 3) -> "<|G_03|>"
     sorted_paths = sorted(list(unique_paths), key=lambda x: (len(x), x))
     
-    new_special_token_map = {} # str -> int (ID)
-    
-    # Start IDs after the current vocabulary?
-    # Actually, tiktoken manages IDs. We just need to provide the mapping.
-    # But for compatibility, we usually want to append them.
-    # Let's inspect the base tokenizer's special tokens to find the next available ID
-    
-    # Access the inner tiktoken encoding
+    # Get existing special tokens and IDs
     enc = base_tokenizer.enc
-    
-    # Get existing special tokens
-    # enc.special_tokens_set is a set of strings
-    # We need the values (IDs) to find the max ID.
     existing_special_tokens = {}
     for name in enc.special_tokens_set:
         existing_special_tokens[name] = enc.encode_single_token(name)
         
-    # Also consider regular tokens
-    vocab_size = enc.n_vocab
-    # usually n_vocab includes everything, but let's be safe.
-    # The max ID in use is vocab_size - 1 usually.
-    
-    next_id = vocab_size
-    
-    # 3. Define new tokens
+    next_id = enc.n_vocab
     new_tokens_list = []
-    
-    # We need to map path -> new_token_id
     path_to_id = {}
     
     for path in sorted_paths:
@@ -166,7 +141,7 @@ def generate_and_save_tokenizer(base_tokenizer, ancestry, k, output_dir):
             path_str = "".join(str(x) for x in path)
             token_str = f"<|G_{path_str}|>"
         
-        # Check if it already exists (unlikely for new G_ tokens but possible for MASK?)
+        # Reuse ID if exists, else assign next_id
         if token_str in existing_special_tokens:
             token_id = existing_special_tokens[token_str]
         else:
@@ -178,22 +153,22 @@ def generate_and_save_tokenizer(base_tokenizer, ancestry, k, output_dir):
 
     print(f"Identified {len(new_tokens_list)} new group tokens to add.")
     
-    # 4. Merge and Create New Tokenizer
-    # We need mergeable_ranks from the old tokenizer
-    mergeable_ranks = enc._mergeable_ranks
-    
     # Combine special tokens
     final_special_tokens = existing_special_tokens.copy()
-    current_special_id = vocab_size # Start assigning new IDs from here
+    current_special_id = enc.n_vocab
     
-    # Re-assign IDs to be contiguous just in case, though next_id logic above was fine.
-    # Actually, let's stick to the IDs we generated in step 3 to match the maps we build below.
     for t_str in new_tokens_list:
         final_special_tokens[t_str] = existing_special_tokens.get(t_str, current_special_id)
         if t_str not in existing_special_tokens:
             current_special_id += 1
-        
+            
+    return new_tokens_list, path_to_id, final_special_tokens
+
+def create_new_tokenizer_encoding(base_tokenizer, final_special_tokens):
+    """Creates the new Tiktoken Encoding object."""
     print(f"Creating new tiktoken encoding with {len(final_special_tokens)} special tokens...")
+    enc = base_tokenizer.enc
+    mergeable_ranks = enc._mergeable_ranks
     
     new_enc = tiktoken.Encoding(
         name="rustbpe_with_groups",
@@ -201,56 +176,22 @@ def generate_and_save_tokenizer(base_tokenizer, ancestry, k, output_dir):
         mergeable_ranks=mergeable_ranks,
         special_tokens=final_special_tokens
     )
+    return new_enc
+
+def build_token_maps(ancestry, path_to_id, vocab_size, new_total_vocab, new_tokens_list, final_special_tokens):
+    """Builds the pure_to_noisy, tokens_to_pure, and noisy_level maps."""
+    print("Building token maps...")
     
-    # 5. Build the Maps for TokenMap class
-    # pure_to_noisy_map: shape (vocab_size, max_depth)
-    # tokens_to_pure_map: shape (new_vocab_size)
-    # noisy_level_map: shape (new_vocab_size)
-    
-    # We need max_depth from ancestry
-    # ancestry was (N, D). Note that the 'D' in ancestry is how many splits we did.
-    # But our paths can be length 0 to D.
-    # Actually, the depth of the tree is D.
-    # Let's say depth 0 is root (MASK), depth 1 is 1st split, ..., depth D is leaves (pure tokens).
-    # Wait, the TokenMap likely expects:
-    # level 0 = pure token
-    # level 1 = parent group
-    # ...
-    # level D = root
-    # OR the reverse?
-    # Usually "noisy level" implies 0 is clean, higher is more noise.
-    # Let's assume Level 0 = Pure Token. Level 1 = Fine Group... Level Max = Root.
-    
-    # In ancestry, we have N tokens, D cols.
-    # ancestry[i] = [c0, c1, c2, ..., c_{D-1}]
-    # Token i corresponds to path (c0, c1, ..., c_{D-1}).
-    
-    # Let's align with the levels:
-    # Level 0: The original token ID.
-    # Level 1: The finest group (full path in ancestry).
-    # ...
-    # Level D: The coarsest group (ancestry[:, 0]).
-    # Level D+1: The Root (empty path).
-    
-    # So max_level = D + 1.
-    # pure_to_noisy_map shape: (vocab_size, D + 2) -> columns 0..(D+1)
-    
+    ancestry_cpu = ancestry.cpu()
     N, D = ancestry_cpu.shape
     num_levels = D + 2 # 0 (pure) + D (groups) + 1 (root)
     
+    # 1. Pure to Noisy Map
     pure_to_noisy_map = torch.full((vocab_size, num_levels), -1, dtype=torch.long)
-    
-    # Initialize with identity for level 0
-    # Note: vocab_size might be larger than N if there are special tokens in the base vocab?
-    # ancestry is for 0..N-1.
-    # For special tokens outside 0..N-1, they might not have a group? Or map to themselves?
-    # Let's assume they map to themselves or Root?
-    # Let's stick to 0..N-1 (the text tokens) having ancestry.
-    
+    # Level 0 is the token itself
     pure_to_noisy_map[:vocab_size, 0] = torch.arange(vocab_size)
     
     for i in range(N):
-        # The full path for token i
         full_path = tuple(ancestry_cpu[i].tolist())
         
         # Level 1 (Finest group) -> Full path
@@ -258,15 +199,9 @@ def generate_and_save_tokenizer(base_tokenizer, ancestry, k, output_dir):
             pure_to_noisy_map[i, 1] = path_to_id[full_path]
             
         # Intermediate levels
-        # If D=6. Path has 6 elements.
-        # Level 1: path[:] (length 6)
-        # Level 2: path[:-1] (length 5)
-        # ...
-        # Level 6: path[:1] (length 1)
-        # Level 7: path[:0] (Root)
-        
+        # path len D -> level 1
+        # path len 0 -> level D+1
         for d in range(D):
-            # length of path for this level
             path_len = D - d
             sub_path = full_path[:path_len]
             level = d + 1
@@ -278,56 +213,28 @@ def generate_and_save_tokenizer(base_tokenizer, ancestry, k, output_dir):
         if root_path in path_to_id:
              pure_to_noisy_map[i, D + 1] = path_to_id[root_path]
 
-    # tokens_to_pure_map
-    # Maps ANY token ID (pure or group) to its "pure" representative?
-    # Wait, a group token maps to WHAT pure token?
-    # Usually it maps to a "representative" or is just invalid?
-    # OR:
-    # If the input is a pure token, return it.
-    # If the input is a group token, return... it? or -1?
-    # "is_all_pure_tokens" checks if tokens_to_pure_map[ids] == ids.
-    # So for group tokens, tokens_to_pure_map[g] should NOT be g.
-    # Maybe it maps to a canonical pure token (e.g. the centroid)?
-    # Or maybe it just maps to -1?
-    # Let's look at is_all_pure_tokens implementation:
-    # return torch.all(torch.eq(pure_ids, ids)).item()
-    # If I pass a group token G, and map[G] != G, then it returns False. Correct.
-    # So we can map group tokens to -1 or 0 or anything distinct.
-    
-    new_total_vocab = new_enc.n_vocab
+    # 2. Tokens to Pure Map
     tokens_to_pure_map = torch.arange(new_total_vocab, dtype=torch.long)
-    
-    # We want tokens_to_pure_map[group_id] != group_id.
-    # Let's set them to -1 (or 0 if unsigned, but long is signed).
-    # Actually, to be safe, let's map them to 0 (usually <|bos|>) or -1.
-    # Let's use -1.
-    
-    # Initialize all new tokens (groups) to -1
-    # The first 'vocab_size' tokens are pure (mostly), except original special tokens?
-    # Original special tokens are "pure" in the sense they aren't our noisy groups.
-    # So we only mark our NEW group tokens as "not pure".
-    
+    # Mark new group tokens as -1
     for t_str in new_tokens_list:
         tid = final_special_tokens[t_str]
         tokens_to_pure_map[tid] = -1
 
-    # noisy_level_map
-    # Maps token ID -> level index (0..D+1)
+    # 3. Noisy Level Map
     noisy_level_map = torch.zeros(new_total_vocab, dtype=torch.long)
-    
-    # Default is 0 (Pure)
-    # Set levels for group tokens
     for path, tid in path_to_id.items():
-        # What level is this path?
-        # path length L corresponds to level...
-        # In our loop above:
-        # level 1 has length D
-        # level D+1 has length 0
-        # So: level = D + 1 - len(path)
+        # level = D + 1 - length
         level = D + 1 - len(path)
         noisy_level_map[tid] = level
+        
+    return {
+        "pure_to_noisy_map": pure_to_noisy_map,
+        "tokens_to_pure_map": tokens_to_pure_map,
+        "noisy_level_map": noisy_level_map
+    }
 
-    # 6. Save Everything
+def save_artifacts(output_dir, new_enc, maps):
+    """Saves the tokenizer and maps to disk."""
     print("Saving tokenizer and maps...")
     os.makedirs(output_dir, exist_ok=True)
     
@@ -337,23 +244,41 @@ def generate_and_save_tokenizer(base_tokenizer, ancestry, k, output_dir):
         pickle.dump(new_enc, f)
     
     # Save Maps
-    maps = {
-        "pure_to_noisy_map": pure_to_noisy_map,
-        "tokens_to_pure_map": tokens_to_pure_map,
-        "noisy_level_map": noisy_level_map
-    }
     map_path = os.path.join(output_dir, "token_maps.pt")
     torch.save(maps, map_path)
     
     print(f"Saved tokenizer to {pickle_path}")
     print(f"Saved token maps to {map_path}")
     print(f"New vocab size: {new_enc.n_vocab}")
+
+def generate_and_save_tokenizer(base_tokenizer, ancestry, k, output_dir):
+    """
+    Orchestrates the generation and saving of the new tokenizer and maps.
+    """
+    # 1. Identify new tokens
+    new_tokens_list, path_to_id, final_special_tokens = identify_new_tokens(ancestry, base_tokenizer)
+    
+    # 2. Create Encoding
+    new_enc = create_new_tokenizer_encoding(base_tokenizer, final_special_tokens)
+    
+    # 3. Build Maps
+    maps = build_token_maps(
+        ancestry, 
+        path_to_id, 
+        base_tokenizer.get_vocab_size(), 
+        new_enc.n_vocab, 
+        new_tokens_list, 
+        final_special_tokens
+    )
+    
+    # 4. Save
+    save_artifacts(output_dir, new_enc, maps)
     
     return new_enc
 
-# ---------------------------------------
+# --------------------------------------- 
 # Main Execution
-# ---------------------------------------
+# --------------------------------------- 
 
 if __name__ == "__main__":
     torch.manual_seed(42)
@@ -377,3 +302,4 @@ if __name__ == "__main__":
     generate_and_save_tokenizer(tokenizer, ancestry, k, new_tokenizer_dir)
     
     print("\nDone!")
+    
