@@ -1,11 +1,11 @@
 import os
+import math
 import torch
 import logging
 import pickle
 import tiktoken
 from nanochat.checkpoint_manager import load_model_from_dir
 from nanochat.common import autodetect_device_type
-from nanochat.tokenizer import RustBPETokenizer
 from nanochat.sp_tokens.kmeans import kmeans
 
 # --------------------------------------- 
@@ -101,6 +101,7 @@ def identify_new_tokens(ancestry, base_tokenizer):
         new_tokens_list: List of new token strings.
         path_to_id: Dict mapping ancestry path tuple -> token ID.
         final_special_tokens: Dict of all special tokens (old + new) -> token ID.
+        overlap_levels: List of overlap level definitions (combos and fanout).
     """
     print("Generating new special tokens...")
     
@@ -155,13 +156,48 @@ def identify_new_tokens(ancestry, base_tokenizer):
 
     print(f"Identified {len(new_tokens_list)} new group tokens to add.")
     
+    # Derive base labels (top-level clusters) to build overlap layers if applicable
+    base_labels = sorted(set(ancestry_cpu[:, 0].tolist()))
+    overlap_levels = []
+    
+    def add_overlap_tokens(name, combos, fanout):
+        nonlocal next_id
+        entries = []
+        for members in combos:
+            token_str = f"<|G_{name}_{'_'.join(str(x) for x in members)}|>"
+            if token_str in existing_special_tokens:
+                raise ValueError(f"Generated token name {token_str} already exists in base tokenizer.")
+            token_id = next_id
+            next_id += 1
+            new_tokens_list.append(token_str)
+            entries.append((tuple(members), token_id, token_str))
+        overlap_levels.append({"name": name, "entries": entries, "fanout": fanout})
+    
+    # Only build overlaps for the expected 4-way top level
+    if len(base_labels) == 4:
+        # Pair overlaps: each base label appears in exactly two pairs
+        pair_combos = [
+            (base_labels[0], base_labels[1]),
+            (base_labels[1], base_labels[2]),
+            (base_labels[2], base_labels[3]),
+            (base_labels[3], base_labels[0]),
+        ]
+        add_overlap_tokens("PAIR", pair_combos, fanout=2)
+        
+        # Triplet overlaps: all 3-of-4 combinations ("all but one")
+        triplet_combos = [tuple(b for b in base_labels if b != omit) for omit in base_labels]
+        add_overlap_tokens("TRIP", triplet_combos, fanout=3)
+    
     # Combine special tokens
     final_special_tokens = existing_special_tokens.copy()
     for path, tid in path_to_id.items():
         t_str = path_to_token_str(path)
         final_special_tokens[t_str] = tid
+    for level in overlap_levels:
+        for _, tid, t_str in level["entries"]:
+            final_special_tokens[t_str] = tid
             
-    return new_tokens_list, path_to_id, final_special_tokens
+    return new_tokens_list, path_to_id, final_special_tokens, overlap_levels
 
 def create_new_tokenizer_encoding(base_tokenizer, final_special_tokens):
     """Creates the new Tiktoken Encoding object."""
@@ -177,7 +213,7 @@ def create_new_tokenizer_encoding(base_tokenizer, final_special_tokens):
     )
     return new_enc
 
-def build_token_maps(ancestry, path_to_id, vocab_size, new_total_vocab, new_tokens_list, final_special_tokens, max_fanout=1):
+def build_token_maps(ancestry, path_to_id, vocab_size, new_total_vocab, new_tokens_list, final_special_tokens, max_fanout=1, overlap_levels=None):
     """Builds the pure_to_noisy, tokens_to_pure, and noisy_level maps.
     
     pure_to_noisy_map shape: (vocab_size, num_levels, max_fanout)
@@ -185,10 +221,11 @@ def build_token_maps(ancestry, path_to_id, vocab_size, new_total_vocab, new_toke
     noisy_level_map shape: (new_total_vocab,)
     """
     print("Building token maps...")
+    overlap_levels = overlap_levels or []
     
     ancestry_cpu = ancestry.cpu()
     N, D = ancestry_cpu.shape
-    num_levels = D + 2 # 0 (pure) + D (groups) + 1 (root)
+    num_levels = D + 2 + len(overlap_levels) # 0 (pure) + D (groups) + overlap + root
     
     # 1. Pure to Noisy Map (3D for fanout)
     pure_to_noisy_map = torch.full((vocab_size, num_levels, max_fanout), -1, dtype=torch.long)
@@ -213,7 +250,23 @@ def build_token_maps(ancestry, path_to_id, vocab_size, new_total_vocab, new_toke
         # Root (Level D+1). We keep this at the final column regardless of actual path length.
         root_path = ()
         if root_path in path_to_id:
-             pure_to_noisy_map[i, D + 1] = path_to_id[root_path]
+             pure_to_noisy_map[i, D + 1 + len(overlap_levels)] = path_to_id[root_path]
+
+        # Overlap levels (after the base path-derived levels, before root)
+        base_label = full_path[0] if path_len > 0 else None
+        for idx, level in enumerate(overlap_levels):
+            level_index = D + 1 + idx
+            # Collect entries that include this base label
+            candidates = [tid for members, tid, _ in level["entries"] if base_label in members]
+            if not candidates:
+                continue
+            values = torch.tensor(candidates, dtype=torch.long)
+            if values.numel() < max_fanout:
+                repeat = (max_fanout + values.numel() - 1) // values.numel()
+                values = values.repeat(repeat)[:max_fanout]
+            else:
+                values = values[:max_fanout]
+            pure_to_noisy_map[i, level_index] = values
 
     # For any populated slot, replicate into remaining fanout entries to avoid random -1 picks.
     # This keeps behavior deterministic when only one option exists.
@@ -231,10 +284,18 @@ def build_token_maps(ancestry, path_to_id, vocab_size, new_total_vocab, new_toke
 
     # 3. Noisy Level Map
     noisy_level_map = torch.zeros(new_total_vocab, dtype=torch.long)
+    base_root_level = D + 1
+    root_level = base_root_level + len(overlap_levels)
     for path, tid in path_to_id.items():
-        # level = D + 1 - length
-        level = D + 1 - len(path)
+        if len(path) == 0:
+            level = root_level
+        else:
+            level = base_root_level - len(path)
         noisy_level_map[tid] = level
+    for idx, level_def in enumerate(overlap_levels):
+        level_index = D + 1 + idx
+        for _, tid, _ in level_def["entries"]:
+            noisy_level_map[tid] = level_index
         
     return {
         "pure_to_noisy_map": pure_to_noisy_map,
@@ -247,7 +308,15 @@ def compute_max_fanout(overlap_sizes):
     Compute the max fanout (e.g., least common multiple of overlap sizes).
     Placeholder for future overlapping-level support.
     """
-    pass
+    sizes = [s for s in overlap_sizes if s > 0]
+    if not sizes:
+        return 1
+    def lcm(a, b):
+        return a * b // math.gcd(a, b)
+    fanout = sizes[0]
+    for s in sizes[1:]:
+        fanout = lcm(fanout, s)
+    return fanout
 
 def save_artifacts(output_dir, new_enc, maps):
     """Saves the tokenizer and maps to disk."""
@@ -272,7 +341,13 @@ def generate_and_save_tokenizer(base_tokenizer, ancestry, k, output_dir, max_fan
     Orchestrates the generation and saving of the new tokenizer and maps.
     """
     # 1. Identify new tokens
-    new_tokens_list, path_to_id, final_special_tokens = identify_new_tokens(ancestry, base_tokenizer)
+    new_tokens_list, path_to_id, final_special_tokens, overlap_levels = identify_new_tokens(ancestry, base_tokenizer)
+    
+    # 1a. Compute fanout from overlap definitions
+    overlap_sizes = [lvl["fanout"] for lvl in overlap_levels if "fanout" in lvl]
+    fanout = max_fanout if max_fanout is not None else 1
+    if overlap_sizes:
+        fanout = compute_max_fanout(overlap_sizes)
     
     # 2. Create Encoding
     new_enc = create_new_tokenizer_encoding(base_tokenizer, final_special_tokens)
@@ -285,7 +360,8 @@ def generate_and_save_tokenizer(base_tokenizer, ancestry, k, output_dir, max_fan
         new_enc.n_vocab, 
         new_tokens_list, 
         final_special_tokens,
-        max_fanout=max_fanout
+        max_fanout=fanout,
+        overlap_levels=overlap_levels
     )
     
     # 4. Save
@@ -308,9 +384,15 @@ if __name__ == "__main__":
     print(f"\nExtracted embeddings: {lm_head_embeddings.shape}")
     
     # 3. Run Hierarchical Clustering
-    # We use k=4. Vocab is ~4096. 4^6 = 4096. So depth 6 is appropriate.
+    # Use k=4 with depth=5:
+    # Level 0: pure tokens (~4096)
+    # Level 1: 1024 groups
+    # Level 2: 256 groups
+    # Level 3: 64 groups
+    # Level 4: 16 groups
+    # Level 5: 4 groups (top base groups before overlaps)
     k = 4
-    depth = 6
+    depth = 5
     ancestry = perform_hierarchical_kmeans(lm_head_embeddings, k=k, max_depth=depth)
     
     # 4. Generate Group Tokens & Save New Tokenizer

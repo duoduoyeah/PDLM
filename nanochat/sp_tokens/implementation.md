@@ -12,6 +12,7 @@ Init the tokenmap
  * Update nanochat/sp_tokens/token_map.py to allow for loading the new tokenizer and token map.
 
 ---
+ - Level 0: 4096 pure tokens
   - Level 1: 1024 groups
   - Level 2: 256 groups
   - Level 3: 64 groups
