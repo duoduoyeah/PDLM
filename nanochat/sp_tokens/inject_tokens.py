@@ -4,6 +4,7 @@ import torch
 import logging
 import pickle
 import tiktoken
+from datetime import datetime
 from nanochat.checkpoint_manager import load_model_from_dir
 from nanochat.common import autodetect_device_type
 from nanochat.sp_tokens.kmeans import kmeans
@@ -175,6 +176,7 @@ def identify_new_tokens(ancestry, base_tokenizer):
     
     # Only build overlaps for the expected 4-way top level
     if len(base_labels) == 4:
+        print("Top-level has 4 groups; adding pair and triplet overlap tokens.")
         # Pair overlaps: each base label appears in exactly two pairs
         pair_combos = [
             (base_labels[0], base_labels[1]),
@@ -187,6 +189,8 @@ def identify_new_tokens(ancestry, base_tokenizer):
         # Triplet overlaps: all 3-of-4 combinations ("all but one")
         triplet_combos = [tuple(b for b in base_labels if b != omit) for omit in base_labels]
         add_overlap_tokens("TRIP", triplet_combos, fanout=3)
+    else:
+        print(f"Top-level has {len(base_labels)} groups; skipping overlap token creation.")
     
     # Combine special tokens
     final_special_tokens = existing_special_tokens.copy()
@@ -226,6 +230,26 @@ def build_token_maps(ancestry, path_to_id, vocab_size, new_total_vocab, new_toke
     ancestry_cpu = ancestry.cpu()
     N, D = ancestry_cpu.shape
     num_levels = D + 2 + len(overlap_levels) # 0 (pure) + D (groups) + overlap + root
+    # sanity: fanout should cover overlap fanouts
+    for lvl in overlap_levels:
+        if "fanout" in lvl and max_fanout % lvl["fanout"] != 0:
+            raise ValueError(f"max_fanout {max_fanout} not divisible by overlap fanout {lvl['fanout']}")
+
+    def fill_fanout(candidates):
+        """Repeat/truncate candidates to exactly max_fanout slots."""
+        if len(candidates) == 0:
+            raise ValueError("No candidates provided to fill fanout.")
+        if len(candidates) >= max_fanout:
+            return torch.tensor(candidates[:max_fanout], dtype=torch.long)
+        full = []
+        repeat = max_fanout // len(candidates)
+        remainder = max_fanout % len(candidates)
+        for c in candidates:
+            full.extend([c] * repeat)
+        # distribute remainder one by one
+        for idx in range(remainder):
+            full.append(candidates[idx % len(candidates)])
+        return torch.tensor(full, dtype=torch.long)
     
     # 1. Pure to Noisy Map (3D for fanout)
     pure_to_noisy_map = torch.full((vocab_size, num_levels, max_fanout), -1, dtype=torch.long)
@@ -260,20 +284,12 @@ def build_token_maps(ancestry, path_to_id, vocab_size, new_total_vocab, new_toke
             candidates = [tid for members, tid, _ in level["entries"] if base_label in members]
             if not candidates:
                 continue
-            values = torch.tensor(candidates, dtype=torch.long)
-            if values.numel() < max_fanout:
-                repeat = (max_fanout + values.numel() - 1) // values.numel()
-                values = values.repeat(repeat)[:max_fanout]
-            else:
-                values = values[:max_fanout]
+            values = fill_fanout(candidates)
             pure_to_noisy_map[i, level_index] = values
-
-    # For any populated slot, replicate into remaining fanout entries to avoid random -1 picks.
-    # This keeps behavior deterministic when only one option exists.
-    filled_mask = pure_to_noisy_map != -1
-    if max_fanout > 1:
-        first_values = pure_to_noisy_map[..., 0].unsqueeze(-1)
-        pure_to_noisy_map = torch.where(filled_mask, pure_to_noisy_map, first_values)
+    
+    # Ensure no -1 for the tokens we have ancestry for
+    if torch.any(pure_to_noisy_map[:N] == -1):
+        raise ValueError("pure_to_noisy_map contains unset entries for text tokens.")
 
     # 2. Tokens to Pure Map
     tokens_to_pure_map = torch.arange(new_total_vocab, dtype=torch.long)
@@ -322,14 +338,15 @@ def save_artifacts(output_dir, new_enc, maps):
     """Saves the tokenizer and maps to disk."""
     print("Saving tokenizer and maps...")
     os.makedirs(output_dir, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     
     # Save Tokenizer
-    pickle_path = os.path.join(output_dir, "tokenizer.pkl")
+    pickle_path = os.path.join(output_dir, f"tokenizer_{ts}.pkl")
     with open(pickle_path, "wb") as f:
         pickle.dump(new_enc, f)
     
     # Save Maps
-    map_path = os.path.join(output_dir, "token_maps.pt")
+    map_path = os.path.join(output_dir, f"token_maps_{ts}.pt")
     torch.save(maps, map_path)
     
     print(f"Saved tokenizer to {pickle_path}")
@@ -340,6 +357,8 @@ def generate_and_save_tokenizer(base_tokenizer, ancestry, k, output_dir, max_fan
     """
     Orchestrates the generation and saving of the new tokenizer and maps.
     """
+    assert ancestry.shape[1] >= 1, "Ancestry must have at least one depth column."
+    
     # 1. Identify new tokens
     new_tokens_list, path_to_id, final_special_tokens, overlap_levels = identify_new_tokens(ancestry, base_tokenizer)
     
