@@ -129,25 +129,27 @@ def identify_new_tokens(ancestry, base_tokenizer):
     existing_special_tokens = {}
     for name in enc.special_tokens_set:
         existing_special_tokens[name] = enc.encode_single_token(name)
+
+    def path_to_token_str(path):
+        if len(path) == 0:
+            return "<|MASK|>"
+        # Use delimiter to avoid ambiguity between [1, 23] vs [12, 3]
+        path_str = "_".join(str(x) for x in path)
+        return f"<|G_{path_str}|>"
         
     next_id = enc.n_vocab
     new_tokens_list = []
     path_to_id = {}
     
     for path in sorted_paths:
-        if len(path) == 0:
-            token_str = "<|MASK|>"
-        else:
-            path_str = "".join(str(x) for x in path)
-            token_str = f"<|G_{path_str}|>"
+        token_str = path_to_token_str(path)
         
-        # Reuse ID if exists, else assign next_id
         if token_str in existing_special_tokens:
-            token_id = existing_special_tokens[token_str]
-        else:
-            token_id = next_id
-            new_tokens_list.append(token_str)
-            next_id += 1
+            raise ValueError(f"Generated token name {token_str} already exists in base tokenizer.")
+
+        token_id = next_id
+        new_tokens_list.append(token_str)
+        next_id += 1
             
         path_to_id[path] = token_id
 
@@ -155,12 +157,9 @@ def identify_new_tokens(ancestry, base_tokenizer):
     
     # Combine special tokens
     final_special_tokens = existing_special_tokens.copy()
-    current_special_id = enc.n_vocab
-    
-    for t_str in new_tokens_list:
-        final_special_tokens[t_str] = existing_special_tokens.get(t_str, current_special_id)
-        if t_str not in existing_special_tokens:
-            current_special_id += 1
+    for path, tid in path_to_id.items():
+        t_str = path_to_token_str(path)
+        final_special_tokens[t_str] = tid
             
     return new_tokens_list, path_to_id, final_special_tokens
 
@@ -178,40 +177,50 @@ def create_new_tokenizer_encoding(base_tokenizer, final_special_tokens):
     )
     return new_enc
 
-def build_token_maps(ancestry, path_to_id, vocab_size, new_total_vocab, new_tokens_list, final_special_tokens):
-    """Builds the pure_to_noisy, tokens_to_pure, and noisy_level maps."""
+def build_token_maps(ancestry, path_to_id, vocab_size, new_total_vocab, new_tokens_list, final_special_tokens, max_fanout=1):
+    """Builds the pure_to_noisy, tokens_to_pure, and noisy_level maps.
+    
+    pure_to_noisy_map shape: (vocab_size, num_levels, max_fanout)
+    tokens_to_pure_map shape: (new_total_vocab,)
+    noisy_level_map shape: (new_total_vocab,)
+    """
     print("Building token maps...")
     
     ancestry_cpu = ancestry.cpu()
     N, D = ancestry_cpu.shape
     num_levels = D + 2 # 0 (pure) + D (groups) + 1 (root)
     
-    # 1. Pure to Noisy Map
-    pure_to_noisy_map = torch.full((vocab_size, num_levels), -1, dtype=torch.long)
-    # Level 0 is the token itself
-    pure_to_noisy_map[:vocab_size, 0] = torch.arange(vocab_size)
+    # 1. Pure to Noisy Map (3D for fanout)
+    pure_to_noisy_map = torch.full((vocab_size, num_levels, max_fanout), -1, dtype=torch.long)
+    # Level 0 is the token itself (fill all fanout slots so sampling is deterministic)
+    base_ids = torch.arange(vocab_size).unsqueeze(-1)
+    pure_to_noisy_map[:vocab_size, 0] = base_ids
     
     for i in range(N):
         full_path = tuple(ancestry_cpu[i].tolist())
+        path_len = len(full_path)
         
         # Level 1 (Finest group) -> Full path
-        if full_path in path_to_id:
+        if path_len > 0 and full_path in path_to_id:
             pure_to_noisy_map[i, 1] = path_to_id[full_path]
             
-        # Intermediate levels
-        # path len D -> level 1
-        # path len 0 -> level D+1
-        for d in range(D):
-            path_len = D - d
-            sub_path = full_path[:path_len]
-            level = d + 1
+        # Intermediate/coarser levels: peel off suffixes until length 1
+        for level in range(2, path_len + 1):
+            sub_path = full_path[: path_len - (level - 1)]
             if sub_path in path_to_id:
                 pure_to_noisy_map[i, level] = path_to_id[sub_path]
                 
-        # Root (Level D+1)
+        # Root (Level D+1). We keep this at the final column regardless of actual path length.
         root_path = ()
         if root_path in path_to_id:
              pure_to_noisy_map[i, D + 1] = path_to_id[root_path]
+
+    # For any populated slot, replicate into remaining fanout entries to avoid random -1 picks.
+    # This keeps behavior deterministic when only one option exists.
+    filled_mask = pure_to_noisy_map != -1
+    if max_fanout > 1:
+        first_values = pure_to_noisy_map[..., 0].unsqueeze(-1)
+        pure_to_noisy_map = torch.where(filled_mask, pure_to_noisy_map, first_values)
 
     # 2. Tokens to Pure Map
     tokens_to_pure_map = torch.arange(new_total_vocab, dtype=torch.long)
@@ -233,6 +242,13 @@ def build_token_maps(ancestry, path_to_id, vocab_size, new_total_vocab, new_toke
         "noisy_level_map": noisy_level_map
     }
 
+def compute_max_fanout(overlap_sizes):
+    """
+    Compute the max fanout (e.g., least common multiple of overlap sizes).
+    Placeholder for future overlapping-level support.
+    """
+    pass
+
 def save_artifacts(output_dir, new_enc, maps):
     """Saves the tokenizer and maps to disk."""
     print("Saving tokenizer and maps...")
@@ -251,7 +267,7 @@ def save_artifacts(output_dir, new_enc, maps):
     print(f"Saved token maps to {map_path}")
     print(f"New vocab size: {new_enc.n_vocab}")
 
-def generate_and_save_tokenizer(base_tokenizer, ancestry, k, output_dir):
+def generate_and_save_tokenizer(base_tokenizer, ancestry, k, output_dir, max_fanout=1):
     """
     Orchestrates the generation and saving of the new tokenizer and maps.
     """
@@ -268,7 +284,8 @@ def generate_and_save_tokenizer(base_tokenizer, ancestry, k, output_dir):
         base_tokenizer.get_vocab_size(), 
         new_enc.n_vocab, 
         new_tokens_list, 
-        final_special_tokens
+        final_special_tokens,
+        max_fanout=max_fanout
     )
     
     # 4. Save
