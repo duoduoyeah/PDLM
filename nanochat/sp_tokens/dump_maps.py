@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-Dump the three maps produced by inject_tokens.py:
+Dump the maps produced by inject_tokens.py:
 - pure_to_noisy_map
-- tokens_to_pure_map
 - noisy_level_map
 
 Usage examples:
@@ -39,7 +38,6 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     pure_to_noisy = maps["pure_to_noisy_map"]  # shape: (vocab_size, num_levels, fanout)
-    tokens_to_pure = maps["tokens_to_pure_map"]  # shape: (new_vocab,)
     noisy_level = maps["noisy_level_map"]  # shape: (new_vocab,)
 
     # Dump pure_to_noisy_map as tab-separated: token_id \t level \t fanout_idx \t target_id
@@ -51,12 +49,6 @@ def main():
                 for fi in range(fanout):
                     f.write(f"{tid}\t{lvl}\t{fi}\t{int(pure_to_noisy[tid, lvl, fi])}\n")
 
-    # Dump tokens_to_pure_map: token_id \t pure_id
-    ttp_path = os.path.join(args.output_dir, "tokens_to_pure_map.txt")
-    with open(ttp_path, "w", encoding="utf-8") as f:
-        for tid, pid in enumerate(tokens_to_pure.tolist()):
-            f.write(f"{tid}\t{pid}\n")
-
     # Dump noisy_level_map: token_id \t level
     nl_path = os.path.join(args.output_dir, "noisy_level_map.txt")
     with open(nl_path, "w", encoding="utf-8") as f:
@@ -64,7 +56,6 @@ def main():
             f.write(f"{tid}\t{lvl}\n")
 
     print(f"Wrote pure_to_noisy_map to {ptn_path}")
-    print(f"Wrote tokens_to_pure_map to {ttp_path}")
     print(f"Wrote noisy_level_map to {nl_path}")
 
 

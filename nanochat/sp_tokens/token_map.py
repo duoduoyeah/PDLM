@@ -19,8 +19,6 @@ class TokenMap:
         pure_to_noisy_map = maps["pure_to_noisy_map"]
         self.pure_to_noisy_map = pure_to_noisy_map.to(device)
         # shape all_tokens
-        self.tokens_to_pure_map = maps["tokens_to_pure_map"].to(device)
-        # shape all_tokens
         self.noisy_level_map = maps["noisy_level_map"].to(device)
         
         self.device = device
@@ -60,9 +58,8 @@ class TokenMap:
         return self._sample_fanout(options, noisy_ids)
     
     def is_all_pure_tokens(self, ids:torch.tensor) -> bool:
-        pure_ids = self.tokens_to_pure_map[ids]
-        # Compare pure_ids with ids, if every item is the same, then all tokens are pure.
-        return torch.all(torch.eq(pure_ids, ids)).item()
+        # All tokens are pure if their noisy level is 0
+        return torch.all(self.noisy_level_map[ids] == 0).item()
 
     def get_random_noisy_level(self, ids: torch.tensor) -> torch.tensor:
         # Return random levels between 0 and max_level (inclusive)

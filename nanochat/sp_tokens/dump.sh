@@ -7,9 +7,9 @@ OUT_DIR=${2:-temp}
 mkdir -p "$OUT_DIR"
 
 # Dump token IDs
-python nanochat/sp_tokens/dump_token_ids.py --tokenizer-dir "$TOKENIZER_DIR" --output "$OUT_DIR/token_dump.txt"
+uv run -m nanochat.sp_tokens.dump_token_ids --tokenizer-dir "$TOKENIZER_DIR" --output "$OUT_DIR/token_dump.txt"
 
 # Dump maps
-python nanochat/sp_tokens/dump_maps.py --tokenizer-dir "$TOKENIZER_DIR" --output-dir "$OUT_DIR/maps"
+uv run -m nanochat.sp_tokens.dump_maps --tokenizer-dir "$TOKENIZER_DIR" --output-dir "$OUT_DIR/maps"
 
 echo "Dumps written under $OUT_DIR"

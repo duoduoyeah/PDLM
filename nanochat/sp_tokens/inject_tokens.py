@@ -221,7 +221,6 @@ def build_token_maps(ancestry, path_to_id, vocab_size, new_total_vocab, new_toke
     """Builds the pure_to_noisy, tokens_to_pure, and noisy_level maps.
     
     pure_to_noisy_map shape: (vocab_size, num_levels, max_fanout)
-    tokens_to_pure_map shape: (new_total_vocab,)
     noisy_level_map shape: (new_total_vocab,)
     """
     print("Building token maps...")
@@ -291,14 +290,7 @@ def build_token_maps(ancestry, path_to_id, vocab_size, new_total_vocab, new_toke
     if torch.any(pure_to_noisy_map[:N] == -1):
         raise ValueError("pure_to_noisy_map contains unset entries for text tokens.")
 
-    # 2. Tokens to Pure Map
-    tokens_to_pure_map = torch.arange(new_total_vocab, dtype=torch.long)
-    # Mark new group tokens as -1
-    for t_str in new_tokens_list:
-        tid = final_special_tokens[t_str]
-        tokens_to_pure_map[tid] = -1
-
-    # 3. Noisy Level Map
+    # 2. Noisy Level Map
     noisy_level_map = torch.zeros(new_total_vocab, dtype=torch.long)
     base_root_level = D + 1
     root_level = base_root_level + len(overlap_levels)
@@ -315,7 +307,6 @@ def build_token_maps(ancestry, path_to_id, vocab_size, new_total_vocab, new_toke
         
     return {
         "pure_to_noisy_map": pure_to_noisy_map,
-        "tokens_to_pure_map": tokens_to_pure_map,
         "noisy_level_map": noisy_level_map
     }
 
