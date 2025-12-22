@@ -41,7 +41,7 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     pure_to_noisy = maps["pure_to_noisy_map"]  # shape: (vocab_size, num_levels, fanout)
-    noisy_level = maps["noisy_level_map"]  # shape: (new_vocab,)
+    noisy_level = maps["noisy_level_map"]  # shape: (new_vocab, 2)
 
     # Load tokenizer to decode tokens
     tokenizer = RustBPETokenizer.from_directory(tokenizer_dir)
@@ -56,11 +56,11 @@ def main():
                 for fi in range(fanout):
                     f.write(f"{tid}\t{lvl}\t{fi}\t{int(pure_to_noisy[tid, lvl, fi])}\n")
 
-    # Dump noisy_level_map: token_id \t level
+    # Dump noisy_level_map: token_id \t low_level \t high_level
     nl_path = os.path.join(args.output_dir, "noisy_level_map.txt")
     with open(nl_path, "w", encoding="utf-8") as f:
-        for tid, lvl in enumerate(noisy_level.tolist()):
-            f.write(f"{tid}\t{lvl}\n")
+        for tid, lvls in enumerate(noisy_level.tolist()):
+            f.write(f"{tid}\t{lvls[0]}\t{lvls[1]}\n")
 
     # Invert pure_to_noisy: noisy_token_id -> list of pure token ids (deduped)
     inverted = {}

@@ -42,7 +42,7 @@ def get_model_and_tokenizer():
 # Hierarchical Clustering Logic
 # --------------------------------------- 
 
-def perform_hierarchical_kmeans(X, k=4, max_depth=6):
+def perform_hierarchical_kmeans(X, k=4, max_depth=6, min_group_size=8):
     """
     Performs hierarchical k-means clustering.
     Returns:
@@ -56,7 +56,7 @@ def perform_hierarchical_kmeans(X, k=4, max_depth=6):
     # Start with the global group containing all tokens
     current_groups = [(X, torch.arange(N, device=X.device))]
     
-    print(f"Starting hierarchical k-means (k={k}, depth={max_depth}) on {N} tokens...")
+    print(f"Starting hierarchical k-means (k={k}, depth={max_depth}, min_group_size={min_group_size}) on {N} tokens...")
 
     for depth in range(max_depth):
         print(f"Processing Depth {depth}...")
@@ -66,6 +66,9 @@ def perform_hierarchical_kmeans(X, k=4, max_depth=6):
             # If group is too small (<= k), we can't meaningfully split it into k clusters
             # For consistency, we just assign them to cluster 0 repeatedly or handle gracefully.
             # Here we assign them to '0' and pass them down.
+            if len(data_subset) <= min_group_size:
+                # Do not split further; leave remaining depths as -1
+                continue
             if len(data_subset) < k:
                 ancestry[original_indices, depth] = 0
                 next_level_groups.append((data_subset, original_indices))
@@ -114,6 +117,7 @@ def identify_new_tokens(ancestry, base_tokenizer):
     ancestry_cpu = ancestry.cpu()
     N, D = ancestry_cpu.shape
     
+    path_len_hist = {}
     for i in range(N):
         path = []
         for d in range(D):
@@ -121,6 +125,11 @@ def identify_new_tokens(ancestry, base_tokenizer):
             if cluster_id == -1: break 
             path.append(cluster_id)
             unique_paths.add(tuple(path))
+        path_len_hist[len(path)] = path_len_hist.get(len(path), 0) + 1
+
+    print("Path length histogram (tokens per path length):")
+    for plen in sorted(path_len_hist):
+        print(f"  len={plen}: {path_len_hist[plen]}")
             
     # 2. Sort paths and create token strings
     # Scheme: Root -> "<|MASK|>", Path (0, 3) -> "<|G_03|>"
@@ -229,6 +238,7 @@ def build_token_maps(ancestry, path_to_id, vocab_size, new_total_vocab, new_toke
     ancestry_cpu = ancestry.cpu()
     N, D = ancestry_cpu.shape
     num_levels = D + 2 + len(overlap_levels) # 0 (pure) + D (groups) + overlap + root
+    base_root_level = D + 1
     # sanity: fanout should cover overlap fanouts
     for lvl in overlap_levels:
         if "fanout" in lvl and max_fanout % lvl["fanout"] != 0:
@@ -257,28 +267,44 @@ def build_token_maps(ancestry, path_to_id, vocab_size, new_total_vocab, new_toke
     pure_to_noisy_map[:vocab_size, 0] = base_ids
     
     for i in range(N):
-        full_path = tuple(ancestry_cpu[i].tolist())
+        path_list = []
+        for d in range(D):
+            cid = ancestry_cpu[i, d].item()
+            if cid == -1:
+                break
+            path_list.append(cid)
+        full_path = tuple(path_list)
         path_len = len(full_path)
-        
-        # Level 1 (Finest group) -> Full path
-        if path_len > 0 and full_path in path_to_id:
-            pure_to_noisy_map[i, 1] = path_to_id[full_path]
-            
-        # Intermediate/coarser levels: peel off suffixes until length 1
-        for level in range(2, path_len + 1):
-            sub_path = full_path[: path_len - (level - 1)]
-            if sub_path in path_to_id:
-                pure_to_noisy_map[i, level] = path_to_id[sub_path]
-                
-        # Root (Level D+1). We keep this at the final column regardless of actual path length.
+
         root_path = ()
-        if root_path in path_to_id:
-             pure_to_noisy_map[i, D + 1 + len(overlap_levels)] = path_to_id[root_path]
+        root_id = path_to_id.get(root_path)
+
+        if path_len == 0:
+            # No group assignments; backfill all levels with root if available
+            if root_id is not None:
+                for level in range(1, base_root_level):
+                    pure_to_noisy_map[i, level] = root_id
+        else:
+            full_id = path_to_id[full_path]
+            min_level = base_root_level - path_len
+            # Fill missing finer levels with the nearest available group
+            for level in range(1, min_level + 1):
+                pure_to_noisy_map[i, level] = full_id
+            # Fill remaining coarser levels using available subpaths
+            for level in range(min_level + 1, base_root_level):
+                sub_len = base_root_level - level
+                sub_path = full_path[:sub_len]
+                sub_id = path_to_id.get(sub_path, full_id)
+                pure_to_noisy_map[i, level] = sub_id
+                
+        # Root (final level, after overlaps)
+        if root_id is not None:
+             pure_to_noisy_map[i, base_root_level + len(overlap_levels)] = root_id
 
         # Overlap levels (after the base path-derived levels, before root)
         base_label = full_path[0] if path_len > 0 else None
         for idx, level in enumerate(overlap_levels):
-            level_index = D + 1 + idx
+            level_index = base_root_level + idx
             # Collect entries that include this base label
             candidates = [tid for members, tid, _ in level["entries"] if base_label in members]
             if not candidates:
@@ -290,25 +316,38 @@ def build_token_maps(ancestry, path_to_id, vocab_size, new_total_vocab, new_toke
     if torch.any(pure_to_noisy_map[:N] == -1):
         raise ValueError("pure_to_noisy_map contains unset entries for text tokens.")
 
-    # 2. Noisy Level Map
-    noisy_level_map = torch.zeros(new_total_vocab, dtype=torch.long)
-    base_root_level = D + 1
-    root_level = base_root_level + len(overlap_levels)
-    for path, tid in path_to_id.items():
-        if len(path) == 0:
-            level = root_level
-        else:
-            level = base_root_level - len(path)
-        noisy_level_map[tid] = level
-    for idx, level_def in enumerate(overlap_levels):
-        level_index = D + 1 + idx
-        for _, tid, _ in level_def["entries"]:
-            noisy_level_map[tid] = level_index
+    # 2. Noisy Level Map (low_level, high_level)
+    noisy_level_map = compute_noisy_level_ranges(pure_to_noisy_map, new_total_vocab)
         
     return {
         "pure_to_noisy_map": pure_to_noisy_map,
         "noisy_level_map": noisy_level_map
     }
+
+def compute_noisy_level_ranges(pure_to_noisy_map, new_total_vocab):
+    """Compute (low_level, high_level) per token based on where it appears in pure_to_noisy_map."""
+    noisy_level_map = torch.zeros((new_total_vocab, 2), dtype=torch.long)
+    # Track min/max levels where each token appears
+    found = torch.zeros(new_total_vocab, dtype=torch.bool)
+    num_levels = pure_to_noisy_map.shape[1]
+
+    for level in range(num_levels):
+        level_tokens = pure_to_noisy_map[:, level, :].reshape(-1)
+        unique_ids = torch.unique(level_tokens)
+        for tid in unique_ids.tolist():
+            if tid < 0 or tid >= new_total_vocab:
+                continue
+            if not found[tid]:
+                noisy_level_map[tid, 0] = level
+                noisy_level_map[tid, 1] = level
+                found[tid] = True
+            else:
+                if level < noisy_level_map[tid, 0]:
+                    noisy_level_map[tid, 0] = level
+                if level > noisy_level_map[tid, 1]:
+                    noisy_level_map[tid, 1] = level
+
+    return noisy_level_map
 
 def compute_max_fanout(overlap_sizes):
     """
@@ -403,7 +442,7 @@ if __name__ == "__main__":
     # Level 5: 4 groups (top base groups before overlaps)
     k = 4
     depth = 5
-    ancestry = perform_hierarchical_kmeans(lm_head_embeddings, k=k, max_depth=depth)
+    ancestry = perform_hierarchical_kmeans(lm_head_embeddings, k=k, max_depth=depth, min_group_size=8)
     
     # 4. Generate Group Tokens & Save New Tokenizer
     new_tokenizer_dir = os.path.join(os.environ["NANOCHAT_BASE_DIR"], "tokenizer")

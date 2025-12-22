@@ -18,7 +18,7 @@ class TokenMap:
         # shape vocab_size, noisy_depth, fanout
         pure_to_noisy_map = maps["pure_to_noisy_map"]
         self.pure_to_noisy_map = pure_to_noisy_map.to(device)
-        # shape all_tokens
+        # shape all_tokens, 2 (low_level, high_level)
         self.noisy_level_map = maps["noisy_level_map"].to(device)
         
         self.device = device
@@ -50,8 +50,8 @@ class TokenMap:
         return self._sample_fanout(options, pure_ids)
         
     def transit_noisy_tokens(self, pure_ids: torch.tensor, noisy_ids: torch.tensor):
-        # noisy_ids -> noisy_levels
-        noisy_levels = self.noisy_level_map[noisy_ids]
+        # noisy_ids -> noisy_levels, use the lowest level 
+        noisy_levels = self.noisy_level_map[noisy_ids, 0]
         noisy_levels[noisy_levels >= 1] = -1
         # pure ids, noisy_levels -> output_scratch_ids
         options = self.pure_to_noisy_map[pure_ids, noisy_levels]
@@ -59,7 +59,7 @@ class TokenMap:
     
     def is_all_pure_tokens(self, ids:torch.tensor) -> bool:
         # All tokens are pure if their noisy level is 0
-        return torch.all(self.noisy_level_map[ids] == 0).item()
+        return torch.all(self.noisy_level_map[ids, 0] == 0).item()
 
     def get_random_noisy_level(self, ids: torch.tensor, step: int = None, total_steps: int = None) -> torch.tensor:
         """
