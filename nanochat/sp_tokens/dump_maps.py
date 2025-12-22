@@ -4,6 +4,8 @@ Dump the maps produced by inject_tokens.py:
 - pure_to_noisy_map
 - noisy_level_map
 
+Additional inverted view: for each noisy token, list the pure token IDs that map to it.
+
 Usage examples:
   python nanochat/sp_tokens/dump_maps.py --tokenizer-dir path/to/tokenizer --output-dir out_dir
 Defaults to base_dir/tokenizer if tokenizer-dir is not provided.
@@ -13,6 +15,7 @@ import argparse
 import torch
 
 from nanochat.common import get_base_dir
+from nanochat.tokenizer import RustBPETokenizer
 
 
 def main():
@@ -40,6 +43,10 @@ def main():
     pure_to_noisy = maps["pure_to_noisy_map"]  # shape: (vocab_size, num_levels, fanout)
     noisy_level = maps["noisy_level_map"]  # shape: (new_vocab,)
 
+    # Load tokenizer to decode tokens
+    tokenizer = RustBPETokenizer.from_directory(tokenizer_dir)
+    enc = tokenizer.enc
+
     # Dump pure_to_noisy_map as tab-separated: token_id \t level \t fanout_idx \t target_id
     ptn_path = os.path.join(args.output_dir, "pure_to_noisy_map.txt")
     with open(ptn_path, "w", encoding="utf-8") as f:
@@ -55,8 +62,23 @@ def main():
         for tid, lvl in enumerate(noisy_level.tolist()):
             f.write(f"{tid}\t{lvl}\n")
 
+    # Invert pure_to_noisy: noisy_token_id -> list of pure token ids (deduped)
+    inverted = {}
+    vocab_size = pure_to_noisy.shape[0]
+    for pure_id in range(vocab_size):
+        targets = set(int(t) for t in pure_to_noisy[pure_id].reshape(-1).tolist())
+        for t in targets:
+            inverted.setdefault(t, []).append(pure_id)
+
+    inv_path = os.path.join(args.output_dir, "noisy_to_pure.txt")
+    with open(inv_path, "w", encoding="utf-8") as f:
+        for noisy_id, pure_ids in sorted(inverted.items()):
+            token_str = enc.decode([noisy_id]) if 0 <= noisy_id < enc.n_vocab else "<out_of_range>"
+            f.write(f"{token_str}\t{noisy_id}\t{pure_ids}\n")
+
     print(f"Wrote pure_to_noisy_map to {ptn_path}")
     print(f"Wrote noisy_level_map to {nl_path}")
+    print(f"Wrote inverted map to {inv_path}")
 
 
 if __name__ == "__main__":
