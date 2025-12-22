@@ -116,20 +116,30 @@ def identify_new_tokens(ancestry, base_tokenizer):
     
     ancestry_cpu = ancestry.cpu()
     N, D = ancestry_cpu.shape
-    
+
     path_len_hist = {}
+    path_counts = {}
     for i in range(N):
         path = []
         for d in range(D):
             cluster_id = ancestry_cpu[i, d].item()
             if cluster_id == -1: break 
             path.append(cluster_id)
-            unique_paths.add(tuple(path))
+            path_tuple = tuple(path)
+            unique_paths.add(path_tuple)
+            path_counts[path_tuple] = path_counts.get(path_tuple, 0) + 1
         path_len_hist[len(path)] = path_len_hist.get(len(path), 0) + 1
 
     print("Path length histogram (tokens per path length):")
     for plen in sorted(path_len_hist):
         print(f"  len={plen}: {path_len_hist[plen]}")
+
+    # Drop singleton groups (paths with only one token), but keep root
+    if path_counts:
+        before = len(unique_paths)
+        unique_paths = {p for p in unique_paths if p == () or path_counts.get(p, 0) > 1}
+        after = len(unique_paths)
+        print(f"Filtered singleton groups: {before - after} removed, {after} remaining.")
             
     # 2. Sort paths and create token strings
     # Scheme: Root -> "<|MASK|>", Path (0, 3) -> "<|G_03|>"
@@ -285,17 +295,35 @@ def build_token_maps(ancestry, path_to_id, vocab_size, new_total_vocab, new_toke
                 for level in range(1, base_root_level):
                     pure_to_noisy_map[i, level] = root_id
         else:
-            full_id = path_to_id[full_path]
-            min_level = base_root_level - path_len
-            # Fill missing finer levels with the nearest available group
-            for level in range(1, min_level + 1):
-                pure_to_noisy_map[i, level] = full_id
-            # Fill remaining coarser levels using available subpaths
-            for level in range(min_level + 1, base_root_level):
-                sub_len = base_root_level - level
-                sub_path = full_path[:sub_len]
-                sub_id = path_to_id.get(sub_path, full_id)
-                pure_to_noisy_map[i, level] = sub_id
+            # Find the longest existing prefix (some paths may be filtered out)
+            full_id = None
+            for plen in range(path_len, 0, -1):
+                candidate = full_path[:plen]
+                if candidate in path_to_id:
+                    full_id = path_to_id[candidate]
+                    path_len = plen
+                    full_path = candidate
+                    break
+            if full_id is None:
+                # Fall back to root if no prefix exists
+                full_id = root_id
+                path_len = 0
+
+            if path_len == 0:
+                if root_id is not None:
+                    for level in range(1, base_root_level):
+                        pure_to_noisy_map[i, level] = root_id
+            else:
+                min_level = base_root_level - path_len
+                # Fill missing finer levels with the nearest available group
+                for level in range(1, min_level + 1):
+                    pure_to_noisy_map[i, level] = full_id
+                # Fill remaining coarser levels using available subpaths
+                for level in range(min_level + 1, base_root_level):
+                    sub_len = base_root_level - level
+                    sub_path = full_path[:sub_len]
+                    sub_id = path_to_id.get(sub_path, full_id)
+                    pure_to_noisy_map[i, level] = sub_id
                 
         # Root (final level, after overlaps)
         if root_id is not None:
