@@ -160,8 +160,18 @@ if resuming:
 # Initialize the DataLoaders for train/val
 tokens_dir = os.path.join(base_dir, "tokenized_data")
 dataloader_resume_state_dict = None if not resuming else meta_data["dataloader_state_dict"]
-train_loader = tokenizing_distributed_data_loader_with_state(device_batch_size, max_seq_len, split="train", device=device, resume_state_dict=dataloader_resume_state_dict)
-build_val_loader = lambda: tokenizing_distributed_data_loader(device_batch_size, max_seq_len, split="val", device=device)
+noise_total_steps = 16
+train_loader = tokenizing_distributed_data_loader_with_state(
+    device_batch_size,
+    max_seq_len,
+    split="train",
+    device=device,
+    resume_state_dict=dataloader_resume_state_dict,
+    noise_total_steps=noise_total_steps,
+)
+build_val_loader = lambda: tokenizing_distributed_data_loader(
+    device_batch_size, max_seq_len, split="val", device=device, noise_total_steps=noise_total_steps
+)
 x, y, dataloader_state_dict = next(train_loader) # kick off load of the very first batch of data
 
 # -----------------------------------------------------------------------------

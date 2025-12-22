@@ -7,8 +7,9 @@ import pyarrow.parquet as pq
 from nanochat.common import get_dist_info
 from nanochat.dataset import list_parquet_files
 from nanochat.tokenizer import get_tokenizer
+from nanochat.sp_tokens.token_map import get_token_map
 
-def tokenizing_distributed_data_loader_with_state(B, T, split, tokenizer_threads=4, tokenizer_batch_size=128, device="cuda", resume_state_dict=None):
+def tokenizing_distributed_data_loader_with_state(B, T, split, tokenizer_threads=4, tokenizer_batch_size=128, device="cuda", resume_state_dict=None, noise_total_steps=None):
     """
     Stream pretraining text from parquet files, tokenize, yield training batches.
 
@@ -65,9 +66,14 @@ def tokenizing_distributed_data_loader_with_state(B, T, split, tokenizer_threads
     # get the tokenizer and the bos token
     tokenizer = get_tokenizer()
     bos_token = tokenizer.get_bos_token_id()
+    token_map = get_token_map(device="cpu")
     # scratch buffer holds the tokens for one iteration
     token_buffer = deque() # we stream tokens on the right and pop from the left
     while True:
+        # pick a random training step surrogate for noise scheduling if requested
+        noise_step = None
+        if noise_total_steps is not None:
+            noise_step = torch.randint(1, noise_total_steps + 1, (1,)).item()
         # Accumulate enough tokens for one iteration before yielding.
         while len(token_buffer) < needed_tokens:
             doc_batch, (pq_idx, rg_idx) = next(batches)
@@ -81,8 +87,8 @@ def tokenizing_distributed_data_loader_with_state(B, T, split, tokenizer_threads
         # Create the inputs/targets as 1D tensors
         targets_cpu = torch.tensor(tokens, dtype=torch.long, pin_memory=use_cuda_optimizations) # in PyTorch, long=int64
         
-        noisy_levels = get_random_noisy_level(targets_cpu)
-        inputs_cpu = noise_tokens(targets_cpu, noisy_levels)
+        noisy_levels = token_map.get_random_noisy_level(targets_cpu, step=noise_step, total_steps=noise_total_steps)
+        inputs_cpu = token_map.noise_tokens(targets_cpu, noisy_levels)
         
         # Reshape to 2D and move to GPU async
         inputs = inputs_cpu.view(B, T).to(device=device, non_blocking=use_cuda_optimizations)

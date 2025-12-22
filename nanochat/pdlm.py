@@ -14,6 +14,7 @@ import torch.nn.functional as F
 from nanochat.common import get_dist_info
 from nanochat.muon import Muon, DistMuon
 from nanochat.adamw import DistAdamW
+from nanochat.sp_tokens.token_map import get_token_map
 
 @dataclass
 class PDLMConfig:
@@ -141,6 +142,7 @@ class PDLM(nn.Module):
         cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim)
         self.register_buffer("cos", cos, persistent=False) # persistent=False means it's not saved to the checkpoint
         self.register_buffer("sin", sin, persistent=False)
+        self._token_map = None
 
     def init_weights(self):
         self.apply(self._init_weights)
@@ -274,6 +276,8 @@ class PDLM(nn.Module):
         """
         assert isinstance(tokens, list) # B == 1
         device = self.get_device()
+        if self._token_map is None or self._token_map.device != device:
+            self._token_map = get_token_map(device=device)
 
         ids = torch.tensor([tokens], dtype=torch.long, device=device) # add batch dim
         mask_id = -1 # This should be the mask_id later
@@ -284,9 +288,9 @@ class PDLM(nn.Module):
             logits = logits[:, -bucket_size:, :] # (B, bucket_size, vocab_size)
             next_ids = torch.argmax(logits, dim=-1, keepdim=True) # (B, bucket)
             noisy_ids = ids[:, -bucket_size:] # (B, bucket)
-            next_ids = transit_noisy_tokens(next_ids.squeeze(-1), noisy_ids)
+            next_ids = self._token_map.transit_noisy_tokens(next_ids.squeeze(-1), noisy_ids)
             ids = torch.cat((ids[:, :-next_ids.size(1)], next_ids), dim=1)
-            if is_all_pure_tokens(next_ids):
+            if self._token_map.is_all_pure_tokens(next_ids):
                 if ids.numel() >= max_tokens:
                     break
                 else:
