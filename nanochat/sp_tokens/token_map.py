@@ -63,9 +63,10 @@ class TokenMap:
 
     def get_random_noisy_level(self, ids: torch.tensor, step: int = None, total_steps: int = None) -> torch.tensor:
         """
+        TODO
         Sample noisy levels per token.
         - If step/total_steps are provided, draw from Binomial(max_level, p=step/total_steps) per element.
-        - Otherwise, uniform random in [0, max_level].
+        - Otherwise, uniform random in [1, max_level].
         """
         if step is None or total_steps is None:
             fixed_level = torch.randint(1, self.max_level + 1, ()).item()
@@ -75,6 +76,7 @@ class TokenMap:
             prob = max(0.0, min(1.0, float(step) / float(total_steps)))
             dist = torch.distributions.Binomial(total_count=self.max_level, probs=prob)
             levels = dist.sample(ids.shape).to(device=ids.device, dtype=ids.dtype)
+            levels = torch.clamp(levels, min=1) # at least add one noisy
         if ids.is_pinned():
             levels = levels.pin_memory()
         return levels
