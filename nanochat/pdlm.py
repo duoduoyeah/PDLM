@@ -25,7 +25,7 @@ class PDLMConfig:
     n_head: int = 6 # number of query heads
     n_kv_head: int = 6 # number of key/value heads (GQA)
     n_embd: int = 768
-
+    block_size: int = 2
 
 def norm(x):
     # Purely functional rmsnorm with no learnable params
