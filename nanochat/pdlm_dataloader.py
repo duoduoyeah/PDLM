@@ -99,10 +99,10 @@ def tokenizing_distributed_data_loader_with_state(
         targets_cpu = targets_cpu.view(B, T)
         # --------------------
         # debug
-        vocab_limit = token_map.pure_to_noisy_map.shape[0]
-        if (targets_cpu >= vocab_limit).any():
+        pure_vocab_limit = token_map.pure_to_noisy_map.shape[0]
+        if (targets_cpu >= pure_vocab_limit).any():
             bad_max = targets_cpu.max().item()
-            raise ValueError(f"Token id out of range: max={bad_max}, vocab_limit={vocab_limit}")
+            raise ValueError(f"Token id out of range: max={bad_max}, pure_vocab_limit={pure_vocab_limit}")
         # -------------------
         noisy_levels = token_map.get_random_noisy_level(
             targets_cpu,
@@ -111,6 +111,11 @@ def tokenizing_distributed_data_loader_with_state(
             prefix_pure_tokens=prefix_pure_tokens,
         )
         inputs_cpu = token_map.noise_tokens(targets_cpu, noisy_levels)
+        overall_vocab_size = tokenizer.get_vocab_size()
+        if (inputs_cpu < 0).any() or (inputs_cpu >= overall_vocab_size).any():
+            bad_min = inputs_cpu.min().item()
+            bad_max = inputs_cpu.max().item()
+            raise ValueError(f"Noisy token id out of range: min={bad_min}, max={bad_max}, vocab_size={overall_vocab_size}")
         
         # Reshape to 2D and move to GPU async
         inputs = inputs_cpu.to(device=device, non_blocking=use_cuda_optimizations)
