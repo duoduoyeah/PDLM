@@ -17,6 +17,7 @@ from nanochat.tokenizer import get_tokenizer, get_token_bytes
 from nanochat.checkpoint_manager import save_checkpoint, load_checkpoint
 from nanochat.loss_eval import evaluate_bpb
 from nanochat.engine import Engine
+from nanochat.attn_masks import gen_mask
 from scripts.base_eval import evaluate_model
 print_banner()
 
@@ -28,6 +29,8 @@ device_type = "" # cuda|cpu|mps (empty => autodetect good device type default, i
 # Model architecture
 depth = 20 # the depth of the Transformer model to train, rest of the kwargs are derived
 max_seq_len = 1024 # max context length
+block_size = 8 # the training use block size
+prefix_pure_tokens = 1 # pure prefix tokens (0 = disabled)
 # Training horizon. Only one of these 3 will be used, in this order of precedence.
 num_iterations = -1 # explicit number of steps of the optimization (-1 = disable)
 target_flops = -1.0 # calculate num_iterations to reach target_flops. Useful for scaling laws experiments (-1 = disable)
@@ -58,6 +61,7 @@ config_keys = [k for k,v in globals().items() if not k.startswith('_') and isins
 exec(open(os.path.join('nanochat', 'configurator.py')).read()) # overrides from command line or config file
 user_config = {k: globals()[k] for k in config_keys} # will be useful for logging
 # -----------------------------------------------------------------------------
+assert 0 <= prefix_pure_tokens <= block_size <= max_seq_len, "Expected prefix_pure_tokens <= block_size <= max_seq_len"
 
 # Compute init
 device_type = autodetect_device_type() if device_type == "" else device_type
@@ -93,7 +97,9 @@ tokens_per_fwdbwd = device_batch_size * max_seq_len # tokens per iteration for a
 world_tokens_per_fwdbwd = tokens_per_fwdbwd * ddp_world_size # total tokens per iteration for all ranks
 assert total_batch_size % world_tokens_per_fwdbwd == 0
 grad_accum_steps = total_batch_size // world_tokens_per_fwdbwd
-print0(f"Tokens / micro-batch / rank: {device_batch_size} x {max_seq_len} = {tokens_per_fwdbwd:,}")
+print0(f"Tokens / micro-batch / rank (L): {device_batch_size} x {max_seq_len} = {tokens_per_fwdbwd:,}")
+tokens_per_fwdbwd_twice = device_batch_size * max_seq_len * 2
+print0(f"Tokens / micro-batch / rank (2L): {device_batch_size} x {max_seq_len * 2} = {tokens_per_fwdbwd_twice:,}")
 print0(f"Tokens / micro-batch: {world_tokens_per_fwdbwd:,}")
 print0(f"Total batch size {total_batch_size:,} => gradient accumulation steps: {grad_accum_steps}")
 
@@ -101,12 +107,21 @@ print0(f"Total batch size {total_batch_size:,} => gradient accumulation steps: {
 # Initialize the Model
 
 # Create a new model with random weights
-model_config_kwargs = dict(sequence_len=max_seq_len, vocab_size=vocab_size, n_layer=num_layers, n_head=num_heads, n_kv_head=num_kv_heads, n_embd=model_dim)
+model_config_kwargs = dict(
+    sequence_len=max_seq_len,
+    vocab_size=vocab_size,
+    n_layer=num_layers,
+    n_head=num_heads,
+    n_kv_head=num_kv_heads,
+    n_embd=model_dim,
+    prefix_pure_tokens=prefix_pure_tokens,
+)
 with torch.device("meta"):
     model_config = PDLMConfig(**model_config_kwargs)
     model = PDLM(model_config)
 model.to_empty(device=device)
 model.init_weights()
+block_diff_mask = gen_mask(max_seq_len, block_size, attn_backend="sdpa").to(device=device)
 
 # If we are resuming, overwrite the model parameters with those of the checkpoint
 base_dir = get_base_dir()
@@ -168,9 +183,15 @@ train_loader = tokenizing_distributed_data_loader_with_state(
     device=device,
     resume_state_dict=dataloader_resume_state_dict,
     noise_total_steps=noise_total_steps,
+    prefix_pure_tokens=max(prefix_pure_tokens, 0),
 )
 build_val_loader = lambda: tokenizing_distributed_data_loader(
-    device_batch_size, max_seq_len, split="val", device=device, noise_total_steps=noise_total_steps
+    device_batch_size,
+    max_seq_len,
+    split="val",
+    device=device,
+    noise_total_steps=noise_total_steps,
+    prefix_pure_tokens=max(prefix_pure_tokens, 0),
 )
 x, y, dataloader_state_dict = next(train_loader) # kick off load of the very first batch of data
 
@@ -223,7 +244,7 @@ while True:
         val_loader = build_val_loader()
         eval_steps = eval_tokens // (device_batch_size * max_seq_len * ddp_world_size)
         with autocast_ctx:
-            val_bpb = evaluate_bpb(model, val_loader, eval_steps, token_bytes)
+            val_bpb = evaluate_bpb(model, val_loader, eval_steps, token_bytes, attn_mask=block_diff_mask)
         print0(f"Step {step:05d} | Validation bpb: {val_bpb:.4f}")
         if val_bpb < min_val_bpb:
             min_val_bpb = val_bpb
@@ -307,7 +328,7 @@ while True:
     t0 = time.time()
     for micro_step in range(grad_accum_steps):
         with autocast_ctx:
-            loss = model(x, y)
+            loss = model(x, y, attn_mask=block_diff_mask)
         train_loss = loss.detach() # for logging
         loss = loss / grad_accum_steps # each .backward() is a grad sum => normalize loss here
         loss.backward()

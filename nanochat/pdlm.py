@@ -25,8 +25,8 @@ class PDLMConfig:
     n_head: int = 6 # number of query heads
     n_kv_head: int = 6 # number of key/value heads (GQA)
     n_embd: int = 768
-    block_size: int = 2
-
+    prefix_pure_tokens: int = -1 # training, the number of pure prefix tokens
+    
 def norm(x):
     # Purely functional rmsnorm with no learnable params
     return F.rms_norm(x, (x.size(-1),))
@@ -57,7 +57,7 @@ class CausalSelfAttention(nn.Module):
         self.c_v = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
         self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
 
-    def forward(self, x, cos_sin, kv_cache):
+    def forward(self, x, cos_sin, kv_cache, attn_mask=None):
         B, T, C = x.size()
 
         # Project the input to get queries, keys, and values
@@ -79,7 +79,9 @@ class CausalSelfAttention(nn.Module):
 
         # Attention: queries attend to keys/values autoregressively. A few cases to handle:
         enable_gqa = self.n_head != self.n_kv_head # Group Query Attention (GQA): duplicate key/value heads to match query heads if desired
-        if kv_cache is None or Tq == Tk:
+        if attn_mask is not None:
+            y = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, is_causal=False, enable_gqa=enable_gqa)
+        elif kv_cache is None or Tq == Tk:
             # During training (no KV cache), attend as usual with causal attention
             # And even if there is KV cache, we can still use this simple version when Tq == Tk
             y = F.scaled_dot_product_attention(q, k, v, is_causal=True, enable_gqa=enable_gqa)
@@ -122,8 +124,8 @@ class Block(nn.Module):
         self.attn = CausalSelfAttention(config, layer_idx)
         self.mlp = MLP(config)
 
-    def forward(self, x, cos_sin, kv_cache):
-        x = x + self.attn(norm(x), cos_sin, kv_cache)
+    def forward(self, x, cos_sin, kv_cache, attn_mask=None):
+        x = x + self.attn(norm(x), cos_sin, kv_cache, attn_mask=attn_mask)
         x = x + self.mlp(norm(x))
         return x
 
@@ -233,22 +235,35 @@ class PDLM(nn.Module):
                 group["initial_lr"] = group["lr"]
         return optimizers
 
-    def forward(self, idx, targets=None, kv_cache=None, loss_reduction='mean'):
-        B, T = idx.size()
-
+    def forward(self, idx, targets=None, kv_cache=None, loss_reduction='mean', attn_mask=None):
+        """Training: idx/targets are length L; we concat to 2L inside this and apply block mask."""
+        if targets is not None:
+            B, T = idx.size()
+            assert attn_mask is not None, "Mask currently should not be None"
+            assert self.config.sequence_len == T, "use double seq length when train"
+            assert targets.size(1) == T, "Targets should match the base sequence length"
+            idx = torch.cat((idx, targets), dim=1)
+        else:
+            B, T = idx.size()
         # Grab the rotary embeddings for the current sequence length (they are of shape (1, seq_len, 1, head_dim/2))
         assert T <= self.cos.size(1), f"Sequence length grew beyond the rotary embeddings cache: {T} > {self.cos.size(1)}"
         assert idx.device == self.cos.device, f"Rotary embeddings and idx are on different devices: {idx.device} != {self.cos.device}"
         assert self.cos.dtype == torch.bfloat16, "Rotary embeddings must be in bfloat16"
+        
         # if kv cache exists, we need to offset the rotary embeddings to the current position in the cache
         T0 = 0 if kv_cache is None else kv_cache.get_pos()
-        cos_sin = self.cos[:, T0:T0+T], self.sin[:, T0:T0+T] # truncate cache to current sequence length
+        if targets is not None:
+            cos = self.cos[:, T0:T0+T]
+            sin = self.sin[:, T0:T0+T]
+            cos_sin = (torch.cat((cos, cos), dim=1), torch.cat((sin, sin), dim=1)) # truncate cache to current sequence length
+        else:
+            cos_sin = self.cos[:, T0:T0+T], self.sin[:, T0:T0+T] # truncate cache to current sequence length
 
         # Forward the trunk of the Transformer
         x = self.transformer.wte(idx)
         x = norm(x)
         for block in self.transformer.h:
-            x = block(x, cos_sin, kv_cache)
+            x = block(x, cos_sin, kv_cache, attn_mask=attn_mask)
         x = norm(x)
 
         # Forward the lm_head (compute logits)
@@ -260,6 +275,11 @@ class PDLM(nn.Module):
         if targets is not None:
             # training: given the targets, compute and return the loss
             # TODO experiment with chunked cross-entropy?
+            logits = logits[:, :T, :]
+            prefix_pure_tokens = self.config.prefix_pure_tokens
+            if prefix_pure_tokens > 0:
+                logits = logits[:, prefix_pure_tokens:, :]
+                targets = targets[:, prefix_pure_tokens:]
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1, reduction=loss_reduction)
             return loss
         else:

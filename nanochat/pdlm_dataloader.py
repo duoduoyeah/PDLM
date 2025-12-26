@@ -7,9 +7,19 @@ import pyarrow.parquet as pq
 from nanochat.common import get_dist_info
 from nanochat.dataset import list_parquet_files
 from nanochat.tokenizer import get_tokenizer
-from nanochat.sp_tokens.token_map import get_token_map
+from nanochat.sp_tokens.token_map import get_token_map, TokenMap
 
-def tokenizing_distributed_data_loader_with_state(B, T, split, tokenizer_threads=4, tokenizer_batch_size=128, device="cuda", resume_state_dict=None, noise_total_steps=None):
+def tokenizing_distributed_data_loader_with_state(
+    B,
+    T,
+    split,
+    tokenizer_threads=4,
+    tokenizer_batch_size=128,
+    device="cuda",
+    resume_state_dict=None,
+    noise_total_steps=None,
+    prefix_pure_tokens=0,
+):
     """
     Stream pretraining text from parquet files, tokenize, yield training batches.
 
@@ -66,7 +76,7 @@ def tokenizing_distributed_data_loader_with_state(B, T, split, tokenizer_threads
     # get the tokenizer and the bos token
     tokenizer = get_tokenizer()
     bos_token = tokenizer.get_bos_token_id()
-    token_map = get_token_map(device="cpu")
+    token_map: TokenMap = get_token_map(device="cpu")
     # scratch buffer holds the tokens for one iteration
     token_buffer = deque() # we stream tokens on the right and pop from the left
     while True:
@@ -86,13 +96,18 @@ def tokenizing_distributed_data_loader_with_state(B, T, split, tokenizer_threads
         use_cuda_optimizations = device == "cuda"
         # Create the inputs/targets as 1D tensors
         targets_cpu = torch.tensor(tokens, dtype=torch.long, pin_memory=use_cuda_optimizations) # in PyTorch, long=int64
-        
-        noisy_levels = token_map.get_random_noisy_level(targets_cpu, step=noise_step, total_steps=noise_total_steps)
+        targets_cpu = targets_cpu.view(B, T)
+        noisy_levels = token_map.get_random_noisy_level(
+            targets_cpu,
+            step=noise_step,
+            total_steps=noise_total_steps,
+            prefix_pure_tokens=prefix_pure_tokens,
+        )
         inputs_cpu = token_map.noise_tokens(targets_cpu, noisy_levels)
         
         # Reshape to 2D and move to GPU async
-        inputs = inputs_cpu.view(B, T).to(device=device, non_blocking=use_cuda_optimizations)
-        targets = targets_cpu.view(B, T).to(device=device, non_blocking=use_cuda_optimizations)
+        inputs = inputs_cpu.to(device=device, non_blocking=use_cuda_optimizations)
+        targets = targets_cpu.to(device=device, non_blocking=use_cuda_optimizations)
         state_dict = {"pq_idx": pq_idx, "rg_idx": rg_idx} # we need this in case we wish to approximately resume training
         yield inputs, targets, state_dict
 

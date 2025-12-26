@@ -61,12 +61,18 @@ class TokenMap:
         # All tokens are pure if their noisy level is 0
         return torch.all(self.noisy_level_map[ids, 0] == 0).item()
 
-    def get_random_noisy_level(self, ids: torch.tensor, step: int = None, total_steps: int = None) -> torch.tensor:
+    def get_random_noisy_level(
+        self,
+        ids: torch.tensor,
+        step: int = None,
+        total_steps: int = None,
+        prefix_pure_tokens: int = 0,
+    ) -> torch.tensor:
         """
-        TODO
         Sample noisy levels per token.
         - If step/total_steps are provided, draw from Binomial(max_level, p=step/total_steps) per element.
         - Otherwise, uniform random in [1, max_level].
+        - Optionally force the first prefix_pure_tokens to be level 0.
         """
         if step is None or total_steps is None:
             fixed_level = torch.randint(1, self.max_level + 1, ()).item()
@@ -77,6 +83,12 @@ class TokenMap:
             dist = torch.distributions.Binomial(total_count=self.max_level, probs=prob)
             levels = dist.sample(ids.shape).to(device=ids.device, dtype=ids.dtype)
             levels = torch.clamp(levels, min=1) # at least add one noisy
+
         if ids.is_pinned():
             levels = levels.pin_memory()
+        if prefix_pure_tokens > 0:
+            if ids.ndim == 1:
+                levels[:prefix_pure_tokens] = 0
+            else:
+                levels[..., :prefix_pure_tokens] = 0
         return levels
