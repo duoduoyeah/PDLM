@@ -14,6 +14,7 @@ from nanochat.pdlm import PDLM, PDLMConfig
 from nanochat.pdlm_dataloader import tokenizing_distributed_data_loader, tokenizing_distributed_data_loader_with_state
 from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, print_banner, get_base_dir, autodetect_device_type
 from nanochat.tokenizer import get_tokenizer, get_token_bytes
+from nanochat.sp_tokens.token_map import get_token_map
 from nanochat.checkpoint_manager import save_checkpoint, load_checkpoint
 from nanochat.loss_eval import evaluate_bpb
 from nanochat.engine import Engine
@@ -79,8 +80,12 @@ wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat", 
 # Tokenizer will be useful for evaluation, also we need the vocab size
 tokenizer = get_tokenizer()
 token_bytes = get_token_bytes(device=device)
-vocab_size = tokenizer.get_vocab_size()
-print0(f"Vocab size: {vocab_size:,}")
+all_vocab_size = tokenizer.get_vocab_size()
+token_map = get_token_map(device="cpu")
+pure_vocab_size = token_map.pure_to_noisy_map.shape[0]
+assert pure_vocab_size <= all_vocab_size, "pure_vocab_size should not exceed all_vocab_size"
+print0(f"Vocab size: {all_vocab_size:,}")
+print0(f"Pure vocab size: {pure_vocab_size:,}")
 
 # Model kwargs are derived from the desired depth of the model
 num_layers = depth
@@ -110,7 +115,8 @@ print0(f"Total batch size {total_batch_size:,} => gradient accumulation steps: {
 # Create a new model with random weights
 model_config_kwargs = dict(
     sequence_len=max_seq_len,
-    vocab_size=vocab_size,
+    pure_vocab_size=pure_vocab_size,
+    all_vocab_size=all_vocab_size,
     n_layer=num_layers,
     n_head=num_heads,
     n_kv_head=num_kv_heads,

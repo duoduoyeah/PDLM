@@ -19,13 +19,13 @@ from nanochat.sp_tokens.token_map import get_token_map
 @dataclass
 class PDLMConfig:
     sequence_len: int = 1024
-    vocab_size: int = 50304
-    vocab_group_size: int = -1
+    pure_vocab_size: int = 50304
     n_layer: int = 12
     n_head: int = 6 # number of query heads
     n_kv_head: int = 6 # number of key/value heads (GQA)
     n_embd: int = 768
     prefix_pure_tokens: int = -1 # training, the number of pure prefix tokens
+    all_vocab_size: int = -1
     
 def norm(x):
     # Purely functional rmsnorm with no learnable params
@@ -135,10 +135,10 @@ class PDLM(nn.Module):
         super().__init__()
         self.config = config
         self.transformer = nn.ModuleDict({
-            "wte": nn.Embedding(config.vocab_size + config.vocab_group_size, config.n_embd), # wte changed by vocab_group_size
+            "wte": nn.Embedding(config.all_vocab_size, config.n_embd), # wte changed by all_vocab_size
             "h": nn.ModuleList([Block(config, layer_idx) for layer_idx in range(config.n_layer)]),
         })
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, config.pure_vocab_size, bias=False)
         self.rotary_seq_len = max(config.sequence_len, 1024) * 10
         head_dim = config.n_embd // config.n_head
         cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim)
@@ -268,7 +268,7 @@ class PDLM(nn.Module):
 
         # Forward the lm_head (compute logits)
         softcap = 15 # smoothly cap the logits to the range [-softcap, softcap]
-        logits = self.lm_head(x) # (B, T, vocab_size) <- very big tensor, large amount of memory
+        logits = self.lm_head(x) # (B, T, pure_vocab_size) <- very big tensor, large amount of memory
         logits = logits.float() # switch to fp32 for logit softcap and loss computation
         logits = softcap * torch.tanh(logits / softcap) # squash the logits
 
@@ -309,8 +309,8 @@ class PDLM(nn.Module):
         ids = F.pad(ids, (0, bucket_size), value=mask_id) # add bucket
         assert max_tokens % bucket_size == 0
         while True:
-            logits = self.forward(ids) # (B, T, vocab_size)
-            logits = logits[:, -bucket_size:, :] # (B, bucket_size, vocab_size)
+            logits = self.forward(ids) # (B, T, pure_vocab_size)
+            logits = logits[:, -bucket_size:, :] # (B, bucket_size, pure_vocab_size)
             next_ids = torch.argmax(logits, dim=-1, keepdim=True) # (B, bucket)
             noisy_ids = ids[:, -bucket_size:] # (B, bucket)
             next_ids = self._token_map.transit_noisy_tokens(next_ids.squeeze(-1), noisy_ids)
