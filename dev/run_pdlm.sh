@@ -16,15 +16,15 @@ mkdir -p $NANOCHAT_BASE_DIR
 # Python venv setup with uv
 
 # install uv (if not already installed)
-command -v uv &> /dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
+# command -v uv &> /dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
 # create a .venv local virtual environment (if it doesn't exist)
-[ -d ".venv" ] || uv venv
+# [ -d ".venv" ] || uv venv
 # install the repo dependencies
-uv sync --extra gpu
+# uv sync --extra gpu
 # when colab
 uv pip install  -e .
 # activate venv so that `python` uses the project's venv instead of system python
-source .venv/bin/activate
+# source .venv/bin/activate
 
 # -----------------------------------------------------------------------------
 # wandb setup
@@ -49,7 +49,7 @@ python -m nanochat.report reset
 
 # ourdataset currently only 17 has shards\
 echo "Waiting for dataset download to complete..."
-python -m nanochat.dataset -n 20 
+python -m nanochat.dataset -n 5 
 echo "dataset download to complete~~~"
 #-----------------------------------------------------------------------------
 # Base model (pretraining)

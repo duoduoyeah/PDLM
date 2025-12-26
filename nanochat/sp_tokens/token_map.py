@@ -3,17 +3,10 @@ import torch
 from nanochat.common import get_base_dir
 
 class TokenMap:
-    
-    def __init__(self, tokenizer_dir=None, device="cpu"):
-        if tokenizer_dir is None:
-            base_dir = get_base_dir()
-            tokenizer_dir = os.path.join(base_dir, "tokenizer")
-        
-        map_path = os.path.join(tokenizer_dir, "token_maps.pt")
-        if not os.path.exists(map_path):
-             raise FileNotFoundError(f"Token maps not found at {map_path}")
-             
-        maps = torch.load(map_path, map_location=device)
+
+    def __init__(self, maps, device="cpu"):
+        if maps is None:
+            raise ValueError("maps is required")
         
         # shape vocab_size, noisy_depth, fanout
         pure_to_noisy_map = maps["pure_to_noisy_map"]
@@ -92,3 +85,23 @@ class TokenMap:
             else:
                 levels[..., :prefix_pure_tokens] = 0
         return levels
+
+
+_TOKEN_MAP_CACHE = {}
+
+
+def get_token_map(tokenizer_dir=None, device="cpu"):
+    if tokenizer_dir is None:
+        base_dir = get_base_dir()
+        tokenizer_dir = os.path.join(base_dir, "tokenizer")
+    device = device if isinstance(device, torch.device) else torch.device(device)
+    key = (tokenizer_dir, str(device))
+    token_map = _TOKEN_MAP_CACHE.get(key)
+    if token_map is None or str(token_map.device) != str(device):
+        map_path = os.path.join(tokenizer_dir, "token_maps.pt")
+        if not os.path.exists(map_path):
+            raise FileNotFoundError(f"Token maps not found at {map_path}")
+        maps = torch.load(map_path, map_location=device)
+        token_map = TokenMap(maps=maps, device=device)
+        _TOKEN_MAP_CACHE[key] = token_map
+    return token_map
