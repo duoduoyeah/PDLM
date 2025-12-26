@@ -121,6 +121,7 @@ model_config_kwargs = dict(
     n_head=num_heads,
     n_kv_head=num_kv_heads,
     n_embd=model_dim,
+    prefix_pure_tokens=prefix_pure_tokens,
 )
 with torch.device("meta"):
     model_config = PDLMConfig(**model_config_kwargs)
@@ -341,9 +342,6 @@ while True:
     t0 = time.time()
     for micro_step in range(grad_accum_steps):
         with autocast_ctx:
-            if prefix_pure_tokens > 0:
-                y = y.clone()
-                y[:, :prefix_pure_tokens] = -1
             loss = model(x, y, attn_mask=block_diff_mask)
         train_loss = loss.detach() # for logging
         loss = loss / grad_accum_steps # each .backward() is a grad sum => normalize loss here

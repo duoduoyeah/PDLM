@@ -30,15 +30,16 @@ def evaluate_bpb(model, batches, steps, token_bytes, attn_mask=None, prefix_pure
     batch_iter = iter(batches)
     for _ in range(steps):
         x, y = next(batch_iter)
-        if prefix_pure_tokens > 0:
-            y = y.clone()
-            y[:, :prefix_pure_tokens] = -1
         if attn_mask is None:
             loss2d = model(x, y, loss_reduction='none') # (B, T)
         else:
             loss2d = model(x, y, loss_reduction='none', attn_mask=attn_mask) # (B, T)
         loss2d = loss2d.view(-1) # flatten
-        y = y.view(-1) # flatten
+        y_for_bytes = y
+        if prefix_pure_tokens > 0:
+            y_for_bytes = y.clone()
+            y_for_bytes[:, :prefix_pure_tokens] = -1
+        y = y_for_bytes.view(-1) # flatten
         if (y.int() < 0).any(): # mps does not currently have kernel for < 0 for int64, only int32
             # slightly more complex code path if some target tokens are ignore_index (e.g. -1)
             # any target token < 0 is to be ignored: do NOT index token_bytes with negatives

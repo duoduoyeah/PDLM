@@ -24,6 +24,7 @@ class PDLMConfig:
     n_head: int = 6 # number of query heads
     n_kv_head: int = 6 # number of key/value heads (GQA)
     n_embd: int = 768
+    prefix_pure_tokens: int = 0
     all_vocab_size: int = -1
     
 def norm(x):
@@ -275,9 +276,14 @@ class PDLM(nn.Module):
             # training: given the targets, compute and return the loss
             # TODO experiment with chunked cross-entropy?
             logits = logits[:, :T, :]
+            loss_targets = targets
+            prefix_pure_tokens = self.config.prefix_pure_tokens
+            if prefix_pure_tokens > 0:
+                loss_targets = loss_targets.clone()
+                loss_targets[:, :prefix_pure_tokens] = -1
             loss = F.cross_entropy(
                 logits.reshape(-1, logits.size(-1)),
-                targets.reshape(-1),
+                loss_targets.reshape(-1),
                 ignore_index=-1,
                 reduction=loss_reduction,
             )
