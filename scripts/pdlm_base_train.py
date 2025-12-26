@@ -121,7 +121,6 @@ model_config_kwargs = dict(
     n_head=num_heads,
     n_kv_head=num_kv_heads,
     n_embd=model_dim,
-    prefix_pure_tokens=prefix_pure_tokens,
 )
 with torch.device("meta"):
     model_config = PDLMConfig(**model_config_kwargs)
