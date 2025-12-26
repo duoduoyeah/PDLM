@@ -107,18 +107,19 @@ def block_diff_mask_causal(b, h, q_idx, kv_idx, block_size=None, n=None):
     return block_diagonal | offset_block_causal | block_causal
 
 
-def gen_mask(seqlen, block_size, attn_backend="sdpa"):
+def gen_mask(seqlen, block_size, attn_backend="sdpa", is_causal=False):
     # Builds a 2L x 2L mask for xt || x0.
+    mask_fn = block_diff_mask_causal if is_causal else block_diff_mask
     if attn_backend == "flex" and FLEX_ATTN_AVAILABLE:
         return create_block_mask(
-            partial(block_diff_mask, block_size=block_size, n=seqlen),
+            partial(mask_fn, block_size=block_size, n=seqlen),
             B=None,
             H=None,
             Q_LEN=seqlen * 2,
             KV_LEN=seqlen * 2,
         )
     if attn_backend == "sdpa":
-        return block_diff_mask(
+        return mask_fn(
             b=None,
             h=None,
             q_idx=torch.arange(seqlen * 2)[:, None],

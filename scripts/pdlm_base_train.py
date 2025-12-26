@@ -31,6 +31,7 @@ depth = 20 # the depth of the Transformer model to train, rest of the kwargs are
 max_seq_len = 1024 # max context length
 block_size = 8 # the training use block size
 prefix_pure_tokens = 1 # pure prefix tokens (0 = disabled)
+is_causal = True # the model' attn direction
 # Training horizon. Only one of these 3 will be used, in this order of precedence.
 num_iterations = -1 # explicit number of steps of the optimization (-1 = disable)
 target_flops = -1.0 # calculate num_iterations to reach target_flops. Useful for scaling laws experiments (-1 = disable)
@@ -121,7 +122,7 @@ with torch.device("meta"):
     model = PDLM(model_config)
 model.to_empty(device=device)
 model.init_weights()
-block_diff_mask = gen_mask(max_seq_len, block_size, attn_backend="sdpa").to(device=device)
+block_diff_mask = gen_mask(max_seq_len, block_size, attn_backend="sdpa", is_causal=is_causal).to(device=device)
 
 # If we are resuming, overwrite the model parameters with those of the checkpoint
 base_dir = get_base_dir()
