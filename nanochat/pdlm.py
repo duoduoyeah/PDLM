@@ -280,7 +280,12 @@ class PDLM(nn.Module):
             if prefix_pure_tokens > 0:
                 logits = logits[:, prefix_pure_tokens:, :]
                 targets = targets[:, prefix_pure_tokens:]
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1, reduction=loss_reduction)
+            loss = F.cross_entropy(
+                logits.reshape(-1, logits.size(-1)),
+                targets.reshape(-1),
+                ignore_index=-1,
+                reduction=loss_reduction,
+            )
             return loss
         else:
             # inference: just return the logits directly

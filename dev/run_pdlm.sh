@@ -67,7 +67,7 @@ python -m scripts.pdlm_base_train \
     --depth=4 \
     --block_size=8 \
     --prefix_pure_tokens=1 \
-    --is_causal=true \
+    --is_causal=True \
     --max_seq_len=1024 \
     --device_batch_size=128 \
     --target_param_data_ratio=5
