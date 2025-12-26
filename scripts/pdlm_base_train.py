@@ -251,7 +251,14 @@ while True:
         val_loader = build_val_loader()
         eval_steps = eval_tokens // (device_batch_size * max_seq_len * ddp_world_size)
         with autocast_ctx:
-            val_bpb = evaluate_bpb(model, val_loader, eval_steps, token_bytes, attn_mask=block_diff_mask)
+            val_bpb = evaluate_bpb(
+                model,
+                val_loader,
+                eval_steps,
+                token_bytes,
+                attn_mask=block_diff_mask,
+                prefix_pure_tokens=prefix_pure_tokens,
+            )
         print0(f"Step {step:05d} | Validation bpb: {val_bpb:.4f}")
         if val_bpb < min_val_bpb:
             min_val_bpb = val_bpb
@@ -335,6 +342,9 @@ while True:
     t0 = time.time()
     for micro_step in range(grad_accum_steps):
         with autocast_ctx:
+            if prefix_pure_tokens > 0:
+                y = y.clone()
+                y[:, :prefix_pure_tokens] = -1
             loss = model(x, y, attn_mask=block_diff_mask)
         train_loss = loss.detach() # for logging
         loss = loss / grad_accum_steps # each .backward() is a grad sum => normalize loss here

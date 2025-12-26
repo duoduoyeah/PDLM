@@ -6,7 +6,7 @@ import torch
 import torch.distributed as dist
 
 @torch.no_grad()
-def evaluate_bpb(model, batches, steps, token_bytes, attn_mask = None):
+def evaluate_bpb(model, batches, steps, token_bytes, attn_mask=None, prefix_pure_tokens=0):
     """
     Instead of the naive 'mean loss', this function returns the bits per byte (bpb),
     which is a tokenization vocab size-independent metric, meaning you are still comparing
@@ -30,6 +30,9 @@ def evaluate_bpb(model, batches, steps, token_bytes, attn_mask = None):
     batch_iter = iter(batches)
     for _ in range(steps):
         x, y = next(batch_iter)
+        if prefix_pure_tokens > 0:
+            y = y.clone()
+            y[:, :prefix_pure_tokens] = -1
         if attn_mask is None:
             loss2d = model(x, y, loss_reduction='none') # (B, T)
         else:
@@ -66,4 +69,3 @@ def evaluate_bpb(model, batches, steps, token_bytes, attn_mask = None):
         return float('inf')
     bpb = total_nats / (math.log(2) * total_bytes)
     return bpb
-
