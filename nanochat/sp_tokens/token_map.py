@@ -9,8 +9,7 @@ class TokenMap:
             raise ValueError("maps is required")
         
         # shape vocab_size, noisy_depth, fanout
-        pure_to_noisy_map = maps["pure_to_noisy_map"]
-        self.pure_to_noisy_map = pure_to_noisy_map.to(device)
+        self.pure_to_noisy_map = maps["pure_to_noisy_map"].to(device)
         # shape all_tokens, 2 (low_level, high_level)
         self.noisy_level_map = maps["noisy_level_map"].to(device)
         

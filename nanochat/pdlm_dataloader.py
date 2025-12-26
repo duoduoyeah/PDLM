@@ -97,6 +97,13 @@ def tokenizing_distributed_data_loader_with_state(
         # Create the inputs/targets as 1D tensors
         targets_cpu = torch.tensor(tokens, dtype=torch.long, pin_memory=use_cuda_optimizations) # in PyTorch, long=int64
         targets_cpu = targets_cpu.view(B, T)
+        # --------------------
+        # debug
+        vocab_limit = token_map.pure_to_noisy_map.shape[0]
+        if (targets_cpu >= vocab_limit).any():
+            bad_max = targets_cpu.max().item()
+            raise ValueError(f"Token id out of range: max={bad_max}, vocab_limit={vocab_limit}")
+        # -------------------
         noisy_levels = token_map.get_random_noisy_level(
             targets_cpu,
             step=noise_step,
