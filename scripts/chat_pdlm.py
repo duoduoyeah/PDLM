@@ -131,8 +131,9 @@ while True:
             pure_block = _format_block(block["pure_ids"])
             noisy_text = _decode_block(noisy_block)
             pure_text = _decode_block(pure_block)
-            print(f"[dump] step_{block['step']} noisy_block={noisy_block} noisy_text={noisy_text!r}")
-            print(f"[dump] step_{block['step']} pure_block={pure_block} pure_text={pure_text!r}")
+            print(f"[dump] step_{block['step']} noisy_block={noisy_block} pure_block={pure_block}")
+            print(f"[dump] step_{block['step']} noisy_text={noisy_text!r}")
+            print(f"[dump] step_{block['step']} pure_text={pure_text!r}")
 
     print("\n", end="", flush=True)
     if response_tokens:
