@@ -74,6 +74,13 @@ def _format_block(tokens):
         return tokens[0].tolist()
     return tokens.tolist()
 
+def _decode_block(token_ids):
+    # Best-effort decode for display; fall back to repr if decode fails.
+    try:
+        return tokenizer.decode(token_ids)
+    except Exception:
+        return repr(token_ids)
+
 while True:
     if args.prompt:
         user_input = args.prompt
@@ -122,7 +129,16 @@ while True:
         for block in block_debug:
             noisy_block = _format_block(block["noisy_ids"])
             pure_block = _format_block(block["pure_ids"])
-            print(f"[dump] step_{block['step']} noisy_block={noisy_block} pure_block={pure_block}")
+            noisy_text = _decode_block(noisy_block)
+            pure_text = _decode_block(pure_block)
+            print(
+                "[dump] "
+                f"step_{block['step']} "
+                f"noisy_block={noisy_block} "
+                f"noisy_text={noisy_text!r} "
+                f"pure_block={pure_block} "
+                f"pure_text={pure_text!r}"
+            )
 
     print("\n", end="", flush=True)
     if response_tokens:
