@@ -1,4 +1,5 @@
 import os
+from typing import Optional, Union
 import torch
 from nanochat.common import get_base_dir
 
@@ -56,7 +57,7 @@ class TokenMap:
     def get_random_noisy_level(
         self,
         ids: torch.tensor,
-        step: int = None,
+        step: Optional[Union[int, torch.Tensor]] = None,
         total_steps: int = None,
         prefix_pure_tokens: int = 0,
     ) -> torch.tensor:
@@ -71,9 +72,20 @@ class TokenMap:
             levels = torch.full(ids.shape, fixed_level, device=ids.device, dtype=ids.dtype)
         else:
             assert total_steps > 0, "total_steps must be positive"
-            prob = max(0.0, min(1.0, float(step) / float(total_steps)))
+            if torch.is_tensor(step):
+                prob = step.to(device=ids.device, dtype=torch.float32) / float(total_steps)
+                prob = torch.clamp(prob, 0.0, 1.0)
+                if prob.ndim == 0:
+                    prob = prob.expand(ids.shape)
+                else:
+                    while prob.ndim < ids.ndim:
+                        prob = prob.unsqueeze(-1)
+                    prob = prob.expand(ids.shape)
+            else:
+                prob = max(0.0, min(1.0, float(step) / float(total_steps)))
+                prob = torch.full(ids.shape, prob, device=ids.device)
             dist = torch.distributions.Binomial(total_count=self.max_level, probs=prob)
-            levels = dist.sample(ids.shape).to(device=ids.device, dtype=ids.dtype)
+            levels = dist.sample().to(device=ids.device, dtype=ids.dtype)
             levels = torch.clamp(levels, min=1) # at least add one noisy
 
         if ids.is_pinned():

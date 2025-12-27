@@ -83,7 +83,7 @@ def tokenizing_distributed_data_loader_with_state(
         # pick a random training step surrogate for noise scheduling if requested
         noise_step = None
         if noise_total_steps is not None:
-            noise_step = torch.randint(1, noise_total_steps + 1, (1,)).item()
+            noise_step = torch.randint(1, noise_total_steps + 1, (B,))
         # Accumulate enough tokens for one iteration before yielding.
         while len(token_buffer) < needed_tokens:
             doc_batch, (pq_idx, rg_idx) = next(batches)
