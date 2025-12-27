@@ -50,7 +50,7 @@ warmdown_ratio = 0.2 # ratio of iterations for LR warmdown
 final_lr_frac = 0.0 # final LR is this fraction of the initial LR
 resume_from_step = -1 # resume training from this step of the optimization (-1 = disable)
 # Evaluation
-eval_every = -1# every how many steps to evaluate the model for val bpb(-1 = disable)
+eval_every = 99999 # every how many steps to evaluate the model for val bpb(-1 = disable)
 eval_tokens = 20*524288 # number of tokens to evaluate val loss on
 core_metric_every = -1 # every how many steps to evaluate the core metric (-1 = disable)
 core_metric_max_per_task = 500 # examples per task in estimating the core metric
@@ -246,7 +246,7 @@ while True:
     flops_so_far = num_flops_per_token * total_batch_size * step
 
     # once in a while: evaluate the val bpb (all ranks participate)
-    if eval_every > 0 and last_step or step % eval_every == 0:
+    if eval_every > 0 and (last_step or step % eval_every == 0):
         model.eval()
         val_loader = build_val_loader()
         eval_steps = eval_tokens // (device_batch_size * max_seq_len * ddp_world_size)

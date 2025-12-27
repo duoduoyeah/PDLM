@@ -67,8 +67,8 @@ NPROC_PER_NODE=1
 python -m scripts.base_train \
     --depth=4 \
     --max_seq_len=1024 \
-    --device_batch_size=256 \
-    --target_param_data_ratio=60
+    --device_batch_size=128 \
+    --target_param_data_ratio=5
 
 # python -m scripts.base_train \
 #     --depth=4 \
