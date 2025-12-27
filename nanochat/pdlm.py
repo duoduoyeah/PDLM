@@ -324,3 +324,40 @@ class PDLM(nn.Module):
                 else:
                     ids = F.pad(ids, (0, bucket_size), value=mask_id)
         return ids
+
+    @torch.inference_mode()
+    def generate_with_blocks(self, tokens, max_tokens, bucket_size=8):
+        """
+        Like generate(), but also returns per-step noisy/pure blocks.
+        """
+        assert isinstance(tokens, list) # B == 1
+        assert self.config.mask_token_id != -1, "mask_token_id must be set for generate"
+        device = self.get_device()
+        if self._token_map is None or self._token_map.device != device:
+            self._token_map = get_token_map(device=device)
+
+        ids = torch.tensor([tokens], dtype=torch.long, device=device) # add batch dim
+        mask_id = self.config.mask_token_id
+        ids = F.pad(ids, (0, bucket_size), value=mask_id) # add bucket
+        assert max_tokens % bucket_size == 0
+        block_debug = []
+        step = 0
+        while True:
+            logits = self.forward(ids) # (B, T, pure_vocab_size)
+            logits = logits[:, -bucket_size:, :] # (B, bucket_size, pure_vocab_size)
+            pure_ids = torch.argmax(logits, dim=-1) # (B, bucket)
+            noisy_ids = ids[:, -bucket_size:] # (B, bucket)
+            block_debug.append({
+                "step": step,
+                "noisy_ids": noisy_ids.detach().cpu(),
+                "pure_ids": pure_ids.detach().cpu(),
+            })
+            next_ids = self._token_map.transit_noisy_tokens(pure_ids, noisy_ids)
+            ids = torch.cat((ids[:, :-next_ids.size(1)], next_ids), dim=1)
+            if self._token_map.is_all_pure_tokens(next_ids):
+                if ids.numel() >= max_tokens:
+                    break
+                else:
+                    ids = F.pad(ids, (0, bucket_size), value=mask_id)
+            step += 1
+        return ids, block_debug

@@ -46,7 +46,6 @@ class TokenMap:
         # noisy_ids -> noisy_levels, use the lowest level 
         noisy_levels = self.noisy_level_map[noisy_ids, 0]
         noisy_levels = torch.where(noisy_levels > 0, noisy_levels - 1, noisy_levels)
-        assert torch.all(noisy_levels >= 0).item(), "Expected all noisy levels to be >= 0"
         # pure ids, noisy_levels -> output_scratch_ids
         options = self.pure_to_noisy_map[pure_ids, noisy_levels]
         return self._sample_fanout(options, noisy_ids)

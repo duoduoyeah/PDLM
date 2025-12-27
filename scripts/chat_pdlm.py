@@ -23,6 +23,7 @@ parser.add_argument("--max-new-tokens", type=int, default=256, help="Max new tok
 parser.add_argument("--bucket-size", type=int, default=8, help="Bucket size for block generation")
 parser.add_argument("--device-type", type=str, default="", choices=["cuda", "cpu", "mps"], help="Device type for eval")
 parser.add_argument("-d", "--dtype", type=str, default="bfloat16", choices=["float32", "bfloat16"])
+parser.add_argument("-dump", type=str, default="True", choices=["True", "False"])
 args = parser.parse_args()
 
 
@@ -66,6 +67,12 @@ print("Type 'clear' to start a new conversation")
 print("-" * 50)
 
 conversation_tokens = [bos]
+dump_enabled = args.dump == "True"
+
+def _format_block(tokens):
+    if tokens.ndim == 2 and tokens.size(0) == 1:
+        return tokens[0].tolist()
+    return tokens.tolist()
 
 while True:
     if args.prompt:
@@ -100,9 +107,22 @@ while True:
         max_total_tokens = ((max_total_tokens + bucket_size - 1) // bucket_size) * bucket_size
 
     with autocast_ctx:
-        ids = model.generate(prompt_tokens, max_total_tokens, bucket_size=bucket_size)
+        if dump_enabled:
+            ids, block_debug = model.generate_with_blocks(
+                prompt_tokens,
+                max_total_tokens,
+                bucket_size=bucket_size,
+            )
+        else:
+            ids = model.generate(prompt_tokens, max_total_tokens, bucket_size=bucket_size)
     ids = ids[0].tolist()
     response_tokens = [tok for tok in ids[len(prompt_tokens):] if tok >= 0]
+
+    if dump_enabled:
+        for block in block_debug:
+            noisy_block = _format_block(block["noisy_ids"])
+            pure_block = _format_block(block["pure_ids"])
+            print(f"[dump] step_{block['step']} noisy_block={noisy_block} pure_block={pure_block}")
 
     print("\n", end="", flush=True)
     if response_tokens:
