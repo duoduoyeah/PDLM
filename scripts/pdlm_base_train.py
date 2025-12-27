@@ -84,8 +84,17 @@ all_vocab_size = tokenizer.get_vocab_size()
 token_map = get_token_map(device="cpu")
 pure_vocab_size = token_map.pure_to_noisy_map.shape[0]
 assert pure_vocab_size <= all_vocab_size, "pure_vocab_size should not exceed all_vocab_size"
+mask_token_id = -1
+try:
+    maybe_mask_token_id = tokenizer.encode_special("<|MASK|>")
+    if maybe_mask_token_id is not None:
+        mask_token_id = maybe_mask_token_id
+except KeyError:
+    pass
 print0(f"Vocab size: {all_vocab_size:,}")
 print0(f"Pure vocab size: {pure_vocab_size:,}")
+if mask_token_id != -1:
+    print0(f"Mask token id: {mask_token_id}")
 
 # Model kwargs are derived from the desired depth of the model
 num_layers = depth
@@ -122,6 +131,7 @@ model_config_kwargs = dict(
     n_kv_head=num_kv_heads,
     n_embd=model_dim,
     prefix_pure_tokens=prefix_pure_tokens,
+    mask_token_id=mask_token_id,
 )
 with torch.device("meta"):
     model_config = PDLMConfig(**model_config_kwargs)

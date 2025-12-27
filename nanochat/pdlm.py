@@ -25,8 +25,9 @@ class PDLMConfig:
     n_kv_head: int = 6 # number of key/value heads (GQA)
     n_embd: int = 768
     prefix_pure_tokens: int = 0
-    all_vocab_size: int = -1
-    
+    all_vocab_size: int = -1 # need for training
+    mask_token_id: int = -1
+
 def norm(x):
     # Purely functional rmsnorm with no learnable params
     return F.rms_norm(x, (x.size(-1),))
@@ -301,12 +302,13 @@ class PDLM(nn.Module):
         - ids and the yielded tokens are simple Python lists and ints
         """
         assert isinstance(tokens, list) # B == 1
+        assert self.config.mask_token_id != -1, "mask_token_id must be set for generate"
         device = self.get_device()
         if self._token_map is None or self._token_map.device != device:
             self._token_map = get_token_map(device=device)
 
         ids = torch.tensor([tokens], dtype=torch.long, device=device) # add batch dim
-        mask_id = -1 # This should be the mask_id later
+        mask_id = self.config.mask_token_id
         ids = F.pad(ids, (0, bucket_size), value=mask_id) # add bucket
         assert max_tokens % bucket_size == 0
         while True:
