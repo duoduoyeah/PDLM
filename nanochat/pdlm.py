@@ -347,14 +347,18 @@ class PDLM(nn.Module):
             logits = logits[:, -bucket_size:, :] # (B, bucket_size, pure_vocab_size)
             pure_ids = torch.argmax(logits, dim=-1) # (B, bucket)
             noisy_ids = ids[:, -bucket_size:] # (B, bucket)
-            block_debug.append({
+            entry = {
                 "step": step,
                 "noisy_ids": noisy_ids.detach().cpu(),
                 "pure_ids": pure_ids.detach().cpu(),
-            })
+            }
             next_ids = self._token_map.transit_noisy_tokens(pure_ids, noisy_ids)
+            next_is_pure = self._token_map.is_all_pure_tokens(next_ids)
+            if next_is_pure:
+                entry["next_ids"] = next_ids.detach().cpu()
+            block_debug.append(entry)
             ids = torch.cat((ids[:, :-next_ids.size(1)], next_ids), dim=1)
-            if self._token_map.is_all_pure_tokens(next_ids):
+            if next_is_pure:
                 if ids.numel() >= max_tokens:
                     break
                 else:

@@ -134,6 +134,10 @@ while True:
             print(f"[dump] step_{block['step']} noisy_block={noisy_block} pure_block={pure_block}")
             print(f"[dump] step_{block['step']} noisy_text={noisy_text!r}")
             print(f"[dump] step_{block['step']} pure_text={pure_text!r}")
+            if "next_ids" in block:
+                next_block = _format_block(block["next_ids"])
+                next_text = _decode_block(next_block)
+                print(f"[dump] step_{block['step']} next_block={next_block} next_text={next_text!r}")
 
     print("\n", end="", flush=True)
     if response_tokens:
