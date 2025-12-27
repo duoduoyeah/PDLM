@@ -91,6 +91,8 @@ while True:
 
     conversation_tokens.extend(tokenizer.encode(user_input))
 
+    print("\n[model] thinking...", flush=True)
+
     prompt_tokens = list(conversation_tokens)
     max_total_tokens = len(prompt_tokens) + args.max_new_tokens
     bucket_size = args.bucket_size

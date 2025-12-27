@@ -49,7 +49,7 @@ python -m nanochat.report reset
 
 # ourdataset currently only 17 has shards\
 echo "Waiting for dataset download to complete..."
-python -m nanochat.dataset -n 5 
+python -m nanochat.dataset -n 17 
 echo "dataset download to complete~~~"
 #-----------------------------------------------------------------------------
 # Base model (pretraining)
@@ -64,10 +64,11 @@ echo "dataset download to complete~~~"
 NPROC_PER_NODE=1
 
 python -m scripts.pdlm_base_train \
+    --run=pdlm_depth4_bs8_pr1_ratio40_causal \
     --depth=4 \
     --block_size=8 \
     --prefix_pure_tokens=1 \
     --is_causal=True \
     --max_seq_len=1024 \
     --device_batch_size=64 \
-    --target_param_data_ratio=5
+    --target_param_data_ratio=40
