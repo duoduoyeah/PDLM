@@ -20,7 +20,7 @@ parser.add_argument("-g", "--model-tag", type=str, default=None, help="Model tag
 parser.add_argument("-s", "--step", type=int, default=None, help="Step to load")
 parser.add_argument("-p", "--prompt", type=str, default="", help="Prompt the model, get a single response back")
 parser.add_argument("--max-new-tokens", type=int, default=256, help="Max new tokens to generate")
-parser.add_argument("--bucket-size", type=int, default=8, help="Bucket size for block generation")
+parser.add_argument("-b", "--bucket-size", type=int, default=8, help="Bucket size for block generation")
 parser.add_argument("--device-type", type=str, default="", choices=["cuda", "cpu", "mps"], help="Device type for eval")
 parser.add_argument("-d", "--dtype", type=str, default="bfloat16", choices=["float32", "bfloat16"])
 parser.add_argument("-dump", type=str, default="True", choices=["True", "False"])
