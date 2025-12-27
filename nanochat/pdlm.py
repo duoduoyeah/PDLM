@@ -240,11 +240,12 @@ class PDLM(nn.Module):
         """Training: idx/targets are length L; we concat to 2L inside this and apply block mask."""
         if targets is not None:
             B, T = idx.size()
-            assert attn_mask is not None, "Mask currently should not be None"
+            assert attn_mask is not None, "Training should has Mask"
             assert self.config.sequence_len == T, "use double seq length when train"
             assert targets.size(1) == T, "Targets should match the base sequence length"
             idx = torch.cat((idx, targets), dim=1)
         else:
+            assert attn_mask is None, "Inference should not have mask"
             B, T = idx.size()
         # Grab the rotary embeddings for the current sequence length (they are of shape (1, seq_len, 1, head_dim/2))
         assert T <= self.cos.size(1), f"Sequence length grew beyond the rotary embeddings cache: {T} > {self.cos.size(1)}"
