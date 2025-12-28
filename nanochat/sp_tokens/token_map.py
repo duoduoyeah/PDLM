@@ -46,7 +46,7 @@ class TokenMap:
         self,
         pure_ids: torch.tensor,
         noisy_ids: torch.tensor,
-        enforce_monotonic: bool = False,
+        enforce_monotonic: bool = True,
     ):
         """
         enforce_monotonic: if True, noisy levels are forced to be non-decreasing along the last dimension.
