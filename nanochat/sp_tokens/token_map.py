@@ -79,8 +79,15 @@ class TokenMap:
         - Optionally force the first prefix_pure_tokens to be level 0.
         """
         if step is None or total_steps is None:
-            fixed_level = torch.randint(1, self.max_level + 1, ()).item()
-            levels = torch.full(ids.shape, fixed_level, device=ids.device, dtype=ids.dtype)
+            if ids.ndim >= 2:
+                # Different batch get their own level, but in the same sample, all the same noisy level
+                batch_size = ids.shape[0]
+                batch_levels = torch.randint(1, self.max_level + 1, (batch_size,), device=ids.device, dtype=ids.dtype)
+                view_shape = [batch_size] + [1] * (ids.ndim - 1)
+                levels = batch_levels.view(view_shape).expand(ids.shape)
+            else:
+                fixed_level = torch.randint(1, self.max_level + 1, ()).item()
+                levels = torch.full(ids.shape, fixed_level, device=ids.device, dtype=ids.dtype)
         else:
             assert total_steps > 0, "total_steps must be positive"
             if torch.is_tensor(step):

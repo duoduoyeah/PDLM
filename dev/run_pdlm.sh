@@ -65,6 +65,7 @@ echo "dataset download to complete~~~"
 # Number of processes/GPUs to use
 NPROC_PER_NODE=1
 
+# pdlm_depth4_bs8_pr1_ratio40_causal
 python -m scripts.pdlm_base_train \
     --run=pdlm_depth4_bs8_pr1_ratio40_causal \
     --depth=4 \
@@ -74,3 +75,115 @@ python -m scripts.pdlm_base_train \
     --max_seq_len=1024 \
     --device_batch_size=64 \
     --target_param_data_ratio=40
+
+# pdlm_depth4_bs4_pr1_ratio40_causal
+python -m scripts.pdlm_base_train \
+    --run=pdlm_depth4_bs4_pr1_ratio40_causal \
+    --depth=4 \
+    --block_size=4 \
+    --prefix_pure_tokens=1 \
+    --is_causal=True \
+    --max_seq_len=1024 \
+    --device_batch_size=64 \
+    --target_param_data_ratio=40
+
+# pdlm_depth4_bs2_pr1_ratio40_causal
+python -m scripts.pdlm_base_train \
+    --run=pdlm_depth4_bs2_pr1_ratio40_causal \
+    --depth=4 \
+    --block_size=2 \
+    --prefix_pure_tokens=1 \
+    --is_causal=True \
+    --max_seq_len=1024 \
+    --device_batch_size=64 \
+    --target_param_data_ratio=40
+
+# pdlm_depth4_bs1_pr1_ratio40_causal
+python -m scripts.pdlm_base_train \
+    --run=pdlm_depth4_bs1_pr1_ratio40_causal \
+    --depth=4 \
+    --block_size=1 \
+    --prefix_pure_tokens=1 \
+    --is_causal=True \
+    --max_seq_len=1024 \
+    --device_batch_size=64 \
+    --target_param_data_ratio=40
+
+# pdlm_depth4_bs8_pr1_ratio40_causal_samenoisy
+python -m scripts.pdlm_base_train \
+    --run=pdlm_depth4_bs8_pr1_ratio40_causal_samenoisy \
+    --depth=4 \
+    --block_size=8 \
+    --prefix_pure_tokens=1 \
+    --is_causal=False \
+    --max_seq_len=1024 \
+    --device_batch_size=64 \
+    --target_param_data_ratio=40 \
+    --noisy_type=
+
+# pdlm_depth4_bs4_pr1_ratio40_causal_samenoisy
+python -m scripts.pdlm_base_train \
+    --run=pdlm_depth4_bs4_pr1_ratio40_causal_samenoisy \
+    --depth=4 \
+    --block_size=4 \
+    --prefix_pure_tokens=1 \
+    --is_causal=False \
+    --max_seq_len=1024 \
+    --device_batch_size=64 \
+    --target_param_data_ratio=40 \
+    --noisy_type=
+
+# pdlm_depth4_bs2_pr1_ratio40_causal_samenoisy
+python -m scripts.pdlm_base_train \
+    --run=pdlm_depth4_bs2_pr1_ratio40_causal_samenoisy \
+    --depth=4 \
+    --block_size=2 \
+    --prefix_pure_tokens=1 \
+    --is_causal=False \
+    --max_seq_len=1024 \
+    --device_batch_size=64 \
+    --target_param_data_ratio=40 \
+    --noisy_type=
+
+# pdlm_depth4_bs1_pr1_ratio40_causal_samenoisy
+python -m scripts.pdlm_base_train \
+    --run=pdlm_depth4_bs1_pr1_ratio40_causal_samenoisy \
+    --depth=4 \
+    --block_size=1 \
+    --prefix_pure_tokens=1 \
+    --is_causal=False \
+    --max_seq_len=1024 \
+    --device_batch_size=64 \
+    --target_param_data_ratio=40 \
+    --noisy_type=
+
+# =================================================
+# Non causal
+
+# pdlm_depth4_bs8_pr1_ratio40_non_causal
+export NANOCHAT_BASE_DIR="/content/drive/MyDrive/pdlm_depth4_bs8_pr1_ratio40_non_causal/"
+mkdir -p $NANOCHAT_BASE_DIR
+python -m nanochat.report reset
+
+python -m scripts.pdlm_base_train \
+    --run=pdlm_depth4_bs8_pr1_ratio40_non_causal \
+    --depth=4 \
+    --block_size=8 \
+    --prefix_pure_tokens=1 \
+    --is_causal=False \
+    --max_seq_len=1024 \
+    --device_batch_size=64 \
+    --target_param_data_ratio=40
+
+# pdlm_depth4_bs8_pr1_ratio40_non_causal_samenoisy
+python -m scripts.pdlm_base_train \
+    --run=pdlm_depth4_bs8_pr1_ratio40_non_causal_samenoisy \
+    --depth=4 \
+    --block_size=8 \
+    --prefix_pure_tokens=1 \
+    --is_causal=False \
+    --max_seq_len=1024 \
+    --device_batch_size=64 \
+    --target_param_data_ratio=40 \
+    --noisy_type=
+
