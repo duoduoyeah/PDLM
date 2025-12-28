@@ -3,7 +3,9 @@ Chat with a PDLM checkpoint using its block generation.
 
 Example:
 python -m scripts.chat_pdlm --model-tag d4 --step 000050
-python -m scripts.chat_pdlm -b 2 --max-new-tokens 128
+python -m scripts.chat_pdlm -b 2 --max-new-tokens 128 --dump False
+Mary likes toy,
+Tom and Mary will go out today,
 """
 import argparse
 from contextlib import nullcontext
@@ -24,7 +26,7 @@ parser.add_argument("--max-new-tokens", type=int, default=16, help="Max new toke
 parser.add_argument("-b", "--bucket-size", type=int, default=8, help="Bucket size for block generation")
 parser.add_argument("--device-type", type=str, default="", choices=["cuda", "cpu", "mps"], help="Device type for eval")
 parser.add_argument("-d", "--dtype", type=str, default="bfloat16", choices=["float32", "bfloat16"])
-parser.add_argument("-dump", type=str, default="True", choices=["True", "False"])
+parser.add_argument("--dump", type=str, default="True", choices=["True", "False"])
 args = parser.parse_args()
 
 
