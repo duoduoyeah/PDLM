@@ -3,6 +3,7 @@ Chat with a PDLM checkpoint using its block generation.
 
 Example:
 python -m scripts.chat_pdlm --model-tag d4 --step 000050
+python -m scripts.chat_pdlm -b 2 --max-new-tokens 128
 """
 import argparse
 from contextlib import nullcontext

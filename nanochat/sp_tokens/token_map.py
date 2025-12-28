@@ -42,10 +42,21 @@ class TokenMap:
         options = self.pure_to_noisy_map[pure_ids, noisy_levels]
         return self._sample_fanout(options, pure_ids)
         
-    def transit_noisy_tokens(self, pure_ids: torch.tensor, noisy_ids: torch.tensor):
-        # noisy_ids -> noisy_levels, use the lowest level 
+    def transit_noisy_tokens(
+        self,
+        pure_ids: torch.tensor,
+        noisy_ids: torch.tensor,
+        enforce_monotonic: bool = False,
+    ):
+        """
+        enforce_monotonic: if True, noisy levels are forced to be non-decreasing along the last dimension.
+        """
+        # noisy_ids -> noisy_levels, use the lowest level
         noisy_levels = self.noisy_level_map[noisy_ids, 0]
         noisy_levels = torch.where(noisy_levels > 0, noisy_levels - 1, noisy_levels)
+        if enforce_monotonic:
+            noisy_levels = torch.cummax(noisy_levels, dim=-1).values
+        assert torch.all(noisy_levels >= 0).item(), "Expected all noisy levels to be >= 0"
         # pure ids, noisy_levels -> output_scratch_ids
         options = self.pure_to_noisy_map[pure_ids, noisy_levels]
         return self._sample_fanout(options, noisy_ids)
