@@ -3,7 +3,7 @@ Chat with a PDLM checkpoint using its block generation.
 
 Example:
 python -m scripts.chat_pdlm --model-tag d4 --step 000050
-python -m scripts.chat_pdlm -b 2 --max-new-tokens 128 --dump False
+python -m scripts.chat_pdlm -b 4 --max-new-tokens 128 --dump False
 Mary likes toy,
 Tom and Mary will go out today,
 """
@@ -92,6 +92,13 @@ def _decode_ids(token_ids):
         return [_decode_ids(item) for item in token_ids]
     return _decode_token(token_ids)
 
+def _round_probs(values, decimals=3):
+    if isinstance(values, list):
+        return [_round_probs(item, decimals=decimals) for item in values]
+    if isinstance(values, float):
+        return round(values, decimals)
+    return values
+
 while True:
     if args.prompt:
         user_input = args.prompt
@@ -145,7 +152,7 @@ while True:
         dump_lines = []
         for block in block_debug:
             pure_topk_ids = _format_block(block["pure_ids"])
-            pure_topk_probs = _format_block(block["pure_probs"])
+            pure_topk_probs = _round_probs(_format_block(block["pure_probs"]), decimals=3)
             pure_topk_text = _decode_ids(pure_topk_ids)
             ids_line = (
                 f"[dump] step_{block['step']} pure_topk_ids={pure_topk_ids} "
