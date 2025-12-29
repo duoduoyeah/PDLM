@@ -9,7 +9,7 @@
 
 # Default intermediate artifacts directory is in ~/.cache/nanochat
 export OMP_NUM_THREADS=1
-export NANOCHAT_BASE_DIR="$HOME/.cache/nanochat/pdlm/pdlm_depth4_bs1_pr1_ratio40_causal_samenoisy_debug"
+export NANOCHAT_BASE_DIR="$HOME/.cache/nanochat/pdlm/pdlm_depth4_bs8_pr1_ratio40_causal_samenoisy"
 mkdir -p $NANOCHAT_BASE_DIR
 
 python -c "from nanochat.common import get_base_dir; print(get_base_dir())"
@@ -76,16 +76,16 @@ python -m scripts.pdlm_base_train \
     --device_batch_size=64 \
     --target_param_data_ratio=40
 
-# pdlm_depth4_bs8_pr1_ratio2_causal_samenoisy
+# pdlm_depth4_bs8_pr1_ratio40_causal_samenoisy
 python -m scripts.pdlm_base_train \
-    --run=pdlm_depth4_bs8_pr1_ratio2_causal_samenoisy \
+    --run=pdlm_depth4_bs8_pr1_ratio40_causal_samenoisy \
     --depth=4 \
     --block_size=8 \
     --prefix_pure_tokens=1 \
     --is_causal=True \
     --max_seq_len=1024 \
     --device_batch_size=64 \
-    --target_param_data_ratio=2 \
+    --target_param_data_ratio=40 \
     --noise_total_steps=0 
 
 # pdlm_depth4_bs1_pr1_ratio40_causal_samenoisy

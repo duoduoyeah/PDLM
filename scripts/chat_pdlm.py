@@ -2,8 +2,8 @@
 Chat with a PDLM checkpoint using its block generation.
 
 Example:
-python -m scripts.chat_pdlm --model-tag d4 --step 000050
-python -m scripts.chat_pdlm -b 4 --max-new-tokens 128 --dump False
+python -m scripts.chat_pdlm -b 8 --max-new-tokens 16 --dump True
+python -m scripts.chat_pdlm -b 8 --max-new-tokens 128 --dump False
 Mary likes toy,
 Tom and Mary will go out today,
 """
@@ -154,13 +154,22 @@ while True:
             pure_topk_ids = _format_block(block["pure_ids"])
             pure_topk_probs = _round_probs(_format_block(block["pure_probs"]), decimals=3)
             pure_topk_text = _decode_ids(pure_topk_ids)
+
+            max_ids = [ids[0] for ids in pure_topk_ids]
+            max_probs = [probs[0] for probs in pure_topk_probs]
+            max_texts = [texts[0] for texts in pure_topk_text]
+            max_tokens_info = list(zip(max_texts, max_ids, max_probs))
+
             ids_line = f"[dump] step_{block['step']} pure_topk_ids={pure_topk_ids}"
             probs_line = f"[dump] step_{block['step']} pure_topk_probs={pure_topk_probs}"
             text_line = f"[dump] step_{block['step']} pure_topk_text={pure_topk_text!r}"
+            max_line = f"[dump] step_{block['step']} max_tokens={max_tokens_info}"
+
             print(ids_line)
             print(probs_line)
             print(text_line)
-            dump_lines.extend([ids_line, probs_line, text_line])
+            print(max_line)
+            dump_lines.extend([ids_line, probs_line, text_line, max_line])
         if dump_lines:
             with open(dump_path, "w", encoding="utf-8") as handle:
                 handle.write("\n".join(dump_lines) + "\n")
