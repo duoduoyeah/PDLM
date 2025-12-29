@@ -84,7 +84,7 @@ class TokenMap:
                 batch_size = ids.shape[0]
                 batch_levels = torch.randint(1, self.max_level + 1, (batch_size,), device=ids.device, dtype=ids.dtype)
                 view_shape = [batch_size] + [1] * (ids.ndim - 1)
-                levels = batch_levels.view(view_shape).expand(ids.shape)
+                levels = batch_levels.view(view_shape).expand(ids.shape).clone()
             else:
                 fixed_level = torch.randint(1, self.max_level + 1, ()).item()
                 levels = torch.full(ids.shape, fixed_level, device=ids.device, dtype=ids.dtype)

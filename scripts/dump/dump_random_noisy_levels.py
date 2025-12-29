@@ -7,11 +7,11 @@ from nanochat.sp_tokens.token_map import get_token_map
 
 
 def main():
-    batch_size = 64
-    seq_len = 8
+    batch_size = 3
+    seq_len = 3
     token_map = get_token_map("model/tokenizer",device="cpu")
     ids = torch.zeros((batch_size, seq_len), dtype=torch.long)
-    levels = token_map.get_random_noisy_level(ids, step=None, total_steps=None)
+    levels = token_map.get_random_noisy_level(ids, step=0, total_steps=0, prefix_pure_tokens=1)
 
     out_path = os.path.join(os.getcwd(), "temp", "random_noisy_levels_dump.txt")
     with open(out_path, "w", encoding="utf-8") as handle:
