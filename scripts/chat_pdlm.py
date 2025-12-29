@@ -154,14 +154,13 @@ while True:
             pure_topk_ids = _format_block(block["pure_ids"])
             pure_topk_probs = _round_probs(_format_block(block["pure_probs"]), decimals=3)
             pure_topk_text = _decode_ids(pure_topk_ids)
-            ids_line = (
-                f"[dump] step_{block['step']} pure_topk_ids={pure_topk_ids} "
-                f"pure_topk_probs={pure_topk_probs}"
-            )
+            ids_line = f"[dump] step_{block['step']} pure_topk_ids={pure_topk_ids}"
+            probs_line = f"[dump] step_{block['step']} pure_topk_probs={pure_topk_probs}"
             text_line = f"[dump] step_{block['step']} pure_topk_text={pure_topk_text!r}"
             print(ids_line)
+            print(probs_line)
             print(text_line)
-            dump_lines.extend([ids_line, text_line])
+            dump_lines.extend([ids_line, probs_line, text_line])
         if dump_lines:
             with open(dump_path, "w", encoding="utf-8") as handle:
                 handle.write("\n".join(dump_lines) + "\n")
