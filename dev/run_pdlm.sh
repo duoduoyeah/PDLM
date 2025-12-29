@@ -109,10 +109,12 @@ python -m scripts.pdlm_base_train \
     --is_causal=True \
     --max_seq_len=128 \
     --device_batch_size=1 \
+    --total_batch_size=2048 \
     --target_param_data_ratio=10 \
     --noise_total_steps=0 \
     --num_iterations=2 \
-    --debug=True
+    --debug=True 
+    
 
 # =================================================
 # Non causal
