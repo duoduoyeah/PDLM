@@ -35,13 +35,15 @@ prefix_pure_tokens = 1 # pure prefix tokens (0 = disabled)
 is_causal = True # the model' attn direction
 #Noisy
 noise_total_steps = 16
+# Debug
+debug = False
 # Training horizon. Only one of these 3 will be used, in this order of precedence.
 num_iterations = -1 # explicit number of steps of the optimization (-1 = disable)
 target_flops = -1.0 # calculate num_iterations to reach target_flops. Useful for scaling laws experiments (-1 = disable)
 target_param_data_ratio = 20 # calculate num_iterations to maintain fixed data:param ratio (Chinchilla=20) (-1 = disable)
 # Optimization
 device_batch_size = 32 # per-device batch size (set to not OOM)
-total_batch_size = 524288 # total desired batch size, in #tokens
+total_batch_size = 65536 # total desired batch size, in #tokens
 embedding_lr = 0.2 # learning rate for the embedding parameters (Adam)
 unembedding_lr = 0.004 # learning rate for the unembedding parameters (Adam)
 weight_decay = 0.0 # weight decay for the embedding/unembedding parameters (Adam)
@@ -213,6 +215,11 @@ build_val_loader = lambda: tokenizing_distributed_data_loader(
     prefix_pure_tokens=max(prefix_pure_tokens, 0),
 )
 x, y, dataloader_state_dict = next(train_loader) # kick off load of the very first batch of data
+debug_dump_path = None
+if debug:
+    debug_dir = os.path.join(os.getcwd(), "temp")
+    os.makedirs(debug_dir, exist_ok=True)
+    debug_dump_path = os.path.join(debug_dir, "pdlm_debug_xy.txt")
 
 # -----------------------------------------------------------------------------
 # Set up hyperparameter schedulers
@@ -353,6 +360,15 @@ while True:
     synchronize()
     t0 = time.time()
     for micro_step in range(grad_accum_steps):
+        if debug:
+            x_cpu = x.detach().cpu()
+            y_cpu = y.detach().cpu()
+            print0(f"[debug] step {step} micro {micro_step} x={x_cpu.tolist()} y={y_cpu.tolist()}")
+            if debug_dump_path is not None:
+                with open(debug_dump_path, "a", encoding="utf-8") as handle:
+                    handle.write(f"step={step} micro={micro_step}\n")
+                    handle.write(f"x={x_cpu.tolist()}\n")
+                    handle.write(f"y={y_cpu.tolist()}\n")
         with autocast_ctx:
             loss = model(x, y, attn_mask=block_diff_mask)
         train_loss = loss.detach() # for logging

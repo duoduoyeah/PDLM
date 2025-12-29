@@ -9,25 +9,14 @@
 
 # Default intermediate artifacts directory is in ~/.cache/nanochat
 export OMP_NUM_THREADS=1
-export NANOCHAT_BASE_DIR="$HOME/.cache/nanochat/pdlm/pdlm_depth4_bs8_pr1_ratio40_causal_samenoisy"
+export NANOCHAT_BASE_DIR="$HOME/.cache/nanochat/pdlm/pdlm_depth4_bs1_pr1_ratio40_causal_samenoisy"
 mkdir -p $NANOCHAT_BASE_DIR
 
 python -c "from nanochat.common import get_base_dir; print(get_base_dir())"
 
 # -----------------------------------------------------------------------------
 # Python venv setup with uv
-
-# install uv (if not already installed)
-# command -v uv &> /dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
-# create a .venv local virtual environment (if it doesn't exist)
-# [ -d ".venv" ] || uv venv
-# install the repo dependencies
-# uv sync --extra gpu
-# when colab
 uv pip install  -e .
-# activate venv so that `python` uses the project's venv instead of system python
-# source .venv/bin/activate
-
 # -----------------------------------------------------------------------------
 # wandb setup
 # If you wish to use wandb for logging (it's nice!, recommended).
@@ -87,64 +76,17 @@ python -m scripts.pdlm_base_train \
     --device_batch_size=64 \
     --target_param_data_ratio=40
 
-# pdlm_depth4_bs2_pr1_ratio40_causal
+# pdlm_depth4_bs8_pr1_ratio2_causal_samenoisy
 python -m scripts.pdlm_base_train \
-    --run=pdlm_depth4_bs2_pr1_ratio40_causal \
-    --depth=4 \
-    --block_size=2 \
-    --prefix_pure_tokens=1 \
-    --is_causal=True \
-    --max_seq_len=1024 \
-    --device_batch_size=64 \
-    --target_param_data_ratio=40
-
-# pdlm_depth4_bs1_pr1_ratio40_causal
-python -m scripts.pdlm_base_train \
-    --run=pdlm_depth4_bs1_pr1_ratio40_causal \
-    --depth=4 \
-    --block_size=1 \
-    --prefix_pure_tokens=1 \
-    --is_causal=True \
-    --max_seq_len=1024 \
-    --device_batch_size=64 \
-    --target_param_data_ratio=40
-
-# pdlm_depth4_bs8_pr1_ratio40_causal_samenoisy
-python -m scripts.pdlm_base_train \
-    --run=pdlm_depth4_bs8_pr1_ratio40_causal_samenoisy \
+    --run=pdlm_depth4_bs8_pr1_ratio2_causal_samenoisy \
     --depth=4 \
     --block_size=8 \
     --prefix_pure_tokens=1 \
     --is_causal=True \
     --max_seq_len=1024 \
     --device_batch_size=64 \
-    --target_param_data_ratio=40 \
-    --noise_total_steps=0 \
-    --total_batch_size=65536
-
-# pdlm_depth4_bs4_pr1_ratio40_causal_samenoisy
-python -m scripts.pdlm_base_train \
-    --run=pdlm_depth4_bs4_pr1_ratio40_causal_samenoisy \
-    --depth=4 \
-    --block_size=4 \
-    --prefix_pure_tokens=1 \
-    --is_causal=True \
-    --max_seq_len=1024 \
-    --device_batch_size=64 \
-    --target_param_data_ratio=40 \
-    --noise_total_steps=0
-
-# pdlm_depth4_bs2_pr1_ratio40_causal_samenoisy
-python -m scripts.pdlm_base_train \
-    --run=pdlm_depth4_bs2_pr1_ratio40_causal_samenoisy \
-    --depth=4 \
-    --block_size=2 \
-    --prefix_pure_tokens=1 \
-    --is_causal=True \
-    --max_seq_len=1024 \
-    --device_batch_size=64 \
-    --target_param_data_ratio=40 \
-    --noise_total_steps=0
+    --target_param_data_ratio=2 \
+    --noise_total_steps=0 
 
 # pdlm_depth4_bs1_pr1_ratio40_causal_samenoisy
 python -m scripts.pdlm_base_train \
@@ -157,6 +99,20 @@ python -m scripts.pdlm_base_train \
     --device_batch_size=64 \
     --target_param_data_ratio=40 \
     --noise_total_steps=0
+
+# pdlm_depth4_bs1_pr1_ratio40_causal_samenoisy_debug
+python -m scripts.pdlm_base_train \
+    --run=pdlm_depth4_bs1_pr1_ratio40_causal_samenoisy_debug \
+    --depth=4 \
+    --block_size=1 \
+    --prefix_pure_tokens=1 \
+    --is_causal=True \
+    --max_seq_len=128 \
+    --device_batch_size=1 \
+    --target_param_data_ratio=10 \
+    --noise_total_steps=0 \
+    --num_iterations=2 \
+    --debug=True
 
 # =================================================
 # Non causal
