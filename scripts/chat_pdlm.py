@@ -9,6 +9,7 @@ Tom and Mary will go out today,
 """
 import argparse
 from contextlib import nullcontext
+from datetime import datetime
 import os
 
 import torch
@@ -71,18 +72,25 @@ print("-" * 50)
 
 conversation_tokens = [bos]
 dump_enabled = args.dump == "True"
+dump_index = 0
 
 def _format_block(tokens):
-    if tokens.ndim == 2 and tokens.size(0) == 1:
-        return tokens[0].tolist()
-    return tokens.tolist()
+    if torch.is_tensor(tokens):
+        tokens = tokens.tolist()
+    if isinstance(tokens, list) and len(tokens) == 1:
+        return tokens[0]
+    return tokens
 
-def _decode_block(token_ids):
-    # Best-effort decode for display; fall back to repr if decode fails.
+def _decode_token(token_id):
     try:
-        return tokenizer.decode(token_ids)
+        return tokenizer.decode([int(token_id)])
     except Exception:
-        return repr(token_ids)
+        return repr(token_id)
+
+def _decode_ids(token_ids):
+    if isinstance(token_ids, list):
+        return [_decode_ids(item) for item in token_ids]
+    return _decode_token(token_ids)
 
 while True:
     if args.prompt:
@@ -129,18 +137,28 @@ while True:
     response_tokens = [tok for tok in ids[len(prompt_tokens):] if tok >= 0]
 
     if dump_enabled:
+        dump_index += 1
+        dump_dir = os.path.join(os.getcwd(), "pdlm_dumps")
+        os.makedirs(dump_dir, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        dump_path = os.path.join(dump_dir, f"pdlm_dump_{timestamp}_{dump_index:04d}.txt")
+        dump_lines = []
         for block in block_debug:
-            noisy_block = _format_block(block["noisy_ids"])
-            pure_block = _format_block(block["pure_ids"])
-            noisy_text = _decode_block(noisy_block)
-            pure_text = _decode_block(pure_block)
-            print(f"[dump] step_{block['step']} noisy_block={noisy_block} pure_block={pure_block}")
-            print(f"[dump] step_{block['step']} noisy_text={noisy_text!r}")
-            print(f"[dump] step_{block['step']} pure_text={pure_text!r}")
-            if "next_ids" in block:
-                next_block = _format_block(block["next_ids"])
-                next_text = _decode_block(next_block)
-                print(f"[dump] step_{block['step']} next_block={next_block} next_text={next_text!r}")
+            pure_topk_ids = _format_block(block["pure_ids"])
+            pure_topk_probs = _format_block(block["pure_probs"])
+            pure_topk_text = _decode_ids(pure_topk_ids)
+            ids_line = (
+                f"[dump] step_{block['step']} pure_topk_ids={pure_topk_ids} "
+                f"pure_topk_probs={pure_topk_probs}"
+            )
+            text_line = f"[dump] step_{block['step']} pure_topk_text={pure_topk_text!r}"
+            print(ids_line)
+            print(text_line)
+            dump_lines.extend([ids_line, text_line])
+        if dump_lines:
+            with open(dump_path, "w", encoding="utf-8") as handle:
+                handle.write("\n".join(dump_lines) + "\n")
+            print(f"[dump] wrote {dump_path}")
 
     print("\n", end="", flush=True)
     if response_tokens:

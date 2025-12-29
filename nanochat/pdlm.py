@@ -327,7 +327,7 @@ class PDLM(nn.Module):
         return ids
 
     @torch.inference_mode()
-    def generate_with_blocks(self, tokens, max_tokens, bucket_size=8):
+    def generate_with_blocks(self, tokens, max_tokens, bucket_size=8, topk=5):
         """
         Like generate(), but also returns per-step noisy/pure blocks.
         """
@@ -346,12 +346,20 @@ class PDLM(nn.Module):
         while True:
             logits = self.forward(ids) # (B, T, pure_vocab_size)
             logits = logits[:, -bucket_size:, :] # (B, bucket_size, pure_vocab_size)
-            pure_ids = torch.argmax(logits, dim=-1) # (B, bucket)
+            max_topk = logits.size(-1)
+            k = min(topk, max_topk)
+            if k < 1:
+                raise ValueError("topk must be >= 1")
+            _, topk_ids = torch.topk(logits, k=k, dim=-1) # (B, bucket, topk)
+            probs = torch.softmax(logits.float(), dim=-1)
+            topk_probs = torch.gather(probs, -1, topk_ids) # (B, bucket, topk)
+            pure_ids = topk_ids[..., 0] # (B, bucket)
             noisy_ids = ids[:, -bucket_size:] # (B, bucket)
             entry = {
                 "step": step,
                 "noisy_ids": noisy_ids.detach().cpu(),
-                "pure_ids": pure_ids.detach().cpu(),
+                "pure_ids": topk_ids.detach().cpu(),
+                "pure_probs": topk_probs.detach().cpu(),
             }
             next_ids = self._token_map.transit_noisy_tokens(pure_ids, noisy_ids)
             next_is_pure = self._token_map.is_all_pure_tokens(next_ids)
