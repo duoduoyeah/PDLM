@@ -250,6 +250,7 @@ if not resuming:
     min_val_bpb = float("inf")
     smooth_train_loss = 0 # EMA of training loss
     total_training_time = 0 # total wall-clock time of training
+    val_bpb = 0
 else:
     step = meta_data["step"]
     loop_state = meta_data["loop_state"]
