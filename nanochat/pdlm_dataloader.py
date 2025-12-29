@@ -17,7 +17,7 @@ def tokenizing_distributed_data_loader_with_state(
     tokenizer_batch_size=128,
     device="cuda",
     resume_state_dict=None,
-    noise_total_steps=None,
+    noise_total_steps=0,
     prefix_pure_tokens=0,
 ):
     """

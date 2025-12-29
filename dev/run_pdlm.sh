@@ -9,7 +9,7 @@
 
 # Default intermediate artifacts directory is in ~/.cache/nanochat
 export OMP_NUM_THREADS=1
-export NANOCHAT_BASE_DIR="$HOME/.cache/nanochat/pdlm"
+export NANOCHAT_BASE_DIR="$HOME/.cache/nanochat/pdlm/pdlm_depth4_bs8_pr1_ratio40_causal_samenoisy"
 mkdir -p $NANOCHAT_BASE_DIR
 
 python -c "from nanochat.common import get_base_dir; print(get_base_dir())"
@@ -115,11 +115,12 @@ python -m scripts.pdlm_base_train \
     --depth=4 \
     --block_size=8 \
     --prefix_pure_tokens=1 \
-    --is_causal=False \
+    --is_causal=True \
     --max_seq_len=1024 \
     --device_batch_size=64 \
     --target_param_data_ratio=40 \
-    --noise_total_steps=0
+    --noise_total_steps=0 \
+    --total_batch_size=65536
 
 # pdlm_depth4_bs4_pr1_ratio40_causal_samenoisy
 python -m scripts.pdlm_base_train \
@@ -127,11 +128,11 @@ python -m scripts.pdlm_base_train \
     --depth=4 \
     --block_size=4 \
     --prefix_pure_tokens=1 \
-    --is_causal=False \
+    --is_causal=True \
     --max_seq_len=1024 \
     --device_batch_size=64 \
     --target_param_data_ratio=40 \
-    --noisy_type=
+    --noise_total_steps=0
 
 # pdlm_depth4_bs2_pr1_ratio40_causal_samenoisy
 python -m scripts.pdlm_base_train \
@@ -139,11 +140,11 @@ python -m scripts.pdlm_base_train \
     --depth=4 \
     --block_size=2 \
     --prefix_pure_tokens=1 \
-    --is_causal=False \
+    --is_causal=True \
     --max_seq_len=1024 \
     --device_batch_size=64 \
     --target_param_data_ratio=40 \
-    --noisy_type=
+    --noise_total_steps=0
 
 # pdlm_depth4_bs1_pr1_ratio40_causal_samenoisy
 python -m scripts.pdlm_base_train \
@@ -151,11 +152,11 @@ python -m scripts.pdlm_base_train \
     --depth=4 \
     --block_size=1 \
     --prefix_pure_tokens=1 \
-    --is_causal=False \
+    --is_causal=True \
     --max_seq_len=1024 \
     --device_batch_size=64 \
     --target_param_data_ratio=40 \
-    --noisy_type=
+    --noise_total_steps=0
 
 # =================================================
 # Non causal
@@ -185,5 +186,5 @@ python -m scripts.pdlm_base_train \
     --max_seq_len=1024 \
     --device_batch_size=64 \
     --target_param_data_ratio=40 \
-    --noisy_type=
+    --noise_total_steps=0
 
