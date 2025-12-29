@@ -107,9 +107,9 @@ python -m scripts.pdlm_base_train \
     --block_size=1 \
     --prefix_pure_tokens=1 \
     --is_causal=True \
-    --max_seq_len=128 \
-    --device_batch_size=1 \
-    --total_batch_size=2048 \
+    --max_seq_len=32 \
+    --device_batch_size=2 \
+    --total_batch_size=64 \
     --target_param_data_ratio=10 \
     --noise_total_steps=0 \
     --num_iterations=2 \

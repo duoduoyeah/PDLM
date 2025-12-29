@@ -80,11 +80,13 @@ def tokenizing_distributed_data_loader_with_state(
     # scratch buffer holds the tokens for one iteration
     token_buffer = deque() # we stream tokens on the right and pop from the left
     while True:
-        effective_total_steps = None if noise_total_steps == 0 else noise_total_steps
+
         # pick a random training step surrogate for noise scheduling if requested
-        noise_step = None
-        if effective_total_steps is not None:
-            noise_step = torch.randint(1, effective_total_steps + 1, (B,))
+        
+        if noise_total_steps > 0:
+            noise_step = torch.randint(1, noise_total_steps + 1, (B,))
+        else:
+            noise_step = 0
         # Accumulate enough tokens for one iteration before yielding.
         while len(token_buffer) < needed_tokens:
             doc_batch, (pq_idx, rg_idx) = next(batches)
@@ -102,7 +104,7 @@ def tokenizing_distributed_data_loader_with_state(
         noisy_levels = token_map.get_random_noisy_level(
             targets_cpu,
             step=noise_step,
-            total_steps=effective_total_steps,
+            total_steps=noise_total_steps,
             prefix_pure_tokens=prefix_pure_tokens,
         )
         inputs_cpu = token_map.noise_tokens(targets_cpu, noisy_levels)

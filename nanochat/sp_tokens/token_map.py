@@ -68,8 +68,8 @@ class TokenMap:
     def get_random_noisy_level(
         self,
         ids: torch.tensor,
-        step: Optional[Union[int, torch.Tensor]] = None,
-        total_steps: int = None,
+        step: Union[int, torch.Tensor] = 0,
+        total_steps: int = 0,
         prefix_pure_tokens: int = 0,
     ) -> torch.tensor:
         """
@@ -78,7 +78,7 @@ class TokenMap:
         - Otherwise, uniform random in [1, max_level].
         - Optionally force the first prefix_pure_tokens to be level 0.
         """
-        if step is None or total_steps is None:
+        if total_steps == 0:
             if ids.ndim >= 2:
                 # Different batch get their own level, but in the same sample, all the same noisy level
                 batch_size = ids.shape[0]
