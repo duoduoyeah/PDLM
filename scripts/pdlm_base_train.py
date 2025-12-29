@@ -33,6 +33,8 @@ max_seq_len = 1024 # max context length
 block_size = 8 # the training use block size
 prefix_pure_tokens = 1 # pure prefix tokens (0 = disabled)
 is_causal = True # the model' attn direction
+#Noisy
+noise_total_steps = 16
 # Training horizon. Only one of these 3 will be used, in this order of precedence.
 num_iterations = -1 # explicit number of steps of the optimization (-1 = disable)
 target_flops = -1.0 # calculate num_iterations to reach target_flops. Useful for scaling laws experiments (-1 = disable)
@@ -192,7 +194,7 @@ if resuming:
 # Initialize the DataLoaders for train/val
 tokens_dir = os.path.join(base_dir, "tokenized_data")
 dataloader_resume_state_dict = None if not resuming else meta_data["dataloader_state_dict"]
-noise_total_steps = 16
+
 train_loader = tokenizing_distributed_data_loader_with_state(
     device_batch_size,
     max_seq_len,

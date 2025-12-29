@@ -119,7 +119,7 @@ python -m scripts.pdlm_base_train \
     --max_seq_len=1024 \
     --device_batch_size=64 \
     --target_param_data_ratio=40 \
-    --noisy_type=
+    --noise_total_steps=0
 
 # pdlm_depth4_bs4_pr1_ratio40_causal_samenoisy
 python -m scripts.pdlm_base_train \
