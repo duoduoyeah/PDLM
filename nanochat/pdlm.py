@@ -327,13 +327,19 @@ class PDLM(nn.Module):
         return ids
 
     @torch.inference_mode()
-    def generate_with_blocks(self, tokens, max_tokens, bucket_size=8, topk=5):
+    def generate_with_blocks(self, tokens, max_tokens, bucket_size=8, topk=5, temperature=1.0, seed=42):
         """
         Like generate(), but also returns per-step noisy/pure blocks.
         """
         assert isinstance(tokens, list) # B == 1
         assert self.config.mask_token_id != -1, "mask_token_id must be set for generate"
         device = self.get_device()
+        
+        rng = None
+        if temperature > 0:
+            rng = torch.Generator(device=device)
+            rng.manual_seed(seed)
+            
         if self._token_map is None or self._token_map.device != device:
             self._token_map = get_token_map(device=device)
 
@@ -353,7 +359,7 @@ class PDLM(nn.Module):
             _, topk_ids = torch.topk(logits, k=k, dim=-1) # (B, bucket, topk)
             probs = torch.softmax(logits.float(), dim=-1)
             topk_probs = torch.gather(probs, -1, topk_ids) # (B, bucket, topk)
-            pure_ids = topk_ids[..., 0] # (B, bucket)
+            
             noisy_ids = ids[:, -bucket_size:] # (B, bucket)
             entry = {
                 "step": step,
@@ -361,6 +367,18 @@ class PDLM(nn.Module):
                 "pure_ids": topk_ids.detach().cpu(),
                 "pure_probs": topk_probs.detach().cpu(),
             }
+
+            if topk > 0:
+                v, _ = torch.topk(logits, min(topk, logits.size(-1)), dim=-1)
+                logits[logits < v[:, :, [-1]]] = -float('Inf')
+            if temperature > 0:
+                logits = logits / temperature
+                probs = F.softmax(logits, dim=-1)
+                pure_ids = torch.multinomial(probs, num_samples=1, generator=rng).squeeze(-1)
+            else:
+                pure_ids = topk_ids[..., 0] # (B, bucket)
+            
+            
             next_ids = self._token_map.transit_noisy_tokens(pure_ids, noisy_ids)
             next_is_pure = self._token_map.is_all_pure_tokens(next_ids)
             if next_is_pure:
