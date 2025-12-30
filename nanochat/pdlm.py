@@ -374,7 +374,9 @@ class PDLM(nn.Module):
             if temperature > 0:
                 logits = logits / temperature
                 probs = F.softmax(logits, dim=-1)
-                pure_ids = torch.multinomial(probs, num_samples=1, generator=rng).squeeze(-1)
+                probs_2d = probs.reshape(-1, probs.size(-1))
+                pure_ids = torch.multinomial(probs_2d, num_samples=1, generator=rng)
+                pure_ids = pure_ids.reshape(probs.shape[:-1])
             else:
                 pure_ids = topk_ids[..., 0] # (B, bucket)
             
