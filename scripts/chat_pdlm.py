@@ -37,6 +37,7 @@ parser.add_argument("-d", "--dtype", type=str, default="bfloat16", choices=["flo
 parser.add_argument("--dump", type=str, default="True", choices=["True", "False"])
 parser.add_argument("--mode", type=str, default="generate", choices=["generate", "denoise"], help="Mode of operation")
 parser.add_argument("--noisy-level", type=int, default=1, help="Noisy level for denoise mode")
+parser.add_argument("-v", "--verbose", type=str, default="False", choices=["True", "False"], help="Print dump info to stdout")
 args = parser.parse_args()
 
 
@@ -81,6 +82,7 @@ print("-" * 50)
 
 conversation_tokens = [bos]
 dump_enabled = args.dump == "True"
+verbose = args.verbose == "True"
 dump_index = 0
 
 def _format_block(tokens):
@@ -180,29 +182,33 @@ while True:
             text_line = f"[dump] step_{block['step']} pure_topk_text={pure_topk_text!r}"
             max_line = f"[dump] step_{block['step']} max_tokens={max_tokens_info}"
 
-            print(ids_line)
-            print(probs_line)
-            print(text_line)
-            print(max_line)
+            if verbose:
+                print(ids_line)
+                print(probs_line)
+                print(text_line)
+                print(max_line)
             dump_lines.extend([ids_line, probs_line, text_line, max_line])
             
             if "original_ids" in block:
                 original_ids = _format_block(block["original_ids"])
                 orig_line = f"[dump] step_{block['step']} original_ids={original_ids}"
-                print(orig_line)
+                if verbose:
+                    print(orig_line)
                 dump_lines.append(orig_line)
             
             if "noisy_ids" in block:
                 noisy_ids = _format_block(block["noisy_ids"])
                 noisy_line = f"[dump] step_{block['step']} noisy_ids={noisy_ids}"
-                print(noisy_line)
+                if verbose:
+                    print(noisy_line)
                 dump_lines.append(noisy_line)
 
             if "sampled_ids" in block:
                 sampled_ids = _format_block(block["sampled_ids"])
                 sampled_text = _decode_ids(sampled_ids)
                 sampled_line = f"[dump] step_{block['step']} sampled_ids={sampled_ids} text={sampled_text!r}"
-                print(sampled_line)
+                if verbose:
+                    print(sampled_line)
                 dump_lines.append(sampled_line)
 
         if dump_lines:
