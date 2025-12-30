@@ -167,6 +167,14 @@ while True:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         dump_path = os.path.join(dump_dir, f"pdlm_dump_{timestamp}_{dump_index:04d}.txt")
         dump_lines = []
+        if block_debug and "original_ids" in block_debug[0]:
+            original_ids = _format_block(block_debug[0]["original_ids"])
+            original_text = _decode_ids(original_ids)
+            orig_line = f"[dump] original_ids={original_ids} text={original_text!r}"
+            if verbose:
+                print(orig_line)
+            dump_lines.append(orig_line)
+
         for block in block_debug:
             pure_topk_ids = _format_block(block["pure_ids"])
             pure_topk_probs = _round_probs(_format_block(block["pure_probs"]), decimals=3)
@@ -188,13 +196,6 @@ while True:
                 print(text_line)
                 print(max_line)
             dump_lines.extend([ids_line, probs_line, text_line, max_line])
-            
-            if "original_ids" in block:
-                original_ids = _format_block(block["original_ids"])
-                orig_line = f"[dump] step_{block['step']} original_ids={original_ids}"
-                if verbose:
-                    print(orig_line)
-                dump_lines.append(orig_line)
             
             if "noisy_ids" in block:
                 noisy_ids = _format_block(block["noisy_ids"])
