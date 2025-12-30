@@ -374,3 +374,87 @@ class PDLM(nn.Module):
                     ids = F.pad(ids, (0, bucket_size), value=mask_id)
             step += 1
         return ids, block_debug
+
+
+    @torch.inference_mode()
+    def noisy_denoisy_by_model(self, tokens, bucket_size=8, noisy_level=1, topk=3):
+        """
+        This func is not for generate new tokens, but to add noisy to 
+        the last bucket_size of the sequence, and then denoise the
+        added noisy. So this func would be only several steps.
+        this func will also return a block_debug like generate_with_blocks,
+        there should be step, the original real pure token, the current noisy token,
+        and the predicted pure token by the model, with prob, topk,
+        """
+        assert isinstance(tokens, list) # B == 1
+        device = self.get_device()
+        if self._token_map is None or self._token_map.device != device:
+            self._token_map = get_token_map(device=device)
+
+        # Prepare IDs
+        ids = torch.tensor([tokens], dtype=torch.long, device=device) # (1, L)
+        L = ids.size(1)
+        if L < bucket_size:
+             bucket_size = L
+        
+        # Split into prefix and target part
+        prefix_ids = ids[:, :-bucket_size]
+        target_pure_ids = ids[:, -bucket_size:] # (1, bucket)
+        
+        # Add noise
+        noisy_levels = torch.full_like(target_pure_ids, noisy_level)
+        noisy_ids = self._token_map.noise_tokens(target_pure_ids, noisy_levels)
+        
+        # Combine
+        ids = torch.cat([prefix_ids, noisy_ids], dim=1)
+        
+        block_debug = []
+        step = 0
+        
+        # Denoising loop
+        while True:
+            logits = self.forward(ids) # (1, L, pure_vocab)
+            logits = logits[:, -bucket_size:, :] # (1, bucket, pure_vocab)
+            
+            # Get topk pure predictions
+            max_topk = logits.size(-1)
+            k = min(topk, max_topk)
+            _, topk_ids = torch.topk(logits, k=k, dim=-1) # (1, bucket, topk)
+            probs = torch.softmax(logits.float(), dim=-1)
+            topk_probs = torch.gather(probs, -1, topk_ids) # (1, bucket, topk)
+            
+            predicted_pure_ids = topk_ids[..., 0] # Top 1 prediction
+            
+            # Record debug info
+            entry = {
+                "step": step,
+                "original_ids": target_pure_ids.detach().cpu(),
+                "noisy_ids": noisy_ids.detach().cpu(),
+                "pure_ids": topk_ids.detach().cpu(), # Predicted pure (topk)
+                "pure_probs": topk_probs.detach().cpu(), # Probs of predicted pure
+            }
+            
+            # Transit
+            next_ids = self._token_map.transit_noisy_tokens(predicted_pure_ids, noisy_ids)
+            
+            # Check if converged (all pure)
+            next_is_pure = self._token_map.is_all_pure_tokens(next_ids)
+            if next_is_pure:
+                entry["next_ids"] = next_ids.detach().cpu()
+            
+            block_debug.append(entry)
+            
+            # Update loop vars
+            noisy_ids = next_ids
+            ids = torch.cat([prefix_ids, noisy_ids], dim=1)
+            step += 1
+            
+            if next_is_pure:
+                break
+                
+            # Safety break
+            if step > 100: 
+                break
+                
+        return ids, block_debug
+        

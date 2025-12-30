@@ -4,6 +4,7 @@ Chat with a PDLM checkpoint using its block generation.
 Example:
 python -m scripts.chat_pdlm -b 8 --max-new-tokens 16 --dump True
 python -m scripts.chat_pdlm -b 8 --max-new-tokens 128 --dump False
+python -m scripts.chat_pdlm -b 2 --max-new-tokens 128 --dump False
 Mary likes toy,
 Tom and Mary will go out today,
 """
@@ -28,6 +29,8 @@ parser.add_argument("-b", "--bucket-size", type=int, default=8, help="Bucket siz
 parser.add_argument("--device-type", type=str, default="", choices=["cuda", "cpu", "mps"], help="Device type for eval")
 parser.add_argument("-d", "--dtype", type=str, default="bfloat16", choices=["float32", "bfloat16"])
 parser.add_argument("--dump", type=str, default="True", choices=["True", "False"])
+parser.add_argument("--mode", type=str, default="generate", choices=["generate", "denoise"], help="Mode of operation")
+parser.add_argument("--noisy-level", type=int, default=1, help="Noisy level for denoise mode")
 args = parser.parse_args()
 
 
@@ -132,7 +135,13 @@ while True:
         max_total_tokens = ((max_total_tokens + bucket_size - 1) // bucket_size) * bucket_size
 
     with autocast_ctx:
-        if dump_enabled:
+        if args.mode == "denoise":
+            ids, block_debug = model.noisy_denoisy_by_model(
+                prompt_tokens,
+                bucket_size=bucket_size,
+                noisy_level=args.noisy_level,
+            )
+        elif dump_enabled:
             ids, block_debug = model.generate_with_blocks(
                 prompt_tokens,
                 max_total_tokens,
@@ -143,7 +152,7 @@ while True:
     ids = ids[0].tolist()
     response_tokens = [tok for tok in ids[len(prompt_tokens):] if tok >= 0]
 
-    if dump_enabled:
+    if dump_enabled or args.mode == "denoise":
         dump_index += 1
         dump_dir = os.path.join(os.getcwd(), "pdlm_dumps")
         os.makedirs(dump_dir, exist_ok=True)
@@ -170,6 +179,19 @@ while True:
             print(text_line)
             print(max_line)
             dump_lines.extend([ids_line, probs_line, text_line, max_line])
+            
+            if "original_ids" in block:
+                original_ids = _format_block(block["original_ids"])
+                orig_line = f"[dump] step_{block['step']} original_ids={original_ids}"
+                print(orig_line)
+                dump_lines.append(orig_line)
+            
+            if "noisy_ids" in block:
+                noisy_ids = _format_block(block["noisy_ids"])
+                noisy_line = f"[dump] step_{block['step']} noisy_ids={noisy_ids}"
+                print(noisy_line)
+                dump_lines.append(noisy_line)
+
         if dump_lines:
             with open(dump_path, "w", encoding="utf-8") as handle:
                 handle.write("\n".join(dump_lines) + "\n")
@@ -181,5 +203,5 @@ while True:
     print()
     conversation_tokens.extend(response_tokens)
 
-    if args.prompt:
+    if args.prompt or args.mode == "denoise":
         break
