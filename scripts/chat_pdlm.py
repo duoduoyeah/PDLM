@@ -3,8 +3,8 @@ Chat with a PDLM checkpoint using its block generation.
 
 Example:
 python -m scripts.chat_pdlm -b 8 --max-new-tokens 16 --dump True
-python -m scripts.chat_pdlm -b 8 --max-new-tokens 128 --dump False
-python -m scripts.chat_pdlm -b 2 --max-new-tokens 128 --dump False 
+python -m scripts.chat_pdlm -b 8 --max-new-tokens 128 --dump False -p "Mary likes toy, but"
+python -m scripts.chat_pdlm -b 2 --max-new-tokens 128 --dump False -p "Mary likes toy, but"
 
 Mary likes toy,
 Tom and Mary will go out today,
@@ -197,6 +197,13 @@ while True:
                 noisy_line = f"[dump] step_{block['step']} noisy_ids={noisy_ids}"
                 print(noisy_line)
                 dump_lines.append(noisy_line)
+
+            if "sampled_ids" in block:
+                sampled_ids = _format_block(block["sampled_ids"])
+                sampled_text = _decode_ids(sampled_ids)
+                sampled_line = f"[dump] step_{block['step']} sampled_ids={sampled_ids} text={sampled_text!r}"
+                print(sampled_line)
+                dump_lines.append(sampled_line)
 
         if dump_lines:
             with open(dump_path, "w", encoding="utf-8") as handle:

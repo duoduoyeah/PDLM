@@ -380,6 +380,8 @@ class PDLM(nn.Module):
             else:
                 pure_ids = topk_ids[..., 0] # (B, bucket)
             
+            #we also add the pure_ids to the entry and dump 
+            entry["sampled_ids"] = pure_ids.detach().cpu()
             
             next_ids = self._token_map.transit_noisy_tokens(pure_ids, noisy_ids)
             next_is_pure = self._token_map.is_all_pure_tokens(next_ids)
