@@ -4,9 +4,13 @@ Chat with a PDLM checkpoint using its block generation.
 Example:
 python -m scripts.chat_pdlm -b 8 --max-new-tokens 16 --dump True
 python -m scripts.chat_pdlm -b 8 --max-new-tokens 128 --dump False
-python -m scripts.chat_pdlm -b 2 --max-new-tokens 128 --dump False
+python -m scripts.chat_pdlm -b 2 --max-new-tokens 128 --dump False 
+
 Mary likes toy,
 Tom and Mary will go out today,
+
+Mary likes toy, but she does not want to share. One day, she finds a small, shiny robot in her room. It is not like any toy she has seen before. It has a big smile and a funny face. She thinks it is a magic robot. She decides to take it outside to play.
+
 """
 import argparse
 from contextlib import nullcontext
@@ -143,15 +147,14 @@ while True:
                 bucket_size=bucket_size,
                 noisy_level=args.noisy_level,
             )
-        elif dump_enabled or args.topk is not None or args.temperature is not None:
+        else:
             gen_kwargs = {"bucket_size": bucket_size}
             if args.topk is not None:
                 gen_kwargs["topk"] = args.topk
             if args.temperature is not None:
                 gen_kwargs["temperature"] = args.temperature
             ids, block_debug = model.generate_with_blocks(prompt_tokens, max_total_tokens, **gen_kwargs)
-        else:
-            ids = model.generate(prompt_tokens, max_total_tokens, bucket_size=bucket_size)
+
     ids = ids[0].tolist()
     response_tokens = [tok for tok in ids[len(prompt_tokens):] if tok >= 0]
 

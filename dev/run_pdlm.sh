@@ -9,7 +9,7 @@
 
 # Default intermediate artifacts directory is in ~/.cache/nanochat
 export OMP_NUM_THREADS=1
-export NANOCHAT_BASE_DIR="$HOME/.cache/nanochat/pdlm/pdlm_d8_bs8_pr1_r25_ca_samenoisy"
+export NANOCHAT_BASE_DIR="$HOME/.cache/nanochat/pdlm/pdlm_d8_bs2_pr1_r20_ca_samenoisy"
 mkdir -p $NANOCHAT_BASE_DIR
 
 python -c "from nanochat.common import get_base_dir; print(get_base_dir())"
