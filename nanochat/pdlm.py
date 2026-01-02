@@ -149,6 +149,8 @@ class PDLM(nn.Module):
         self.register_buffer("cos", cos, persistent=False) # persistent=False means it's not saved to the checkpoint
         self.register_buffer("sin", sin, persistent=False)
         self._token_map = None
+        self._is_causal = self.config.is_causal
+        self.inference_mask = None
 
     def init_weights(self):
         self.apply(self._init_weights)
@@ -314,14 +316,28 @@ class PDLM(nn.Module):
         if self._token_map is None or self._token_map.device != device:
             self._token_map = get_token_map(device=device)
 
+        if not self._is_causal:
+            assert attn_mask is not None, "need attn-mask when the model is non-causal"
+            #TODO: also need to assert that attn_mask size is larger than max_tokens + bucket_size
+            # for safety
+        
         ids = torch.tensor([tokens], dtype=torch.long, device=device) # add batch dim
         mask_id = self.config.mask_token_id
-        ids = F.pad(ids, (0, bucket_size), value=mask_id) # add bucket
+
+        if self._is_causal:
+            ids = F.pad(ids, (0, bucket_size), value=mask_id) # add bucket
+            current_mask = None
+        else:
+            pad_len = bucket_size - (ids.size(1) % bucket_size)
+            ids = F.pad(ids, (0, pad_len), value=mask_id)
+            T = ids.size(1)
+            current_mask = attn_mask[:T, :T]
+
         assert max_tokens % bucket_size == 0
         block_debug = []
         step = 0
         while True:
-            logits = self.forward(ids, attn_mask=attn_mask) # (B, T, pure_vocab_size)
+            logits = self.forward(ids, attn_mask=current_mask) # (B, T, pure_vocab_size)
             logits = logits[:, -bucket_size:, :] # (B, bucket_size, pure_vocab_size)
             max_topk = logits.size(-1)
             k = min(topk, max_topk)
@@ -365,6 +381,9 @@ class PDLM(nn.Module):
                     break
                 else:
                     ids = F.pad(ids, (0, bucket_size), value=mask_id)
+                    if not self._is_causal:
+                        T = ids.size(1)
+                        current_mask = attn_mask[:T, :T]
             step += 1
         return ids, block_debug
 
@@ -401,12 +420,16 @@ class PDLM(nn.Module):
         # Combine
         ids = torch.cat([prefix_ids, noisy_ids], dim=1)
         
+        current_mask = None
+        if not self._is_causal and attn_mask is not None:
+            current_mask = attn_mask[:ids.size(1), :ids.size(1)]
+
         block_debug = []
         step = 0
         
         # Denoising loop
         while True:
-            logits = self.forward(ids, attn_mask=attn_mask) # (1, L, pure_vocab)
+            logits = self.forward(ids, attn_mask=current_mask) # (1, L, pure_vocab)
             logits = logits[:, -bucket_size:, :] # (1, bucket, pure_vocab)
             
             # Get topk pure predictions

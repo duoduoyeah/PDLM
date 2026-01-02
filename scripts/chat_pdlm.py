@@ -23,6 +23,7 @@ from nanochat.common import compute_init, autodetect_device_type, get_base_dir
 from nanochat.checkpoint_manager import load_checkpoint, find_last_step, find_largest_model
 from nanochat.tokenizer import get_tokenizer
 from nanochat.pdlm import PDLM, PDLMConfig
+from nanochat.attn_masks import gen_mask
 
 parser = argparse.ArgumentParser(description="Chat with a PDLM model")
 parser.add_argument("-g", "--model-tag", type=str, default=None, help="Model tag to load")
@@ -73,6 +74,26 @@ model, meta = load_pdlm(checkpoint_dir, device, step=args.step, model_tag=args.m
 tokenizer = get_tokenizer()
 
 bos = tokenizer.get_bos_token_id()
+
+##------------
+# prepare the mask if the model is non-causal
+
+attn_mask = None
+if not model.config.is_causal:
+    # use the right lower part of the original mask since the original mask is for 2L
+    # but here when inference, only L is needed
+    L = model.config.sequence_len
+    
+    # also make sure the L here is larger than max_seq_len + bucket_size
+    mask_gen_len = L + args.bucket_size
+    
+    full_mask = gen_mask(mask_gen_len, args.bucket_size, attn_backend="sdpa", is_causal=False)
+    # The mask is 2*mask_gen_len x 2*mask_gen_len. 
+    # We want the bottom-right mask_gen_len x mask_gen_len part.
+    attn_mask = full_mask[mask_gen_len:, mask_gen_len:].to(device)
+    del full_mask
+
+#--------------
 
 print("\nNanoChat PDLM Interactive Mode")
 print("-" * 50)
@@ -146,11 +167,12 @@ while True:
         if args.mode == "denoise":
             ids, block_debug = model.noisy_denoisy_by_model(
                 prompt_tokens,
+                attn_mask=attn_mask,
                 bucket_size=bucket_size,
                 noisy_level=args.noisy_level,
             )
-        else:
-            gen_kwargs = {"bucket_size": bucket_size}
+        elif args.mode == "generate":
+            gen_kwargs = {"bucket_size": bucket_size, "attn_mask": attn_mask}
             if args.topk is not None:
                 gen_kwargs["topk"] = args.topk
             if args.temperature is not None:
@@ -167,6 +189,16 @@ while True:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         dump_path = os.path.join(dump_dir, f"pdlm_dump_{timestamp}_{dump_index:04d}.txt")
         dump_lines = []
+        
+        prompt_str = tokenizer.decode(prompt_tokens)
+        prompt_info_str = f"[dump] prompt_str={prompt_str!r}"
+        prompt_ids_info = f"[dump] prompt_ids={prompt_tokens}"
+        if verbose:
+            print(prompt_info_str)
+            print(prompt_ids_info)
+        dump_lines.append(prompt_info_str)
+        dump_lines.append(prompt_ids_info)
+
         if block_debug and "original_ids" in block_debug[0]:
             original_ids = _format_block(block_debug[0]["original_ids"])
             original_text = _decode_ids(original_ids)
