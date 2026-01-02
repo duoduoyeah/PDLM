@@ -24,8 +24,11 @@ class PDLMConfig:
     n_head: int = 6 # number of query heads
     n_kv_head: int = 6 # number of key/value heads (GQA)
     n_embd: int = 768
-    prefix_pure_tokens: int = 0
-    all_vocab_size: int = -1 # need for training
+    
+    is_causal: bool = True
+    # need for training
+    prefix_pure_tokens: int = 0 
+    all_vocab_size: int = -1
     mask_token_id: int = -1
 
 def norm(x):
@@ -240,18 +243,18 @@ class PDLM(nn.Module):
         """Training: idx/targets are length L; we concat to 2L inside this and apply block mask."""
         if targets is not None:
             B, T = idx.size()
-            assert attn_mask is not None, "Training should has Mask"
+            assert attn_mask is not None, "Train should has attn mask"
             assert self.config.sequence_len == T, "use double seq length when train"
             assert targets.size(1) == T, "Targets should match the base sequence length"
             idx = torch.cat((idx, targets), dim=1)
         else:
-            assert attn_mask is None, "Inference should not have mask"
             B, T = idx.size()
         # Grab the rotary embeddings for the current sequence length (they are of shape (1, seq_len, 1, head_dim/2))
         assert T <= self.cos.size(1), f"Sequence length grew beyond the rotary embeddings cache: {T} > {self.cos.size(1)}"
         assert idx.device == self.cos.device, f"Rotary embeddings and idx are on different devices: {idx.device} != {self.cos.device}"
         assert self.cos.dtype == torch.bfloat16, "Rotary embeddings must be in bfloat16"
         
+    
         # if kv cache exists, we need to offset the rotary embeddings to the current position in the cache
         T0 = 0 if kv_cache is None else kv_cache.get_pos()
         if targets is not None:
@@ -295,39 +298,7 @@ class PDLM(nn.Module):
             return logits
 
     @torch.inference_mode()
-    def generate(self, tokens, max_tokens, bucket_size=8):
-        """
-        Naive autoregressive streaming inference.
-        To make it super simple, let's assume:
-        - batch size is 1
-        - ids and the yielded tokens are simple Python lists and ints
-        """
-        assert isinstance(tokens, list) # B == 1
-        assert self.config.mask_token_id != -1, "mask_token_id must be set for generate"
-        device = self.get_device()
-        if self._token_map is None or self._token_map.device != device:
-            self._token_map = get_token_map(device=device)
-
-        ids = torch.tensor([tokens], dtype=torch.long, device=device) # add batch dim
-        mask_id = self.config.mask_token_id
-        ids = F.pad(ids, (0, bucket_size), value=mask_id) # add bucket
-        assert max_tokens % bucket_size == 0
-        while True:
-            logits = self.forward(ids) # (B, T, pure_vocab_size)
-            logits = logits[:, -bucket_size:, :] # (B, bucket_size, pure_vocab_size)
-            next_ids = torch.argmax(logits, dim=-1, keepdim=True) # (B, bucket)
-            noisy_ids = ids[:, -bucket_size:] # (B, bucket)
-            next_ids = self._token_map.transit_noisy_tokens(next_ids.squeeze(-1), noisy_ids)
-            ids = torch.cat((ids[:, :-next_ids.size(1)], next_ids), dim=1)
-            if self._token_map.is_all_pure_tokens(next_ids):
-                if ids.numel() >= max_tokens:
-                    break
-                else:
-                    ids = F.pad(ids, (0, bucket_size), value=mask_id)
-        return ids
-
-    @torch.inference_mode()
-    def generate_with_blocks(self, tokens, max_tokens, bucket_size=8, topk=5, temperature=1.0, seed=42):
+    def generate_with_blocks(self, tokens, max_tokens, attn_mask=None, bucket_size=8, topk=5, temperature=1.0, seed=42):
         """
         Like generate(), but also returns per-step noisy/pure blocks.
         """
@@ -350,7 +321,7 @@ class PDLM(nn.Module):
         block_debug = []
         step = 0
         while True:
-            logits = self.forward(ids) # (B, T, pure_vocab_size)
+            logits = self.forward(ids, attn_mask=attn_mask) # (B, T, pure_vocab_size)
             logits = logits[:, -bucket_size:, :] # (B, bucket_size, pure_vocab_size)
             max_topk = logits.size(-1)
             k = min(topk, max_topk)
@@ -399,7 +370,7 @@ class PDLM(nn.Module):
 
 
     @torch.inference_mode()
-    def noisy_denoisy_by_model(self, tokens, bucket_size=8, noisy_level=1, topk=3):
+    def noisy_denoisy_by_model(self, tokens, attn_mask=None, bucket_size=8, noisy_level=1, topk=3):
         """
         This func is not for generate new tokens, but to add noisy to 
         the last bucket_size of the sequence, and then denoise the
@@ -435,7 +406,7 @@ class PDLM(nn.Module):
         
         # Denoising loop
         while True:
-            logits = self.forward(ids) # (1, L, pure_vocab)
+            logits = self.forward(ids, attn_mask=attn_mask) # (1, L, pure_vocab)
             logits = logits[:, -bucket_size:, :] # (1, bucket, pure_vocab)
             
             # Get topk pure predictions

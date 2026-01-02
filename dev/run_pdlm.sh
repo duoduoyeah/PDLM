@@ -62,17 +62,30 @@ python -m scripts.pdlm_base_train \
     --target_param_data_ratio=30
 
 # =================
-# pdlm_d8_bs8_pr1_r25_ca_samenoisy
+# pdlm_d8_bs8_pr1_r25_non_ca_samenoisy
 python -m scripts.pdlm_base_train \
-    --run=pdlm_d8_bs8_pr1_r25_ca_samenoisy \
+    --run=pdlm_d8_bs8_pr1_r25_non_ca_samenoisy \
+    --wandb_group=pdlm_d8 \
     --depth=8 \
     --block_size=8 \
     --prefix_pure_tokens=1 \
-    --is_causal=True \
+    --is_causal=False \
     --max_seq_len=1024 \
     --device_batch_size=64 \
     --target_param_data_ratio=25 \
     --noise_total_steps=0
+
+# pdlm_d8_bs8_pr1_r25_non_ca
+python -m scripts.pdlm_base_train \
+    --run=pdlm_d8_bs8_pr1_r25_non_ca \
+    --wandb_group=pdlm_d8 \
+    --depth=8 \
+    --block_size=8 \
+    --prefix_pure_tokens=1 \
+    --is_causal=False \
+    --max_seq_len=1024 \
+    --device_batch_size=64 \
+    --target_param_data_ratio=25
 # =================
 
 # pdlm_depth4_bs1_pr1_ratio40_causal_samenoisy_debug

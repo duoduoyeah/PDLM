@@ -25,6 +25,7 @@ print_banner()
 # -----------------------------------------------------------------------------
 # User settings
 run = "dummy" # wandb run name default ("dummy" is special - we won't log to wandb)
+wandb_group = None # wandb group
 # Runtime
 device_type = "" # cuda|cpu|mps (empty => autodetect good device type default, in order: CUDA > MPS > CPU)
 # Model architecture
@@ -79,7 +80,7 @@ get_max_memory = torch.cuda.max_memory_allocated if device_type == "cuda" else l
 
 # wandb logging init
 use_dummy_wandb = run == "dummy" or not master_process
-wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat", name=run, config=user_config)
+wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat", name=run, group=wandb_group ,config=user_config)
 
 # Tokenizer will be useful for evaluation, also we need the vocab size
 tokenizer = get_tokenizer()
@@ -136,6 +137,7 @@ model_config_kwargs = dict(
     n_embd=model_dim,
     prefix_pure_tokens=prefix_pure_tokens,
     mask_token_id=mask_token_id,
+    is_causal=is_causal
 )
 with torch.device("meta"):
     model_config = PDLMConfig(**model_config_kwargs)
@@ -308,7 +310,7 @@ while True:
 
     # once in a while: sample from the model (only on master process)
     # use the original uncompiled model because the inputs keep changing shape
-    if master_process and (last_step or (step > 0 and step % sample_every == 0)):
+    if False and master_process and (last_step or (step > 0 and step % sample_every == 0)):
         model.eval()
         prompts = [
             "The capital of France is",
