@@ -199,6 +199,15 @@ while True:
         dump_lines.append(prompt_info_str)
         dump_lines.append(prompt_ids_info)
 
+        final_str = tokenizer.decode(ids)
+        final_info_str = f"[dump] final_str={final_str!r}"
+        final_ids_info = f"[dump] final_ids={ids}"
+        if verbose:
+            print(final_info_str)
+            print(final_ids_info)
+        dump_lines.append(final_info_str)
+        dump_lines.append(final_ids_info)
+
         if block_debug and "original_ids" in block_debug[0]:
             original_ids = _format_block(block_debug[0]["original_ids"])
             original_text = _decode_ids(original_ids)
