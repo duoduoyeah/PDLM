@@ -329,6 +329,7 @@ class PDLM(nn.Module):
             # for safety
         
         ids = torch.tensor([tokens], dtype=torch.long, device=device) # add batch dim
+        prompt_ids = ids.clone()
         mask_id = self.config.mask_token_id
 
         if self._is_causal:
@@ -394,6 +395,11 @@ class PDLM(nn.Module):
                 entry["next_ids"] = next_ids.detach().cpu()
             block_debug.append(entry)
             ids = torch.cat((ids[:, :-next_ids.size(1)], next_ids), dim=1)
+            
+            # Restore prompt
+            if ids.size(1) >= prompt_ids.size(1):
+                ids[:, :prompt_ids.size(1)] = prompt_ids
+            
             if next_is_pure:
                 if ids.numel() >= max_tokens:
                     break
