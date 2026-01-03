@@ -304,7 +304,7 @@ class PDLM(nn.Module):
                              attn_mask=None, 
                              bucket_size=8, 
                              topk=5, 
-                             temperature=1.0, 
+                             temperature=0, 
                              seed=42,
                              transit_topk=10):
         """
