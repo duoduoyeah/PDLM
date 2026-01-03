@@ -36,17 +36,18 @@ class TokenMap:
         return sampled
 
     def noise_tokens(self,
-                     pure_ids: torch.tensor,
-                     noisy_levels: torch.tensor):
+                     pure_ids: torch.Tensor,
+                     noisy_levels: torch.Tensor):
         assert pure_ids.shape == noisy_levels.shape
         options = self.pure_to_noisy_map[pure_ids, noisy_levels]
         return self._sample_fanout(options, pure_ids)
         
     def transit_noisy_tokens(
         self,
-        pure_ids: torch.tensor,
-        noisy_ids: torch.tensor,
+        pure_ids: torch.Tensor,
+        noisy_ids: torch.Tensor,
         enforce_monotonic: bool = True,
+        pure_probs: Optional[torch.Tensor] = None
     ):
         """
         enforce_monotonic: if True, noisy levels are forced to be non-decreasing along the last dimension.
@@ -58,6 +59,35 @@ class TokenMap:
             noisy_levels = torch.cummax(noisy_levels, dim=-1).values
         assert torch.all(noisy_levels >= 0).item(), "Expected all noisy levels to be >= 0"
         # pure ids, noisy_levels -> output_scratch_ids
+        
+        if pure_ids.ndim == 3:
+            assert pure_probs is not None, "pure_probs is required when pure_ids has 3 dimensions (topk)"
+            
+            # pure_ids: (B, T, K)
+            # noisy_levels: (B, T) -> (B, T, K)
+            expanded_noisy_levels = noisy_levels.unsqueeze(-1).expand_as(pure_ids)
+            
+            # options: (B, T, K, Fanout)
+            options = self.pure_to_noisy_map[pure_ids, expanded_noisy_levels]
+            
+            # weights: (B, T, K, Fanout)
+            # Distribute pure_prob equally among fanouts
+            weights = (pure_probs.unsqueeze(-1) / self.fanout).expand_as(options)
+            
+            # Flatten to (B, T, K*Fanout)
+            flat_options = options.reshape(options.shape[0], options.shape[1], -1)
+            flat_weights = weights.reshape(weights.shape[0], weights.shape[1], -1)
+            
+            # Aggregate probabilities
+            vocab_size = self.noisy_level_map.size(0)
+            acc_probs = torch.zeros(
+                flat_options.shape[0], flat_options.shape[1], vocab_size, 
+                device=self.device, dtype=pure_probs.dtype
+            )
+            acc_probs.scatter_add_(2, flat_options, flat_weights)
+            
+            return acc_probs.argmax(dim=-1)
+
         options = self.pure_to_noisy_map[pure_ids, noisy_levels]
         return self._sample_fanout(options, noisy_ids)
     

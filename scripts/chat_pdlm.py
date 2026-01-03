@@ -32,6 +32,7 @@ parser.add_argument("-p", "--prompt", type=str, default="", help="Prompt the mod
 parser.add_argument("--max-new-tokens", type=int, default=16, help="Max new tokens to generate")
 parser.add_argument("-b", "--bucket-size", type=int, default=8, help="Bucket size for block generation")
 parser.add_argument("--topk", type=int, default=None, help="Top-k sampling for block generation (defaults to model)")
+parser.add_argument("--transit-topk", type=int, default=10, help="Top-k tokens used for transit probability aggregation (0 to disable)")
 parser.add_argument("--temperature", type=float, default=None, help="Sampling temperature for block generation (defaults to model)")
 parser.add_argument("--device-type", type=str, default="", choices=["cuda", "cpu", "mps"], help="Device type for eval")
 parser.add_argument("-d", "--dtype", type=str, default="bfloat16", choices=["float32", "bfloat16"])
@@ -170,9 +171,10 @@ while True:
                 attn_mask=attn_mask,
                 bucket_size=bucket_size,
                 noisy_level=args.noisy_level,
+                transit_topk=args.transit_topk,
             )
         elif args.mode == "generate":
-            gen_kwargs = {"bucket_size": bucket_size, "attn_mask": attn_mask}
+            gen_kwargs = {"bucket_size": bucket_size, "attn_mask": attn_mask, "transit_topk": args.transit_topk}
             if args.topk is not None:
                 gen_kwargs["topk"] = args.topk
             if args.temperature is not None:

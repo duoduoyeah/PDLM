@@ -300,9 +300,16 @@ class PDLM(nn.Module):
             return logits
 
     @torch.inference_mode()
-    def generate_with_blocks(self, tokens, max_tokens, attn_mask=None, bucket_size=8, topk=5, temperature=1.0, seed=42):
+    def generate_with_blocks(self, tokens, max_tokens, 
+                             attn_mask=None, 
+                             bucket_size=8, 
+                             topk=5, 
+                             temperature=1.0, 
+                             seed=42,
+                             transit_topk=10):
         """
         Like generate(), but also returns per-step noisy/pure blocks.
+        If transit_topk > 0, it uses top-k pure token probabilities to transit to the next noisy token.
         """
         assert isinstance(tokens, list) # B == 1
         assert self.config.mask_token_id != -1, "mask_token_id must be set for generate"
@@ -339,38 +346,49 @@ class PDLM(nn.Module):
         while True:
             logits = self.forward(ids, attn_mask=current_mask) # (B, T, pure_vocab_size)
             logits = logits[:, -bucket_size:, :] # (B, bucket_size, pure_vocab_size)
-            max_topk = logits.size(-1)
-            k = min(topk, max_topk)
-            if k < 1:
-                raise ValueError("topk must be >= 1")
-            _, topk_ids = torch.topk(logits, k=k, dim=-1) # (B, bucket, topk)
+            max_topk_logits = logits.size(-1)
+            
+            # Reporting/Sampling (topk)
+            k_report = min(topk, max_topk_logits)
+            if k_report < 1: raise ValueError("topk must be >= 1")
+            _, topk_ids_report = torch.topk(logits, k=k_report, dim=-1) # (B, bucket, k_report)
             probs = torch.softmax(logits.float(), dim=-1)
-            topk_probs = torch.gather(probs, -1, topk_ids) # (B, bucket, topk)
+            topk_probs_report = torch.gather(probs, -1, topk_ids_report) # (B, bucket, k_report)
             
             noisy_ids = ids[:, -bucket_size:] # (B, bucket)
             entry = {
                 "step": step,
                 "noisy_ids": noisy_ids.detach().cpu(),
-                "pure_ids": topk_ids.detach().cpu(),
-                "pure_probs": topk_probs.detach().cpu(),
+                "pure_ids": topk_ids_report.detach().cpu(),
+                "pure_probs": topk_probs_report.detach().cpu(),
             }
 
-            if topk > 0:
-                v, _ = torch.topk(logits, min(topk, logits.size(-1)), dim=-1)
-                logits[logits < v[:, :, [-1]]] = -float('Inf')
-            if temperature > 0:
-                logits = logits / temperature
-                probs = F.softmax(logits, dim=-1)
-                probs_2d = probs.reshape(-1, probs.size(-1))
-                pure_ids = torch.multinomial(probs_2d, num_samples=1, generator=rng)
-                pure_ids = pure_ids.reshape(probs.shape[:-1])
+            if transit_topk > 0:
+                k_transit = min(transit_topk, max_topk_logits)
+                _, topk_ids_transit = torch.topk(logits, k=k_transit, dim=-1)
+                topk_probs_transit = torch.gather(probs, -1, topk_ids_transit)
+                
+                next_ids = self._token_map.transit_noisy_tokens(
+                    topk_ids_transit, noisy_ids, pure_probs=topk_probs_transit
+                )
+                entry["sampled_ids"] = topk_ids_report[..., 0].detach().cpu()
             else:
-                pure_ids = topk_ids[..., 0] # (B, bucket)
+                if topk > 0:
+                    v, _ = torch.topk(logits, min(topk, logits.size(-1)), dim=-1)
+                    logits[logits < v[:, :, [-1]]] = -float('Inf')
+                if temperature > 0:
+                    logits_temp = logits / temperature
+                    probs_temp = F.softmax(logits_temp, dim=-1)
+                    probs_2d = probs_temp.reshape(-1, probs_temp.size(-1))
+                    pure_ids = torch.multinomial(probs_2d, num_samples=1, generator=rng)
+                    pure_ids = pure_ids.reshape(probs.shape[:-1])
+                else:
+                    pure_ids = topk_ids_report[..., 0] # (B, bucket)
+                
+                entry["sampled_ids"] = pure_ids.detach().cpu()
+                
+                next_ids = self._token_map.transit_noisy_tokens(pure_ids, noisy_ids)
             
-            #we also add the pure_ids to the entry and dump 
-            entry["sampled_ids"] = pure_ids.detach().cpu()
-            
-            next_ids = self._token_map.transit_noisy_tokens(pure_ids, noisy_ids)
             next_is_pure = self._token_map.is_all_pure_tokens(next_ids)
             if next_is_pure:
                 entry["next_ids"] = next_ids.detach().cpu()
@@ -389,7 +407,7 @@ class PDLM(nn.Module):
 
 
     @torch.inference_mode()
-    def noisy_denoisy_by_model(self, tokens, attn_mask=None, bucket_size=8, noisy_level=1, topk=3):
+    def noisy_denoisy_by_model(self, tokens, attn_mask=None, bucket_size=8, noisy_level=1, topk=3, transit_topk=10):
         """
         This func is not for generate new tokens, but to add noisy to 
         the last bucket_size of the sequence, and then denoise the
@@ -397,6 +415,7 @@ class PDLM(nn.Module):
         this func will also return a block_debug like generate_with_blocks,
         there should be step, the original real pure token, the current noisy token,
         and the predicted pure token by the model, with prob, topk,
+        If transit_topk > 0, it uses top-k pure token probabilities to transit to the next noisy token.
         """
         assert isinstance(tokens, list) # B == 1
         device = self.get_device()
@@ -431,27 +450,36 @@ class PDLM(nn.Module):
         while True:
             logits = self.forward(ids, attn_mask=current_mask) # (1, L, pure_vocab)
             logits = logits[:, -bucket_size:, :] # (1, bucket, pure_vocab)
+            max_topk_logits = logits.size(-1)
             
-            # Get topk pure predictions
-            max_topk = logits.size(-1)
-            k = min(topk, max_topk)
-            _, topk_ids = torch.topk(logits, k=k, dim=-1) # (1, bucket, topk)
+            # Get topk pure predictions for reporting
+            k_report = min(topk, max_topk_logits)
+            _, topk_ids_report = torch.topk(logits, k=k_report, dim=-1) # (1, bucket, topk)
             probs = torch.softmax(logits.float(), dim=-1)
-            topk_probs = torch.gather(probs, -1, topk_ids) # (1, bucket, topk)
+            topk_probs_report = torch.gather(probs, -1, topk_ids_report) # (1, bucket, topk)
             
-            predicted_pure_ids = topk_ids[..., 0] # Top 1 prediction
+            predicted_pure_ids = topk_ids_report[..., 0] # Top 1 prediction
             
             # Record debug info
             entry = {
                 "step": step,
                 "original_ids": target_pure_ids.detach().cpu(),
                 "noisy_ids": noisy_ids.detach().cpu(),
-                "pure_ids": topk_ids.detach().cpu(), # Predicted pure (topk)
-                "pure_probs": topk_probs.detach().cpu(), # Probs of predicted pure
+                "pure_ids": topk_ids_report.detach().cpu(), # Predicted pure (topk)
+                "pure_probs": topk_probs_report.detach().cpu(), # Probs of predicted pure
             }
             
             # Transit
-            next_ids = self._token_map.transit_noisy_tokens(predicted_pure_ids, noisy_ids)
+            if transit_topk > 0:
+                k_transit = min(transit_topk, max_topk_logits)
+                _, topk_ids_transit = torch.topk(logits, k=k_transit, dim=-1)
+                topk_probs_transit = torch.gather(probs, -1, topk_ids_transit)
+                
+                next_ids = self._token_map.transit_noisy_tokens(
+                    topk_ids_transit, noisy_ids, pure_probs=topk_probs_transit
+                )
+            else:
+                next_ids = self._token_map.transit_noisy_tokens(predicted_pure_ids, noisy_ids)
             
             # Check if converged (all pure)
             next_is_pure = self._token_map.is_all_pure_tokens(next_ids)
