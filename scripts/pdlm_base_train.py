@@ -137,7 +137,8 @@ model_config_kwargs = dict(
     n_embd=model_dim,
     prefix_pure_tokens=prefix_pure_tokens,
     mask_token_id=mask_token_id,
-    is_causal=is_causal
+    is_causal=is_causal,
+    model_name=run
 )
 with torch.device("meta"):
     model_config = PDLMConfig(**model_config_kwargs)

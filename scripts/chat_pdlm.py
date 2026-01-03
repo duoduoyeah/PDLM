@@ -189,7 +189,12 @@ while True:
         dump_dir = os.path.join(os.getcwd(), "pdlm_dumps")
         os.makedirs(dump_dir, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        dump_path = os.path.join(dump_dir, f"pdlm_dump_{timestamp}_{dump_index:04d}.txt")
+        
+        model_name = getattr(model.config, "model_name", "pdlm")
+        if model_name is None:
+            model_name = "pdlm"
+            
+        dump_path = os.path.join(dump_dir, f"{model_name}_{timestamp}_{dump_index:04d}.txt")
         dump_lines = []
         
         prompt_str = tokenizer.decode(prompt_tokens)

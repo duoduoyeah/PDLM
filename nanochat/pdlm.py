@@ -27,6 +27,7 @@ class PDLMConfig:
     
     is_causal: bool = True
     # need for training
+    model_name = None
     prefix_pure_tokens: int = 0 
     all_vocab_size: int = -1
     mask_token_id: int = -1
