@@ -63,6 +63,10 @@ def main():
         
     pbar.close()
     
+    if not all_raw_blocks:
+        print("No blocks were processed! Check dataset loading or model generation.")
+        return
+
     print("Computing Statistics...")
     # 5. Compute Aggregate Stats
     stats = calculate_block_stats(all_raw_blocks)

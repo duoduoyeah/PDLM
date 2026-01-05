@@ -16,7 +16,7 @@ def get_eval_data_iterator(dataset_name="duoduoyeah/TinyStories", dataset_config
     """
     print(f"Loading dataset: {dataset_name}/{dataset_config} split={split}")
     try:
-        ds = load_dataset(dataset_name, dataset_config, split=split, stream=True)
+        ds = load_dataset(dataset_name, dataset_config, split=split, streaming=True)
     except Exception as e:
         print(f"Error loading dataset: {e}")
         return
