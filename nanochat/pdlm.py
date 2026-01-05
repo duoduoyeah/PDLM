@@ -326,8 +326,6 @@ class PDLM(nn.Module):
 
         if not self._is_causal:
             assert attn_mask is not None, "need attn-mask when the model is non-causal"
-            #TODO: also need to assert that attn_mask size is larger than max_tokens + bucket_size
-            # for safety
         
         ids = torch.tensor([tokens], dtype=torch.long, device=device) # add batch dim
         prompt_ids = ids.clone()
