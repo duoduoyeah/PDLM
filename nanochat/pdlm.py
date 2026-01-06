@@ -301,7 +301,7 @@ class PDLM(nn.Module):
             return logits
 
     @torch.inference_mode()
-    def generate_with_blocks(self, tokens, max_tokens, 
+    def generate_with_blocks(self, tokens, max_new_tokens, 
                              attn_mask=None, 
                              bucket_size=8, 
                              topk=5, 
@@ -311,6 +311,7 @@ class PDLM(nn.Module):
         """
         Like generate(), but also returns per-step noisy/pure blocks.
         If transit_topk > 0, it uses top-k pure token probabilities to transit to the next noisy token.
+        max_new_tokens: The number of new tokens to generate (excluding prompt).
         """
         assert isinstance(tokens, list) # B == 1
         assert self.config.mask_token_id != -1, "mask_token_id must be set for generate"
@@ -329,6 +330,9 @@ class PDLM(nn.Module):
         
         ids = torch.tensor([tokens], dtype=torch.long, device=device) # add batch dim
         prompt_ids = ids.clone()
+        prompt_len = ids.size(1)
+        target_len = prompt_len + max_new_tokens
+        
         mask_id = self.config.mask_token_id
 
         if self._is_causal:
@@ -340,7 +344,6 @@ class PDLM(nn.Module):
             T = ids.size(1)
             current_mask = attn_mask[:T, :T]
 
-        assert max_tokens % bucket_size == 0
         block_debug = []
         step = 0
         while True:
@@ -400,7 +403,9 @@ class PDLM(nn.Module):
                 ids[:, :prompt_ids.size(1)] = prompt_ids
             
             if next_is_pure:
-                if ids.numel() >= max_tokens:
+                if ids.numel() >= target_len:
+                    # Truncate to exact target length
+                    ids = ids[:, :target_len]
                     break
                 else:
                     ids = F.pad(ids, (0, bucket_size), value=mask_id)

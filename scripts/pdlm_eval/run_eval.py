@@ -21,7 +21,7 @@ def main():
     parser.add_argument("--out-dir", type=str, default="eval_results", help="Output directory")
     
     parser.add_argument("--prefix-len", type=int, default=16, help="Length of prompt")
-    parser.add_argument("--new-tokens", type=int, default=256, help="Number of tokens to generate")
+    parser.add_argument("--new-tokens", type=int, default=128, help="Number of tokens to generate")
     parser.add_argument("--bucket-size", type=int, default=8, help="Bucket size for PDLM")
     
     args = parser.parse_args()
