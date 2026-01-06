@@ -54,7 +54,7 @@ def load_pdlm_model(model_tag=None, step=None, device_type="auto"):
     return model, device, autocast_ctx
 
 
-def generate_single_sample(model, device, autocast_ctx, prompt_ids, max_new_tokens=64, bucket_size=8, topk=5, temperature=0, transit_topk=10):
+def generate_single_sample(model: PDLM, device, autocast_ctx, prompt_ids, max_new_tokens=64, bucket_size=8, topk=5, temperature=0, transit_topk=10):
     """
     Runs generation for a single sample and returns the full debug info.
     """
@@ -67,17 +67,12 @@ def generate_single_sample(model, device, autocast_ctx, prompt_ids, max_new_toke
         full_mask = gen_mask(mask_gen_len, bucket_size, attn_backend="sdpa", is_causal=False)
         attn_mask = full_mask[mask_gen_len:, mask_gen_len:].to(device)
 
-    # Ensure length alignment with bucket size
     prompt_len = len(prompt_ids)
-    max_total_tokens = prompt_len + max_new_tokens
-    
-    if max_total_tokens % bucket_size != 0:
-        max_total_tokens = ((max_total_tokens + bucket_size - 1) // bucket_size) * bucket_size
 
     with autocast_ctx:
         ids, block_debug = model.generate_with_blocks(
             prompt_ids, 
-            max_tokens=max_total_tokens,
+            max_new_tokens=max_new_tokens,
             attn_mask=attn_mask,
             bucket_size=bucket_size,
             topk=topk,
