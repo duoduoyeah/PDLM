@@ -23,7 +23,7 @@ import pyarrow as pa
 # Source dataset
 dataset_kwargs = {
     "path": "SimpleStories/SimpleStories",
-    "split": "train",
+    "split": "validation",
     # "name": "sample-100BT", # ~100B GPT-2 tokens at ~3 chars/token => ~300B chars total
 }
 ds = load_dataset(**dataset_kwargs)
@@ -34,11 +34,11 @@ ndocs = len(ds) # total number of documents to process
 print(f"Total number of documents: {ndocs}")
 
 # Repackage into parquet files
-output_dir = "/content/cache/nanochat/base_data"
+output_dir = "/content/cache/nanochat/val_data"
 os.makedirs(output_dir, exist_ok=True)
 
 # Write to parquet files
-chars_per_shard = 250_000_000
+chars_per_shard = 2_500_000
 row_group_size = 1024 # HF uses 1000 but we use multiple of 2, nicer for distributed data loader later
 shard_docs = []
 shard_index = 0
@@ -46,14 +46,20 @@ shard_characters = 0
 total_docs_processed = 0
 total_time_spent = 0
 t0 = time.time()
+max_shards = 10
+
 for doc in ds:
+    if shard_index >= max_shards:
+        print(f"Reached max shards ({max_shards}). Stopping.")
+        break
+
     text = doc.get('text') or doc.get('story', '')
     shard_docs.append(text)
     shard_characters += len(text)
     collected_enough_chars = shard_characters >= chars_per_shard
     docs_multiple_of_row_group_size = len(shard_docs) % row_group_size == 0
     if collected_enough_chars and docs_multiple_of_row_group_size: # leads to ~100MB of text (compressed)
-        shard_path = os.path.join(output_dir, f"shard_{shard_index:05d}.parquet")
+        shard_path = os.path.join(output_dir, f"validation_{shard_index:05d}.parquet")
         shard_table = pa.Table.from_pydict({"text": shard_docs})
         pq.write_table(
             shard_table,
@@ -88,5 +94,6 @@ def upload():
         folder_path=output_dir,
         repo_id="duoduoyeah/tiny-story-shuffle",
         repo_type="dataset",
+        path_in_repo="data",
     )
 # upload()
