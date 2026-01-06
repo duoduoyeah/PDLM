@@ -9,7 +9,7 @@ from tqdm import tqdm
 from scripts.pdlm_eval.data_loader import get_eval_data_iterator
 from scripts.pdlm_eval.core import load_pdlm_model, generate_single_sample
 from scripts.pdlm_eval.metrics import parse_debug_into_blocks, calculate_block_stats, aggregate_metrics
-from scripts.pdlm_eval.visualizer import plot_block_trajectory, plot_step_distribution
+from scripts.pdlm_eval.visualizer import plot_block_trajectory, plot_step_distribution, plot_multi_bucket_convergence
 
 def main():
     parser = argparse.ArgumentParser(description="PDLM Evaluation Pipeline")
