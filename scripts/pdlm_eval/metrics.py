@@ -1,4 +1,3 @@
-
 import torch
 import numpy as np
 
@@ -25,14 +24,6 @@ def parse_debug_into_blocks(block_debug):
 def calculate_block_stats(blocks):
     """
     Computes detailed statistics for each block.
-    
-    Returns:
-        dict: {
-            "block_durations": list[int],
-            "token_convergence": list[list[int]], # [block_idx][token_pos] -> step_converged
-            "final_probs": list[list[float]],     # [block_idx][token_pos] -> final_confidence
-            "raw_blocks": blocks                  # The original structured data
-        }
     """
     block_durations = []
     token_convergence = [] # For each block, a list of convergence steps per token
@@ -43,7 +34,36 @@ def calculate_block_stats(blocks):
         # 1. Duration
         block_durations.append(len(block))
         
-        # ... (rest of logic) ...
+        # Get the final result of this block
+        final_entry = block[-1]
+        final_ids = final_entry["next_ids"][0].tolist() # (bucket_size,)
+        bucket_size = len(final_ids)
+        
+        # Build history matrix: [step][pos]
+        pred_history = []
+        prob_history = []
+        
+        for step_entry in block:
+            # pure_ids shape: (1, bucket, topk) -> we want top1: (bucket,)
+            preds = step_entry["pure_ids"][0, :, 0].tolist() 
+            probs = step_entry["pure_probs"][0, :, 0].tolist()
+            
+            pred_history.append(preds)
+            prob_history.append(probs)
+            
+        token_probs_history.append(prob_history)
+        
+        # Calculate stability step for each position
+        current_block_convergence = []
+        for pos in range(bucket_size):
+            target_token = final_ids[pos]
+            stable_step = 0
+            # Iterate backwards to find when it was LAST different
+            for s in range(len(pred_history) - 1, -1, -1):
+                if pred_history[s][pos] != target_token:
+                    stable_step = s + 1
+                    break
+            current_block_convergence.append(stable_step)
             
         token_convergence.append(current_block_convergence)
         bucket_convergence.append(max(current_block_convergence))
