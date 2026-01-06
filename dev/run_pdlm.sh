@@ -18,6 +18,10 @@ python -c "from nanochat.common import get_base_dir; print(get_base_dir())"
 # Python venv setup with uv
 uv pip install  -e .
 
+
+uv pip uninstall torch torchvision torchaudio
+uv pip install -e ".[gpu]" --force-reinstall
+
 # report
 python -m nanochat.report reset
 # data
