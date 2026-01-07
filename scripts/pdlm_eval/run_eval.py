@@ -36,7 +36,10 @@ def main():
             print(f"Error: Base models dir {base_path} does not exist.")
             return
 
-        model_folders = sorted([f for f in os.listdir(base_path) if os.path.isdir(os.path.join(base_path, f))])
+        model_folders = sorted([
+            f for f in os.listdir(base_path) 
+            if os.path.isdir(os.path.join(base_path, f)) and not f.startswith(".")
+        ])
         print(f"Found {len(model_folders)} models in {base_path}")
         
         original_out_dir = args.out_dir
@@ -57,6 +60,7 @@ def main():
                 run_evaluation_for_model(args, sub_out_dir)
             except Exception as e:
                 print(f"Failed to evaluate {model_folder}: {e}")
+                # We can print a short traceback to help debug without spamming too much
                 import traceback
                 traceback.print_exc()
                 
@@ -105,6 +109,7 @@ def run_evaluation_for_model(args, out_dir):
         generation_logs.append({
             "sample_idx": i,
             "prompt": prompt_text,
+            "prompt_ids": prompt_ids,
             "response": response_text
         })
         
