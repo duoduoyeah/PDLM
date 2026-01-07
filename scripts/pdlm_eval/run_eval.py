@@ -21,13 +21,53 @@ def main():
     parser.add_argument("--samples", type=int, default=10, help="Number of samples to evaluate")
     parser.add_argument("--out-dir", type=str, default="eval_results", help="Output directory")
     
+    parser.add_argument("--base-models-dir", type=str, default=None, help="Directory containing multiple model folders to evaluate")
+    
     parser.add_argument("--prefix-len", type=int, default=16, help="Length of prompt")
     parser.add_argument("--new-tokens", type=int, default=128, help="Number of tokens to generate")
     parser.add_argument("--bucket-size", type=int, default=8, help="Bucket size for PDLM")
     
     args = parser.parse_args()
-    
+
+    if args.base_models_dir:
+        # Batch Mode
+        base_path = os.path.expanduser(args.base_models_dir)
+        if not os.path.exists(base_path):
+            print(f"Error: Base models dir {base_path} does not exist.")
+            return
+
+        model_folders = sorted([f for f in os.listdir(base_path) if os.path.isdir(os.path.join(base_path, f))])
+        print(f"Found {len(model_folders)} models in {base_path}")
+        
+        original_out_dir = args.out_dir
+        
+        for model_folder in model_folders:
+            print(f"\n{'='*50}")
+            print(f"Evaluating Model: {model_folder}")
+            print(f"{'='*50}")
+            
+            # Set environment variable for this run
+            full_model_path = os.path.join(base_path, model_folder)
+            os.environ["NANOCHAT_BASE_DIR"] = full_model_path
+            
+            # Create subfolder for results
+            sub_out_dir = os.path.join(original_out_dir, model_folder)
+            
+            try:
+                run_evaluation_for_model(args, sub_out_dir)
+            except Exception as e:
+                print(f"Failed to evaluate {model_folder}: {e}")
+                import traceback
+                traceback.print_exc()
+                
+    else:
+        # Single Run Mode
+        run_evaluation_for_model(args, args.out_dir)
+
+
+def run_evaluation_for_model(args, out_dir):
     # 1. Load Model
+    # Note: load_pdlm_model uses get_base_dir() which reads os.environ["NANOCHAT_BASE_DIR"]
     model, device, autocast_ctx = load_pdlm_model(model_tag=args.model_tag)
     tokenizer = get_tokenizer()
     
@@ -40,17 +80,18 @@ def main():
         prefix_len=args.prefix_len
     )
     
-    os.makedirs(args.out_dir, exist_ok=True)
+    os.makedirs(out_dir, exist_ok=True)
     
     all_raw_blocks = []
     generation_logs = []
     
     print(f"\nStarting Evaluation on {args.samples} samples...")
-    pbar = tqdm(total=args.samples)
+    # Use simple loop or manual pbar to avoid nesting issues if called multiple times? 
+    # Tqdm is fine.
+    pbar = tqdm(total=args.samples, desc="Processing")
     
     for i, (prompt_ids, ref_ids, raw_text) in enumerate(data_iter):
         # 3. Run Inference
-        # We assume prompt_ids is a list of ints
         new_tokens, block_debug = generate_single_sample(
             model, device, autocast_ctx, 
             prompt_ids, 
@@ -67,7 +108,7 @@ def main():
             "response": response_text
         })
         
-        # 4. Parse Metrics immediately to save memory (optional, but good practice)
+        # 4. Parse Metrics
         blocks = parse_debug_into_blocks(block_debug)
         all_raw_blocks.extend(blocks)
         
@@ -80,7 +121,7 @@ def main():
         return
         
     # Save generations
-    with open(os.path.join(args.out_dir, "generations.json"), "w") as f:
+    with open(os.path.join(out_dir, "generations.json"), "w") as f:
         json.dump(generation_logs, f, indent=2)
 
     print("Computing Statistics...")
@@ -92,22 +133,17 @@ def main():
     print(json.dumps(summary, indent=2))
     
     # 6. Save & Visualize
-    # Save summary
-    with open(os.path.join(args.out_dir, "summary.json"), "w") as f:
+    with open(os.path.join(out_dir, "summary.json"), "w") as f:
         json.dump(summary, f, indent=2)
         
-    # Plot Distribution
-    plot_step_distribution(stats, args.out_dir)
+    plot_step_distribution(stats, out_dir)
+    plot_multi_bucket_convergence(stats, out_dir)
     
-    # Plot Multi-bucket Convergence
-    plot_multi_bucket_convergence(stats, args.out_dir)
-    
-    # Plot Trajectories for the first few blocks (to avoid spamming thousands of images)
     print("Generating trajectory plots for first 5 blocks...")
     for j in range(min(5, len(stats["block_durations"]))):
-        plot_block_trajectory(stats, j, os.path.join(args.out_dir, "plots"))
+        plot_block_trajectory(stats, j, os.path.join(out_dir, "plots"))
 
-    print(f"\nDone! Results saved to {args.out_dir}")
+    print(f"\nDone! Results saved to {out_dir}")
 
 if __name__ == "__main__":
     main()
