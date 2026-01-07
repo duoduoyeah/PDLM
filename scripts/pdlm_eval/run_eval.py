@@ -10,6 +10,7 @@ from scripts.pdlm_eval.data_loader import get_eval_data_iterator
 from scripts.pdlm_eval.core import load_pdlm_model, generate_single_sample
 from scripts.pdlm_eval.metrics import parse_debug_into_blocks, calculate_block_stats, aggregate_metrics
 from scripts.pdlm_eval.visualizer import plot_block_trajectory, plot_step_distribution, plot_multi_bucket_convergence
+from nanochat.tokenizer import get_tokenizer
 
 def main():
     parser = argparse.ArgumentParser(description="PDLM Evaluation Pipeline")
@@ -28,6 +29,7 @@ def main():
     
     # 1. Load Model
     model, device, autocast_ctx = load_pdlm_model(model_tag=args.model_tag)
+    tokenizer = get_tokenizer()
     
     # 2. Prepare Data
     data_iter = get_eval_data_iterator(
@@ -41,6 +43,7 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
     
     all_raw_blocks = []
+    generation_logs = []
     
     print(f"\nStarting Evaluation on {args.samples} samples...")
     pbar = tqdm(total=args.samples)
@@ -55,6 +58,15 @@ def main():
             bucket_size=args.bucket_size
         )
         
+        # Log text
+        prompt_text = tokenizer.decode(prompt_ids)
+        response_text = tokenizer.decode(new_tokens)
+        generation_logs.append({
+            "sample_idx": i,
+            "prompt": prompt_text,
+            "response": response_text
+        })
+        
         # 4. Parse Metrics immediately to save memory (optional, but good practice)
         blocks = parse_debug_into_blocks(block_debug)
         all_raw_blocks.extend(blocks)
@@ -66,6 +78,10 @@ def main():
     if not all_raw_blocks:
         print("No blocks were processed! Check dataset loading or model generation.")
         return
+        
+    # Save generations
+    with open(os.path.join(args.out_dir, "generations.json"), "w") as f:
+        json.dump(generation_logs, f, indent=2)
 
     print("Computing Statistics...")
     # 5. Compute Aggregate Stats
