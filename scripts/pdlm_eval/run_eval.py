@@ -75,6 +75,8 @@ def run_evaluation_for_model(args, out_dir):
     
     # Determine effective bucket size
     effective_bucket_size = args.bucket_size if args.bucket_size is not None else getattr(model, 'bucket_size', -1)
+    if effective_bucket_size <= 0:
+        raise ValueError(f"Invalid bucket_size: {effective_bucket_size}. Must be set in config or passed as an argument.")
     
     # 2. Prepare Data
     data_iter = get_eval_data_iterator(

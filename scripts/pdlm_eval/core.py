@@ -54,7 +54,7 @@ def load_pdlm_model(model_tag=None, step=None, device_type="auto"):
     return model, device, autocast_ctx
 
 
-def generate_single_sample(model: PDLM, device, autocast_ctx, prompt_ids, max_new_tokens=64, bucket_size=8, topk=5, temperature=0, transit_topk=10):
+def generate_single_sample(model: PDLM, device, autocast_ctx, prompt_ids, max_new_tokens=64, bucket_size=None, topk=5, temperature=0, transit_topk=10):
     """
     Runs generation for a single sample and returns the full debug info.
     """
