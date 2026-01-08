@@ -118,10 +118,29 @@ def aggregate_metrics(stats):
     avg_bucket_convergence = np.mean(stats["bucket_convergence"]) if stats["bucket_convergence"] else 0
     avg_first_stable_step = np.mean(stats["first_stable_step"]) if stats["first_stable_step"] else 0
     
+    # Calculate average bucket size (usually constant, but good to be robust)
+    # raw_blocks is a list of lists. each sublist is a block history.
+    # final entry of a block is block[-1].
+    # final_entry["next_ids"] is (1, bucket_size).
+    total_tokens_generated = 0
+    if "raw_blocks" in stats:
+        for block in stats["raw_blocks"]:
+            final_entry = block[-1]
+            if "next_ids" in final_entry:
+                total_tokens_generated += final_entry["next_ids"].numel()
+    
+    avg_bucket_size = total_tokens_generated / len(durations) if len(durations) > 0 else 0
+    
+    steps_per_token = avg_steps / avg_bucket_size if avg_bucket_size > 0 else 0
+    convergence_per_token = avg_bucket_convergence / avg_bucket_size if avg_bucket_size > 0 else 0
+    
     return {
         "avg_steps_per_block": avg_steps,
         "avg_token_convergence": avg_token_convergence,
         "avg_bucket_convergence": avg_bucket_convergence,
         "avg_first_stable_step": avg_first_stable_step,
+        "steps_per_token": steps_per_token,
+        "convergence_per_token": convergence_per_token,
+        "avg_bucket_size": avg_bucket_size,
         "total_blocks": len(durations)
     }
