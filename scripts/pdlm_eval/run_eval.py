@@ -105,7 +105,7 @@ def run_evaluation_for_model(args, out_dir):
             model, device, autocast_ctx, 
             prompt_ids, 
             max_new_tokens=args.new_tokens,
-            bucket_size=args.bucket_size # Passed as None if using model default
+            bucket_size=effective_bucket_size # Use the resolved bucket size
         )
         
         # Log text
