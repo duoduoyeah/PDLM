@@ -25,6 +25,7 @@ class PDLMConfig:
     n_kv_head: int = 6 # number of key/value heads (GQA)
     n_embd: int = 768
     
+    bucket_size: int = -1
     is_causal: bool = True
     # need for training
     model_name: str = "pdlm"
@@ -152,6 +153,7 @@ class PDLM(nn.Module):
         self._token_map = None
         self._is_causal = self.config.is_causal
         self.inference_mask = None
+        self.bucket_size = config.bucket_size
 
     def init_weights(self):
         self.apply(self._init_weights)
@@ -303,7 +305,7 @@ class PDLM(nn.Module):
     @torch.inference_mode()
     def generate_with_blocks(self, tokens, max_new_tokens, 
                              attn_mask=None, 
-                             bucket_size=8, 
+                             bucket_size=None, 
                              topk=5, 
                              temperature=0, 
                              seed=42,
@@ -316,6 +318,10 @@ class PDLM(nn.Module):
         assert isinstance(tokens, list) # B == 1
         assert self.config.mask_token_id != -1, "mask_token_id must be set for generate"
         device = self.get_device()
+        
+        if bucket_size is None:
+            bucket_size = self.bucket_size
+        assert bucket_size > 0, "bucket_size must be set in config or passed as arg"
         
         rng = None
         if temperature > 0:
@@ -417,7 +423,7 @@ class PDLM(nn.Module):
 
 
     @torch.inference_mode()
-    def noisy_denoisy_by_model(self, tokens, attn_mask=None, bucket_size=8, noisy_level=1, topk=3, transit_topk=10):
+    def noisy_denoisy_by_model(self, tokens, attn_mask=None, bucket_size=None, noisy_level=1, topk=3, transit_topk=10):
         """
         This func is not for generate new tokens, but to add noisy to 
         the last bucket_size of the sequence, and then denoise the
@@ -429,6 +435,11 @@ class PDLM(nn.Module):
         """
         assert isinstance(tokens, list) # B == 1
         device = self.get_device()
+        
+        if bucket_size is None:
+            bucket_size = self.bucket_size
+        assert bucket_size > 0, "bucket_size must be set in config or passed as arg"
+        
         if self._token_map is None or self._token_map.device != device:
             self._token_map = get_token_map(device=device)
 
