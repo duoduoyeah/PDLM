@@ -2,8 +2,6 @@
 import os
 import argparse
 import json
-import torch
-import numpy as np
 from tqdm import tqdm
 
 from scripts.pdlm_eval.data_loader import get_eval_data_iterator
@@ -75,6 +73,9 @@ def run_evaluation_for_model(args, out_dir):
     model, device, autocast_ctx = load_pdlm_model(model_tag=args.model_tag)
     tokenizer = get_tokenizer()
     
+    # Determine effective bucket size
+    effective_bucket_size = args.bucket_size if args.bucket_size is not None else getattr(model, 'bucket_size', -1)
+    
     # 2. Prepare Data
     data_iter = get_eval_data_iterator(
         dataset_name=args.dataset,
@@ -90,6 +91,8 @@ def run_evaluation_for_model(args, out_dir):
     generation_logs = []
     
     print(f"\nStarting Evaluation on {args.samples} samples...")
+    print(f"Inference Config: bucket_size={effective_bucket_size}, prefix_len={args.prefix_len}, new_tokens={args.new_tokens}")
+    
     # Use simple loop or manual pbar to avoid nesting issues if called multiple times? 
     # Tqdm is fine.
     pbar = tqdm(total=args.samples, desc="Processing")
@@ -100,7 +103,7 @@ def run_evaluation_for_model(args, out_dir):
             model, device, autocast_ctx, 
             prompt_ids, 
             max_new_tokens=args.new_tokens,
-            bucket_size=args.bucket_size
+            bucket_size=args.bucket_size # Passed as None if using model default
         )
         
         # Log text
@@ -133,6 +136,16 @@ def run_evaluation_for_model(args, out_dir):
     # 5. Compute Aggregate Stats
     stats = calculate_block_stats(all_raw_blocks)
     summary = aggregate_metrics(stats)
+    
+    # Add inference config to summary
+    summary["inference_config"] = {
+        "bucket_size": effective_bucket_size,
+        "prefix_len": args.prefix_len,
+        "new_tokens": args.new_tokens,
+        "dataset": args.dataset,
+        "split": args.split,
+        "samples": args.samples
+    }
     
     print("\nEvaluation Summary:")
     print(json.dumps(summary, indent=2))
