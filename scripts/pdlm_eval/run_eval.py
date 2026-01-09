@@ -140,11 +140,13 @@ def run_evaluation_for_model(args, out_dir):
         )
         
         # Log text
-        prompt_text = tokenizer.decode(prompt_ids)
+        # Decode prompt as a list of token strings
+        prompt_tokens_str = [tokenizer.decode([tid]) for tid in prompt_ids]
         response_text = tokenizer.decode(new_tokens)
+        
         generation_logs.append({
             "sample_idx": i,
-            "prompt": prompt_text,
+            "prompt": prompt_tokens_str,
             "prompt_ids": prompt_ids,
             "response": response_text
         })
