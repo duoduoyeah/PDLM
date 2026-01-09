@@ -107,6 +107,85 @@ def plot_multi_bucket_convergence(stats, output_dir, max_buckets=10):
     plt.savefig(save_path)
     plt.close()
 
+def plot_average_convergence(stats, output_dir):
+    """
+    Plots the average convergence progress across ALL blocks.
+    X-axis: Step index
+    Y-axis: Number of tokens converged
+    Includes mean line and percentile ranges (25-75% and 10-90%).
+    """
+    ensure_dir(output_dir)
+    
+    raw_blocks = stats["raw_blocks"]
+    if not raw_blocks:
+        return
+
+    # 1. Determine max steps and bucket size
+    max_steps = max(len(b) for b in raw_blocks)
+    
+    # We assume bucket size is generally constant, take from first block
+    first_final = raw_blocks[0][-1]["next_ids"][0]
+    bucket_size = first_final.numel()
+    
+    # 2. Collect convergence data per step
+    # convergence_data[step] = list of [num_converged for each block at this step]
+    convergence_data = [[] for _ in range(max_steps)]
+    
+    for block in raw_blocks:
+        final_ids = block[-1]["next_ids"][0].tolist()
+        
+        for step_idx, entry in enumerate(block):
+            preds = entry["pure_ids"][0, :, 0].tolist()
+            # Count matches
+            matches = sum(1 for p, f in zip(preds, final_ids) if p == f)
+            convergence_data[step_idx].append(matches)
+            
+        # If block finished early, assume it stays perfectly converged for remaining steps?
+        # Typically "average convergence" implies "at step X". 
+        # If a block finishes at step 3, at step 4 it is technically "done" (max matches).
+        # To make the graph smoother and represent "state of the world", we should fill forward.
+        final_matches = bucket_size # By definition, if block finished, it matches
+        for step_idx in range(len(block), max_steps):
+            convergence_data[step_idx].append(final_matches)
+
+    # 3. Calculate Stats
+    steps = np.arange(max_steps)
+    means = []
+    p10s, p25s, p75s, p90s = [], [], [], []
+    
+    for step_vals in convergence_data:
+        if not step_vals:
+            means.append(0)
+            p10s.append(0); p25s.append(0); p75s.append(0); p90s.append(0)
+            continue
+            
+        means.append(np.mean(step_vals))
+        p10s.append(np.percentile(step_vals, 10))
+        p25s.append(np.percentile(step_vals, 25))
+        p75s.append(np.percentile(step_vals, 75))
+        p90s.append(np.percentile(step_vals, 90))
+        
+    # 4. Plot
+    plt.figure(figsize=(10, 6))
+    
+    # Ranges
+    plt.fill_between(steps, p10s, p90s, color='blue', alpha=0.1, label='10th-90th Percentile')
+    plt.fill_between(steps, p25s, p75s, color='blue', alpha=0.2, label='25th-75th Percentile')
+    
+    # Mean line
+    plt.plot(steps, means, color='blue', linewidth=2, label='Average Convergence')
+    
+    plt.title(f"Average Token Convergence vs Step (Across {len(raw_blocks)} Blocks)")
+    plt.xlabel("Denoising Step")
+    plt.ylabel(f"Converged Tokens (Max {bucket_size})")
+    plt.legend(loc='lower right')
+    plt.grid(True, alpha=0.3)
+    plt.yticks(range(bucket_size + 1))
+    
+    save_path = os.path.join(output_dir, "average_convergence.png")
+    plt.savefig(save_path)
+    plt.close()
+
 def plot_step_distribution(stats, output_dir):
     ensure_dir(output_dir)
     durations = stats["block_durations"]

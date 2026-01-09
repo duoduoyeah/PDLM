@@ -7,7 +7,7 @@ from tqdm import tqdm
 from scripts.pdlm_eval.data_loader import get_eval_data_iterator
 from scripts.pdlm_eval.core import load_pdlm_model, generate_single_sample
 from scripts.pdlm_eval.metrics import parse_debug_into_blocks, calculate_block_stats, aggregate_metrics
-from scripts.pdlm_eval.visualizer import plot_block_trajectory, plot_step_distribution, plot_multi_bucket_convergence
+from scripts.pdlm_eval.visualizer import plot_block_trajectory, plot_step_distribution, plot_multi_bucket_convergence, plot_average_convergence
 from nanochat.tokenizer import get_tokenizer
 
 def main():
@@ -158,6 +158,7 @@ def run_evaluation_for_model(args, out_dir):
         
     plot_step_distribution(stats, out_dir)
     plot_multi_bucket_convergence(stats, out_dir)
+    plot_average_convergence(stats, out_dir)
     
     print("Generating trajectory plots for first 5 blocks...")
     for j in range(min(5, len(stats["block_durations"]))):
