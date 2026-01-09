@@ -41,6 +41,7 @@ def main():
         print(f"Found {len(model_folders)} models in {base_path}")
         
         original_out_dir = args.out_dir
+        all_model_summaries = []
         
         for model_folder in model_folders:
             print(f"\n{'='*50}")
@@ -55,12 +56,42 @@ def main():
             sub_out_dir = os.path.join(original_out_dir, model_folder)
             
             try:
-                run_evaluation_for_model(args, sub_out_dir)
+                summary = run_evaluation_for_model(args, sub_out_dir)
+                if summary:
+                    summary["model_name"] = model_folder
+                    all_model_summaries.append(summary)
             except Exception as e:
                 print(f"Failed to evaluate {model_folder}: {e}")
                 # We can print a short traceback to help debug without spamming too much
                 import traceback
                 traceback.print_exc()
+        
+        # Save Global Summary
+        if all_model_summaries:
+            global_json_path = os.path.join(original_out_dir, "global_summary.json")
+            with open(global_json_path, "w") as f:
+                json.dump(all_model_summaries, f, indent=2)
+            print(f"\nGlobal summary saved to {global_json_path}")
+            
+            # Generate Markdown Table
+            md_path = os.path.join(original_out_dir, "global_comparison.md")
+            with open(md_path, "w") as f:
+                f.write("# PDLM Global Evaluation Report\n\n")
+                headers = ["Model", "Steps/Block", "Steps/Token", "Bucket Conv", "Token Conv", "First Stable"]
+                f.write("| " + " | ".join(headers) + " |\n")
+                f.write("| " + " | ".join(["---"] * len(headers)) + " |\n")
+                
+                for s in all_model_summaries:
+                    row = [
+                        s.get("model_name", "Unknown"),
+                        f"{s.get('avg_steps_per_block', 0):.2f}",
+                        f"{s.get('steps_per_token', 0):.2f}",
+                        f"{s.get('avg_bucket_convergence', 0):.2f}",
+                        f"{s.get('avg_token_convergence', 0):.2f}",
+                        f"{s.get('avg_first_stable_step', 0):.2f}"
+                    ]
+                    f.write("| " + " | ".join(row) + " |\n")
+            print(f"Global comparison table saved to {md_path}")
                 
     else:
         # Single Run Mode
@@ -165,6 +196,7 @@ def run_evaluation_for_model(args, out_dir):
         plot_block_trajectory(stats, j, os.path.join(out_dir, "plots"))
 
     print(f"\nDone! Results saved to {out_dir}")
+    return summary
 
 if __name__ == "__main__":
     main()
