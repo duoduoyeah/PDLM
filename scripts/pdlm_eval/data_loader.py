@@ -3,7 +3,7 @@ import torch
 from datasets import load_dataset
 from nanochat.tokenizer import get_tokenizer
 
-def get_eval_data_iterator(dataset_name="duoduoyeah/TinyStories", dataset_config=None, split="validation", max_samples=None, prefix_len=16):
+def get_eval_data_iterator(dataset_name, dataset_config=None, split="validation", max_samples=None, prefix_len=16):
     """
     Yields tuples of (prompt_ids, reference_ids)
     

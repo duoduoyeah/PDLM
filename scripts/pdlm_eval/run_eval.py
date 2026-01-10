@@ -1,3 +1,4 @@
+# use the dataset duoduoyeah/simple-story-shuffle
 
 import os
 import argparse
@@ -13,7 +14,7 @@ from nanochat.tokenizer import get_tokenizer
 def main():
     parser = argparse.ArgumentParser(description="PDLM Evaluation Pipeline")
     parser.add_argument("--model-tag", type=str, default=None, help="Specific model tag to load")
-    parser.add_argument("--dataset", type=str, default="duoduoyeah/TinyStories", help="HF Dataset name")
+    parser.add_argument("--dataset", type=str, required=True, help="HF Dataset name")
     parser.add_argument("--dataset-config", type=str, default=None, help="HF Dataset config")
     parser.add_argument("--split", type=str, default="validation", help="Dataset split")
     parser.add_argument("--samples", type=int, default=10, help="Number of samples to evaluate")

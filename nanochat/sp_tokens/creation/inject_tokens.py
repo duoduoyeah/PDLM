@@ -7,7 +7,7 @@ import tiktoken
 from datetime import datetime
 from nanochat.checkpoint_manager import load_model_from_dir
 from nanochat.common import autodetect_device_type
-from nanochat.sp_tokens.kmeans import kmeans
+from nanochat.sp_tokens.creation.kmeans import kmeans
 
 # --------------------------------------- 
 # Configuration for loading the model checkpoint
