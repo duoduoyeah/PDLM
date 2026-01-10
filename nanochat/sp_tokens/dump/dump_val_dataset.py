@@ -68,7 +68,8 @@ def main():
                 continue
 
             # Write string representation with comma as a list item
-            f.write(f"    {repr(text)},\n")
+            tokens = [tokenizer.id_to_token(tid) for tid in ids]
+            f.write(f"    {repr(tokens)},\n")
             
             count += 1
             if args.max_samples is not None and count >= args.max_samples:
