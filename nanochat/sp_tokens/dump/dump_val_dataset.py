@@ -6,10 +6,14 @@ Uses the same filtering logic as the eval pipeline.
 import argparse
 import os
 from datasets import load_dataset
-from nanochat.tokenizer import get_tokenizer
 
 def main():
     parser = argparse.ArgumentParser(description="Dump validation dataset rows.")
+    parser.add_argument(
+        "--tokenizer-dir",
+        default=None,
+        help="Path to tokenizer directory (defaults to <base_dir>/tokenizer)",
+    )
     parser.add_argument("--dataset", type=str, default="duoduoyeah/simple-story-shuffle", help="HF Dataset name")
     parser.add_argument("--dataset-config", type=str, default=None, help="HF Dataset config")
     parser.add_argument("--split", type=str, default="validation", help="Dataset split")
@@ -27,7 +31,14 @@ def main():
         return
 
     # Initialize tokenizer to filter rows by length exactly as the eval pipeline does
-    tokenizer = get_tokenizer()
+    from nanochat.tokenizer import get_tokenizer, RustBPETokenizer
+    from nanochat.common import get_base_dir
+    
+    if args.tokenizer_dir:
+        tokenizer = RustBPETokenizer.from_directory(args.tokenizer_dir)
+    else:
+        tokenizer = get_tokenizer()
+    
     bos_id = tokenizer.get_bos_token_id()
 
     print(f"Dumping to {args.output}...")
