@@ -20,7 +20,9 @@ from nanochat.common import get_base_dir
 # The specifics of the current pretraining dataset
 
 # The URL on the internet where the data is hosted and downloaded from on demand
-BASE_URL = "https://huggingface.co/datasets/duoduoyeah/simple-story-shuffle/resolve/main/data"
+DATASET_REPO = "duoduoyeah/simple-story-shuffle"
+REPO_PATH = "data"
+BASE_URL = f"https://huggingface.co/datasets/{DATASET_REPO}/resolve/main/{REPO_PATH}"
 MAX_SHARD = 16 # the last datashard is shard_00006.parquet
 index_to_filename = lambda index: f"shard_{index:05d}.parquet" # format of the filenames
 base_dir = get_base_dir()
@@ -43,12 +45,16 @@ def list_parquet_files(data_dir=None):
 def parquets_iter_batched(split, start=0, step=1):
     """
     Iterate through the dataset, in batches of underlying row_groups for efficiency.
-    - split can be "train" or "val". the last parquet file will be val.
+    - split can be "train" or "val". val uses the last parquet file.
+      train uses all shards (including the last), so eval overlaps with train.
+      NOTE: this is only for shard-based pretraining here; a separate validation
+      set can be plugged in elsewhere and should be totally different.
     - start/step are useful for skipping rows in DDP. e.g. start=rank, step=world_size
     """
     assert split in ["train", "val"], "split must be 'train' or 'val'"
     parquet_paths = list_parquet_files()
-    parquet_paths = parquet_paths[:-1] if split == "train" else parquet_paths[-1:]
+    if split == "val":
+        parquet_paths = parquet_paths[-1:]
     for filepath in parquet_paths:
         pf = pq.ParquetFile(filepath)
         for rg_idx in range(start, pf.num_row_groups, step):
@@ -117,6 +123,12 @@ if __name__ == "__main__":
 
     num = MAX_SHARD + 1 if args.num_files == -1 else min(args.num_files, MAX_SHARD + 1)
     ids_to_download = list(range(num))
+    print("Dataset download info:")
+    print(f"  Dataset repo: {DATASET_REPO}")
+    print(f"  Base URL: {BASE_URL}")
+    print(f"  Shard pattern: {index_to_filename(0)} .. {index_to_filename(MAX_SHARD)}")
+    print(f"  Max shard index: {MAX_SHARD}")
+    print()
     print(f"Downloading {len(ids_to_download)} shards using {args.num_workers} workers...")
     print(f"Target directory: {DATA_DIR}")
     print()

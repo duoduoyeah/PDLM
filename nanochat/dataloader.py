@@ -7,7 +7,16 @@ from nanochat.common import get_dist_info
 from nanochat.dataset import list_parquet_files
 from nanochat.tokenizer import get_tokenizer
 
-def tokenizing_distributed_data_loader_with_state(B, T, split, tokenizer_threads=4, tokenizer_batch_size=128, device="cuda", resume_state_dict=None):
+def tokenizing_distributed_data_loader_with_state(
+    B,
+    T,
+    split,
+    tokenizer_threads=4,
+    tokenizer_batch_size=128,
+    device="cuda",
+    resume_state_dict=None,
+    target_shift=1,
+):
     """
     Stream pretraining text from parquet files, tokenize, yield training batches.
 
@@ -19,14 +28,20 @@ def tokenizing_distributed_data_loader_with_state(B, T, split, tokenizer_threads
     The state_dict that is returned can be later passed into this function via `resume_state_dict` to approximately resume.
 
     Perfect state resumption is possible but would be a lot more bloated, probably not worth it atm.
+    target_shift controls how many tokens ahead the target is (1 = next-token).
+    NOTE: this loader uses shard-based split logic (val is the last shard) and
+    train includes all shards. A separate validation set can be used elsewhere
+    and should be totally different from this shard-based eval.
     """
     assert split in ["train", "val"], "split must be 'train' or 'val'"
+    assert target_shift >= 1, "target_shift must be >= 1 for next-token prediction"
 
     # infinite iterator over document batches (list of text strings)
     ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
     def document_batches():
         parquet_paths = list_parquet_files()
-        parquet_paths = parquet_paths[:-1] if split == "train" else parquet_paths[-1:]
+        if split == "val":
+            parquet_paths = parquet_paths[-1:]
         resume_pq_idx = resume_state_dict["pq_idx"] if resume_state_dict is not None else 0
         resume_rg_idx = resume_state_dict["rg_idx"] if resume_state_dict is not None else None
         first_pass = True
@@ -60,7 +75,7 @@ def tokenizing_distributed_data_loader_with_state(B, T, split, tokenizer_threads
     batches = document_batches()
 
     # Now emit batches of tokens.
-    needed_tokens = B * T + 1 # +1 is because we also need the target at the last token
+    needed_tokens = B * T + target_shift
     # get the tokenizer and the bos token
     tokenizer = get_tokenizer()
     bos_token = tokenizer.get_bos_token_id()
@@ -79,8 +94,8 @@ def tokenizing_distributed_data_loader_with_state(B, T, split, tokenizer_threads
         use_cuda_optimizations = device == "cuda"
         scratch = torch.tensor(tokens, dtype=torch.long, pin_memory=use_cuda_optimizations) # in PyTorch, long=int64
         # Create the inputs/targets as 1D tensors
-        inputs_cpu = scratch[:-1]
-        targets_cpu = scratch[1:]
+        inputs_cpu = scratch[:-target_shift]
+        targets_cpu = scratch[target_shift:]
         # Reshape to 2D and move to GPU async
         inputs = inputs_cpu.view(B, T).to(device=device, non_blocking=use_cuda_optimizations)
         targets = targets_cpu.view(B, T).to(device=device, non_blocking=use_cuda_optimizations)

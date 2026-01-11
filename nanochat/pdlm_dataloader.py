@@ -31,6 +31,9 @@ def tokenizing_distributed_data_loader_with_state(
     The state_dict that is returned can be later passed into this function via `resume_state_dict` to approximately resume.
 
     Perfect state resumption is possible but would be a lot more bloated, probably not worth it atm.
+    NOTE: this loader uses shard-based split logic (val is the last shard) and
+    train includes all shards. A separate validation set can be used elsewhere
+    and should be totally different from this shard-based eval.
     """
     assert split in ["train", "val"], "split must be 'train' or 'val'"
 
@@ -38,7 +41,8 @@ def tokenizing_distributed_data_loader_with_state(
     ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
     def document_batches():
         parquet_paths = list_parquet_files()
-        parquet_paths = parquet_paths[:-1] if split == "train" else parquet_paths[-1:]
+        if split == "val":
+            parquet_paths = parquet_paths[-1:]
         resume_pq_idx = resume_state_dict["pq_idx"] if resume_state_dict is not None else 0
         resume_rg_idx = resume_state_dict["rg_idx"] if resume_state_dict is not None else None
         first_pass = True
