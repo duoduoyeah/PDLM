@@ -16,6 +16,8 @@
 1. we will get the tokenizer with group tokens, also the tokenizer will just one more mask token
 2. we will train two gpt2 model for each dataset in 8b
 
+3. we are making norm_ar, bd3lm, pdlm all in pdlm_base_train 
+-> inputs, targets are the most critical one here
 
 ## When spare
 - Multi-machine for training multi model

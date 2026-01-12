@@ -28,14 +28,18 @@ run = "dummy" # wandb run name default ("dummy" is special - we won't log to wan
 wandb_group = None # wandb group
 # Runtime
 device_type = "" # cuda|cpu|mps (empty => autodetect good device type default, in order: CUDA > MPS > CPU)
+
 # Model architecture
+model_architecture = "Karpathy_GPT2"
+model_type = "bd3lm"
+
 depth = 20 # the depth of the Transformer model to train, rest of the kwargs are derived
 max_seq_len = 1024 # max context length
 block_size = 8 # the training use block size
 prefix_pure_tokens = 1 # pure prefix tokens (0 = disabled)
 is_causal = True # the model' attn direction
-#Noisy
-noise_total_steps = 16
+
+noise_total_steps = 16 # Noisy
 # Debug
 debug = False
 # Training horizon. Only one of these 3 will be used, in this order of precedence.
@@ -69,6 +73,8 @@ exec(open(os.path.join('nanochat', 'configurator.py')).read()) # overrides from 
 user_config = {k: globals()[k] for k in config_keys} # will be useful for logging
 # -----------------------------------------------------------------------------
 assert 0 <= prefix_pure_tokens <= block_size <= max_seq_len, "Expected prefix_pure_tokens <= block_size <= max_seq_len"
+assert model_type in {"next_token_ar", "bd3lm", "pdlm"}, f"Invalid model_type: {model_type}"
+
 
 # Compute init
 device_type = autodetect_device_type() if device_type == "" else device_type
