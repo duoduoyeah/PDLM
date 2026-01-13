@@ -32,7 +32,7 @@ device_type = "" # cuda|cpu|mps (empty => autodetect good device type default, i
 # Model architecture
 model_architecture = "Karpathy_GPT2"
 model_type = "bd3lm"
-
+target_shift = 1 # only ar: predict token this many steps ahead (1 = next-token)
 depth = 20 # the depth of the Transformer model to train, rest of the kwargs are derived
 max_seq_len = 1024 # max context length
 block_size = 8 # the training use block size
@@ -214,6 +214,8 @@ train_loader = tokenizing_distributed_data_loader_with_state(
     resume_state_dict=dataloader_resume_state_dict,
     noise_total_steps=noise_total_steps,
     prefix_pure_tokens=max(prefix_pure_tokens, 0),
+    model_type=model_type,
+    target_shift=target_shift,
 )
 build_val_loader = lambda: tokenizing_distributed_data_loader(
     device_batch_size,
@@ -222,6 +224,8 @@ build_val_loader = lambda: tokenizing_distributed_data_loader(
     device=device,
     noise_total_steps=noise_total_steps,
     prefix_pure_tokens=max(prefix_pure_tokens, 0),
+    model_type=model_type,
+    target_shift=target_shift,
 )
 x, y, dataloader_state_dict = next(train_loader) # kick off load of the very first batch of data
 debug_dump_path = None
