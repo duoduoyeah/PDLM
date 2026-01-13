@@ -30,7 +30,7 @@ wandb_group = None # wandb group
 device_type = "" # cuda|cpu|mps (empty => autodetect good device type default, in order: CUDA > MPS > CPU)
 
 # Model architecture
-model_architecture = "Karpathy_GPT2"
+model_architecture = "Karpathy_gpt2"
 model_type = "bd3lm"
 target_shift = 1 # only ar: predict token this many steps ahead (1 = next-token)
 depth = 20 # the depth of the Transformer model to train, rest of the kwargs are derived
