@@ -55,7 +55,7 @@ fi
 NPROC_PER_NODE=1
 
 # pdlm_d4_bs2_pr1_ratio30_causal
-python -m scripts.pdlm_base_train \
+python -m scripts.base_train \
     --run=pdlm_d4_bs2_pr1_ratio30_causal \
     --depth=4 \
     --block_size=2 \
@@ -67,7 +67,7 @@ python -m scripts.pdlm_base_train \
 
 # =================
 # pdlm_d8_bs8_pr1_r25_non_ca_samenoisy
-python -m scripts.pdlm_base_train \
+python -m scripts.base_train \
     --run=pdlm_d8_bs8_pr1_r25_non_ca_samenoisy \
     --wandb_group=pdlm_d8 \
     --depth=8 \
@@ -80,7 +80,7 @@ python -m scripts.pdlm_base_train \
     --noise_total_steps=0
 
 # pdlm_d8_bs8_pr1_r25_non_ca
-python -m scripts.pdlm_base_train \
+python -m scripts.base_train \
     --run=pdlm_d8_bs8_pr1_r25_non_ca \
     --wandb_group=pdlm_d8 \
     --depth=8 \
@@ -93,7 +93,7 @@ python -m scripts.pdlm_base_train \
 # =================
 
 # pdlm_depth4_bs1_pr1_ratio40_causal_samenoisy_debug
-python -m scripts.pdlm_base_train \
+python -m scripts.base_train \
     --run=pdlm_depth4_bs1_pr1_ratio40_causal_samenoisy_debug \
     --depth=4 \
     --block_size=1 \
@@ -118,7 +118,7 @@ python -m nanochat.report reset
 
 
 # pdlm_d4_bs8_pr1_r20_non_ca_samenoisy
-python -m scripts.pdlm_base_train \
+python -m scripts.base_train \
     --run=pdlm_d4_bs8_pr1_r20_non_ca_samenoisy \
     --depth=4 \
     --block_size=8 \

@@ -19,6 +19,17 @@
 3. we are making norm_ar, bd3lm, pdlm all in pdlm_base_train 
 -> inputs, targets are the most critical one here
 
+for the bd3lm, the first model definitly be the normal bd3lm, then we will
+try the bd3lm that will only predict one position, but when traiing, all other block position could be mask or unmask.
+
+so there will be a new arg called `target\_shift' that this stuff is used for training the bd3lm right.
+
+Target_shift should be within this range [1, block_size], and when the target_shift = k, when train: all other places could be mask or none_mask. When inference, all other places should be mask so that we controlled experiment against normal ar.
+
+first impl bd3lm.py
+then continue modify based on base_train file, here check both training and inference stuff.
+
+
 ## When spare
 - Multi-machine for training multi model
 
