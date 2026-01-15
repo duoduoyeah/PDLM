@@ -41,6 +41,8 @@ prefix_pure_tokens = 1 # pure prefix tokens (0 = disabled)
 is_causal = True # the model' attn direction
 
 noise_total_steps = 16 # Noisy for pdlm
+bd3lm_effective_ratio = 0.5 # For bd3lm: ratio of tokens that contribute to loss (avg mask rate)
+                            # ~0.5 for normal bd3lm (LogLinear), ~1/block_size for target_shift mode
 # Debug
 debug = False
 # Training horizon. Only one of these 3 will be used, in this order of precedence.
@@ -196,6 +198,13 @@ elif target_param_data_ratio > 0:
     print0(f"Calculated number of iterations from target data:param ratio: {num_iterations:,}")
 else:
     raise ValueError("No training horizon specified")
+
+# For BD3LM: adjust iterations to account for lower effective token ratio
+# BD3LM only computes loss on masked positions, so we need more iterations to see same effective tokens
+if model_type == "bd3lm" and bd3lm_effective_ratio < 1.0:
+    original_iterations = num_iterations
+    num_iterations = int(num_iterations / bd3lm_effective_ratio)
+    print0(f"BD3LM effective_ratio={bd3lm_effective_ratio:.2f} => adjusted iterations: {original_iterations:,} -> {num_iterations:,}")
 total_tokens = total_batch_size * num_iterations
 print0(f"Total number of training tokens: {total_tokens:,}")
 print0(f"Tokens : Params ratio: {total_batch_size * num_iterations / num_params:.2f}") # Chinchilla is ~20
@@ -277,6 +286,7 @@ if not resuming:
     min_val_bpb = float("inf")
     smooth_train_loss = 0 # EMA of training loss
     total_training_time = 0 # total wall-clock time of training
+    total_effective_tokens = 0 # for bd3lm: actual masked tokens that contribute to loss
     val_bpb = 0
 else:
     step = meta_data["step"]
@@ -285,6 +295,7 @@ else:
     min_val_bpb = loop_state["min_val_bpb"]
     smooth_train_loss = loop_state["smooth_train_loss"]
     total_training_time = loop_state["total_training_time"]
+    total_effective_tokens = loop_state.get("total_effective_tokens", 0)
 
 # -----------------------------------------------------------------------------
 # Training loop
@@ -373,6 +384,7 @@ while True:
                     "min_val_bpb": min_val_bpb,
                     "smooth_train_loss": smooth_train_loss,
                     "total_training_time": total_training_time,
+                    "total_effective_tokens": total_effective_tokens,
                 },
             },
             rank=ddp_rank,
@@ -400,9 +412,12 @@ while True:
         with autocast_ctx:
             if model_type == "bd3lm":
                 loss = model(x, y, attn_mask=block_diff_mask, loss_extras=loss_extras)
+                # Count effective tokens (masked positions that contribute to loss)
+                total_effective_tokens += loss_extras["mask"].sum().item() * ddp_world_size
             else:
-                # next_token_ar and pdlm
+                # next_token_ar and pdlm: all tokens contribute to loss
                 loss = model(x, y, attn_mask=block_diff_mask)
+                total_effective_tokens += x.numel() * ddp_world_size
         train_loss = loss.detach() # for logging
         loss = loss / grad_accum_steps # each .backward() is a grad sum => normalize loss here
         loss.backward()
@@ -446,6 +461,7 @@ while True:
             "step": step,
             "total_training_flops": flops_so_far,
             "total_training_time": total_training_time,
+            "total_effective_tokens": total_effective_tokens,
             "train/loss": debiased_smooth_loss,
             "train/lrm": lrm,
             "train/dt": dt,
@@ -463,6 +479,9 @@ while True:
 print0(f"Peak memory usage: {get_max_memory() / 1024 / 1024:.2f}MiB")
 print0(f"Total training time: {total_training_time/60:.2f}m")
 print0(f"Minimum validation bpb: {min_val_bpb:.4f}")
+print0(f"Total effective tokens: {total_effective_tokens:,}")
+effective_ratio_actual = total_effective_tokens / (total_batch_size * num_iterations) if num_iterations > 0 else 0
+print0(f"Actual effective ratio: {effective_ratio_actual:.4f}")
 
 # Log to report
 from nanochat.report import get_report
@@ -487,6 +506,8 @@ get_report().log(section="Base model training", data=[
         "Total training flops": f"{flops_so_far:e}",
         "Total training time": f"{total_training_time/60:.2f}m",
         "Peak memory usage": f"{get_max_memory() / 1024 / 1024:.2f}MiB",
+        "Total effective tokens": total_effective_tokens,
+        "Actual effective ratio": effective_ratio_actual,
     }
 ])
 
