@@ -69,7 +69,7 @@ def tokenizing_distributed_data_loader_with_state(
     if model_type == "bd3lm":
         assert bd3lm_block_size >= 1, "block_size must be >= 1 for bd3lm"
         assert T % bd3lm_block_size == 0, f"T ({T}) must be divisible by block_size ({bd3lm_block_size})"
-        assert mask_token_id is not None, "mask_token_id must be provided for bd3lm"
+        assert bd3lm_mask_token_id is not None, "bd3lm_mask_token_id must be provided for bd3lm"
 
     # infinite iterator over document batches (list of text strings)
     ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
@@ -173,7 +173,7 @@ def tokenizing_distributed_data_loader_with_state(
             inputs_cpu, mask = q_xt(
                 x0=targets_cpu,
                 t=t,
-                mask_token_id=mask_token_id,
+                mask_token_id=bd3lm_mask_token_id,
                 block_size=bd3lm_block_size,
                 ignore_first_token=(prefix_pure_tokens > 0),
             )
@@ -183,7 +183,7 @@ def tokenizing_distributed_data_loader_with_state(
                 # Vectorized: create indices for position target_shift in all blocks at once
                 # e.g., if block_size=8, target_shift=3: positions = [3, 11, 19, 27, ...]
                 positions_to_mask = torch.arange(target_shift, T, bd3lm_block_size)
-                inputs_cpu[:, positions_to_mask] = mask_token_id
+                inputs_cpu[:, positions_to_mask] = bd3lm_mask_token_id
 
             # Compute loss_scale from t: shape (B, num_blocks) -> (B, T)
             loss_scale_per_block = get_loss_scale(t)  # (B, num_blocks)

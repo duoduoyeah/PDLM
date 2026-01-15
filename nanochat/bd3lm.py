@@ -16,6 +16,7 @@ from nanochat.common import get_dist_info
 from nanochat.muon import Muon, DistMuon
 from nanochat.adamw import DistAdamW
 from nanochat.sp_tokens.token_map import get_token_map
+from nanochat.bd3lm_utils.bd3lm_loss import compute_bd3lm_loss
 
 @dataclass
 class BDLMConfig:
@@ -246,7 +247,7 @@ class BDLM(nn.Module):
                 group["initial_lr"] = group["lr"]
         return optimizers
 
-    def forward(self, idx, targets=None, kv_cache=None, loss_reduction='mean', attn_mask=None):
+    def forward(self, idx, targets=None, kv_cache=None, attn_mask=None, loss_extras=None):
         """Training: idx/targets are length L; we concat to 2L inside this and apply block mask."""
         if targets is not None:
             B, T = idx.size()
@@ -260,8 +261,8 @@ class BDLM(nn.Module):
         assert T <= self.cos.size(1), f"Sequence length grew beyond the rotary embeddings cache: {T} > {self.cos.size(1)}"
         assert idx.device == self.cos.device, f"Rotary embeddings and idx are on different devices: {idx.device} != {self.cos.device}"
         assert self.cos.dtype == torch.bfloat16, "Rotary embeddings must be in bfloat16"
-        
-    
+
+
         # if kv cache exists, we need to offset the rotary embeddings to the current position in the cache
         T0 = 0 if kv_cache is None else kv_cache.get_pos()
         if targets is not None:
@@ -285,20 +286,21 @@ class BDLM(nn.Module):
         logits = softcap * torch.tanh(logits / softcap) # squash the logits
 
         if targets is not None:
-            # training: given the targets, compute and return the loss
-            # TODO experiment with chunked cross-entropy?
             logits = logits[:, :T, :]
-            loss_targets = targets
+
+            # Build attention_mask for loss (mask out prefix_pure_tokens)
             prefix_pure_tokens = self.config.prefix_pure_tokens
             if prefix_pure_tokens > 0:
-                loss_targets = loss_targets.clone()
-                loss_targets[:, :prefix_pure_tokens] = -1
-            loss = F.cross_entropy(
-                logits.reshape(-1, logits.size(-1)),
-                loss_targets.reshape(-1),
-                ignore_index=-1,
-                reduction=loss_reduction,
-            )
+                attention_mask = torch.ones(B, T, device=logits.device)
+                attention_mask[:, :prefix_pure_tokens] = 0
+            else:
+                attention_mask = None
+
+            # Get loss_scale from loss_extras
+            assert loss_extras is not None and "loss_scale" in loss_extras, "BD3LM requires loss_extras with loss_scale"
+            loss_scale = loss_extras["loss_scale"]
+
+            loss, _ = compute_bd3lm_loss(logits, targets, loss_scale, attention_mask=attention_mask)
             return loss
         else:
             # inference: just return the logits directly

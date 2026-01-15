@@ -151,7 +151,10 @@ with torch.device("meta"):
     model = PDLM(model_config)
 model.to_empty(device=device)
 model.init_weights()
-block_diff_mask = gen_mask(max_seq_len, block_size, attn_backend="sdpa", is_causal=is_causal).to(device=device)
+# prefix_ar_tokens: for target_shift mode, this will cycle through 0 to block_size-1
+# to slide blocks and train on all positions. For now, default to 0.
+prefix_ar_tokens = 0
+block_diff_mask = gen_mask(max_seq_len, block_size, attn_backend="sdpa", is_causal=is_causal, prefix_ar_tokens=prefix_ar_tokens).to(device=device)
 
 # If we are resuming, overwrite the model parameters with those of the checkpoint
 base_dir = get_base_dir()
@@ -216,6 +219,8 @@ train_loader = tokenizing_distributed_data_loader_with_state(
     prefix_pure_tokens=max(prefix_pure_tokens, 0),
     model_type=model_type,
     target_shift=target_shift,
+    bd3lm_block_size=block_size,
+    bd3lm_mask_token_id=mask_token_id,
 )
 build_val_loader = lambda: tokenizing_distributed_data_loader(
     device_batch_size,
@@ -226,8 +231,10 @@ build_val_loader = lambda: tokenizing_distributed_data_loader(
     prefix_pure_tokens=max(prefix_pure_tokens, 0),
     model_type=model_type,
     target_shift=target_shift,
+    bd3lm_block_size=block_size,
+    bd3lm_mask_token_id=mask_token_id,
 )
-x, y, dataloader_state_dict = next(train_loader) # kick off load of the very first batch of data
+x, y, loss_extras, dataloader_state_dict = next(train_loader) # kick off load of the very first batch of data
 debug_dump_path = None
 if debug:
     debug_dir = os.path.join(os.getcwd(), "temp")
@@ -384,11 +391,11 @@ while True:
                     handle.write(f"x={x_cpu.tolist()}\n")
                     handle.write(f"y={y_cpu.tolist()}\n")
         with autocast_ctx:
-            loss = model(x, y, attn_mask=block_diff_mask)
+            loss = model(x, y, attn_mask=block_diff_mask) #TODO: different model different branch here i guess
         train_loss = loss.detach() # for logging
         loss = loss / grad_accum_steps # each .backward() is a grad sum => normalize loss here
         loss.backward()
-        x, y, dataloader_state_dict = next(train_loader) # prefetch the next batch while the GPU is busy with forward/backward
+        x, y, loss_extras, dataloader_state_dict = next(train_loader) # prefetch the next batch while the GPU is busy with forward/backward
     # gradient clipping
     grad_clip_enabled = grad_clip > 0.0
     if grad_clip_enabled:
