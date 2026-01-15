@@ -288,17 +288,20 @@ class BDLM(nn.Module):
         if targets is not None:
             logits = logits[:, :T, :]
 
-            # Build attention_mask for loss (mask out prefix_pure_tokens)
+            # Get loss_scale and mask from loss_extras
+            assert loss_extras is not None and "loss_scale" in loss_extras, "BD3LM requires loss_extras with loss_scale"
+            assert "mask" in loss_extras, "BD3LM requires loss_extras with mask"
+            loss_scale = loss_extras["loss_scale"]
+            mask = loss_extras["mask"]  # True = masked position, compute loss here
+
+            # Build attention_mask for loss: only compute loss for masked positions
+            # mask is bool (True=masked), convert to float for attention_mask (1=compute loss)
+            attention_mask = mask.float()
+
+            # Also exclude prefix_pure_tokens from loss
             prefix_pure_tokens = self.config.prefix_pure_tokens
             if prefix_pure_tokens > 0:
-                attention_mask = torch.ones(B, T, device=logits.device)
                 attention_mask[:, :prefix_pure_tokens] = 0
-            else:
-                attention_mask = None
-
-            # Get loss_scale from loss_extras
-            assert loss_extras is not None and "loss_scale" in loss_extras, "BD3LM requires loss_extras with loss_scale"
-            loss_scale = loss_extras["loss_scale"]
 
             loss, _ = compute_bd3lm_loss(logits, targets, loss_scale, attention_mask=attention_mask)
             return loss

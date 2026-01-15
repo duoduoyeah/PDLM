@@ -33,7 +33,7 @@ device_type = "" # cuda|cpu|mps (empty => autodetect good device type default, i
 # Model architecture
 model_architecture = "Karpathy_gpt2"
 model_type = "bd3lm"
-target_shift = 1 # only ar and bd3lm: predict token this many steps ahead (1 = next-token)
+target_shift = -1 # only ar and bd3lm: predict token this many steps ahead (1 = next-token)
 depth = 20 # the depth of the Transformer model to train, rest of the kwargs are derived
 max_seq_len = 1024 # max context length
 block_size = 8 # the training use block size

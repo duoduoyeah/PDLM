@@ -110,7 +110,7 @@ def q_xt(
     t: Tensor,
     mask_token_id: int,
     block_size: int = 1,
-    ignore_first_token: bool = True,
+    prefix_pure_tokens: int = 0,
 ) -> Tuple[Tensor, Tensor]:
     """
     Full forward noising process: x0 -> xt.
@@ -120,14 +120,15 @@ def q_xt(
     2. Expand p to sequence length if needed
     3. Sample mask indices based on p
     4. Apply mask to create xt
-    5. (Optional) Keep first token unmasked
+    5. (Optional) Keep prefix tokens unmasked
 
     Args:
         x0: Clean input token ids, shape (B, L)
         t: Noise level, shape (B, num_blocks)
         mask_token_id: Token id to use for masked positions
         block_size: Block size for block-wise diffusion
-        ignore_first_token: If True, the first token (position 0) will NOT be masked
+        prefix_pure_tokens: Number of prefix tokens to keep unmasked (AR prefix).
+                           These positions will never be masked.
 
     Returns:
         xt: Noisy (masked) sequence, shape (B, L)
@@ -145,9 +146,9 @@ def q_xt(
     rand = torch.rand_like(x0, dtype=p.dtype)
     mask = rand < p  # True = will be masked
 
-    # Step 4: Keep first token unmasked
-    if ignore_first_token:
-        mask[:, 0] = False
+    # Step 4: Keep prefix tokens unmasked (AR prefix positions)
+    if prefix_pure_tokens > 0:
+        mask[:, :prefix_pure_tokens] = False
 
     # Step 5: Apply mask
     xt = torch.where(mask, mask_token_id, x0)

@@ -175,15 +175,17 @@ def tokenizing_distributed_data_loader_with_state(
                 t=t,
                 mask_token_id=bd3lm_mask_token_id,
                 block_size=bd3lm_block_size,
-                ignore_first_token=(prefix_pure_tokens > 0),
+                prefix_pure_tokens=prefix_pure_tokens,
             )
 
             # Handle target_shift mode: always mask position target_shift within each block
+            # Note: when target_shift >= 0, we ignore prefix_pure_tokens for this masking
             if target_shift >= 0:
                 # Vectorized: create indices for position target_shift in all blocks at once
                 # e.g., if block_size=8, target_shift=3: positions = [3, 11, 19, 27, ...]
                 positions_to_mask = torch.arange(target_shift, T, bd3lm_block_size)
                 inputs_cpu[:, positions_to_mask] = bd3lm_mask_token_id
+                mask[:, positions_to_mask] = True  # Update mask to reflect additional masking
 
             # Compute loss_scale from t: shape (B, num_blocks) -> (B, T)
             loss_scale_per_block = get_loss_scale(t)  # (B, num_blocks)
@@ -193,7 +195,8 @@ def tokenizing_distributed_data_loader_with_state(
             inputs = inputs_cpu.to(device=device, non_blocking=use_cuda_optimizations)
             targets = targets_cpu.to(device=device, non_blocking=use_cuda_optimizations)
             loss_scale = loss_scale.to(device=device, non_blocking=use_cuda_optimizations)
-            loss_extras = {"loss_scale": loss_scale}
+            mask = mask.to(device=device, non_blocking=use_cuda_optimizations)
+            loss_extras = {"loss_scale": loss_scale, "mask": mask}
 
         elif model_type == "pdlm":
             # PDLM mode: inputs are noisy versions of targets
