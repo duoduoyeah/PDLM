@@ -11,3 +11,6 @@
     * ...
 3.dataloader
     * bd3lm also will use the target_shift, when target_shift is -1, bd3lm will just train a model that is the normal bd3lm
+    * when shift, we also need to train four times longer since the loss only use 1 positions instead of 4 position? so we need to adjust this part by make sure we use the same amount of tokens to update the model weight.
+
+but later, when we do the Experiment C, I guess we still need to do a target_shift pdlm? thus we also need to use such special mask and compute loss within a specific position. 

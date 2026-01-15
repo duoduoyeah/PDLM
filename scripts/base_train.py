@@ -39,7 +39,7 @@ block_size = 8 # the training use block size
 prefix_pure_tokens = 1 # pure prefix tokens (0 = disabled)
 is_causal = True # the model' attn direction
 
-noise_total_steps = 16 # Noisy
+noise_total_steps = 16 # Noisy for pdlm
 # Debug
 debug = False
 # Training horizon. Only one of these 3 will be used, in this order of precedence.

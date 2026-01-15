@@ -8,6 +8,7 @@ from nanochat.common import get_dist_info
 from nanochat.dataset import list_parquet_files
 from nanochat.tokenizer import get_tokenizer
 from nanochat.sp_tokens.token_map import get_token_map, TokenMap
+from nanochat.bd3lm_utils.bd3lm_mask import sample_t, q_xt, get_loss_scale, expand_block_to_seq
 
 def tokenizing_distributed_data_loader_with_state(
     B,
@@ -21,6 +22,8 @@ def tokenizing_distributed_data_loader_with_state(
     prefix_pure_tokens=0,
     model_type="pdlm",
     target_shift=1,
+    bd3lm_block_size=1,
+    bd3lm_mask_token_id=None,
 ):
     """
     Stream pretraining text from parquet files, tokenize, yield training batches.
@@ -35,19 +38,38 @@ def tokenizing_distributed_data_loader_with_state(
     Perfect state resumption is possible but would be a lot more bloated, probably not worth it atm.
 
     model_type controls the input/target construction:
-    - "pdlm" or "bd3lm": inputs are noisy versions of targets (for diffusion-based models)
+    - "pdlm": inputs are noisy versions of targets using hierarchical token map
+    - "bd3lm": inputs are masked versions of targets using MASK token
     - "next_token_ar": inputs are shifted tokens (for autoregressive models like GPT)
 
-    target_shift controls how many tokens ahead the target is for next_token_ar mode (1 = next-token).
+    target_shift controls:
+    - For next_token_ar: how many tokens ahead the target is (1 = next-token)
+    - For bd3lm: if >= 0, always mask position target_shift within each block (plus random masking)
+                 if < 0, pure random masking based on sampled t
+
+    block_size: block size for bd3lm mode (sequence is divided into blocks)
+    mask_token_id: token id used for masking in bd3lm mode
 
     NOTE: this loader uses shard-based split logic (val is the last shard) and
     train includes all shards. A separate validation set can be used elsewhere
     and should be totally different from this shard-based eval.
+
+    Returns:
+        inputs: (B, T) input token ids
+        targets: (B, T) target token ids
+        loss_extras: dict with model-specific loss info, or None
+                     - For bd3lm: {"loss_scale": (B, T)}
+                     - For others: None
+        state_dict: dict for resuming training
     """
     assert split in ["train", "val"], "split must be 'train' or 'val'"
     assert model_type in ["pdlm", "bd3lm", "next_token_ar"], f"model_type must be 'pdlm', 'bd3lm', or 'next_token_ar', got {model_type}"
     if model_type == "next_token_ar":
         assert target_shift >= 1, "target_shift must be >= 1 for next-token prediction"
+    if model_type == "bd3lm":
+        assert bd3lm_block_size >= 1, "block_size must be >= 1 for bd3lm"
+        assert T % bd3lm_block_size == 0, f"T ({T}) must be divisible by block_size ({bd3lm_block_size})"
+        assert mask_token_id is not None, "mask_token_id must be provided for bd3lm"
 
     # infinite iterator over document batches (list of text strings)
     ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
@@ -100,8 +122,11 @@ def tokenizing_distributed_data_loader_with_state(
     tokenizer = get_tokenizer()
     bos_token = tokenizer.get_bos_token_id()
 
-    # token_map is only needed for pdlm/bd3lm mode
-    token_map: TokenMap = get_token_map(device="cpu") if model_type in ["pdlm", "bd3lm"] else None
+    # token_map is only needed for pdlm mode (bd3lm uses MASK token instead)
+    token_map: TokenMap = get_token_map(device="cpu") if model_type == "pdlm" else None
+
+    # num_blocks for bd3lm
+    num_blocks = T // bd3lm_block_size if model_type == "bd3lm" else None
 
     # scratch buffer holds the tokens for one iteration
     token_buffer = deque() # we stream tokens on the right and pop from the left
@@ -125,19 +150,51 @@ def tokenizing_distributed_data_loader_with_state(
             # Reshape to 2D and move to GPU async
             inputs = inputs_cpu.view(B, T).to(device=device, non_blocking=use_cuda_optimizations)
             targets = targets_cpu.view(B, T).to(device=device, non_blocking=use_cuda_optimizations)
+            loss_extras = None
 
         elif model_type == "bd3lm":
-            pass
-            # BD3LM mode: TODO - implement bd3lm specific logic
-            
-            # we should first make sure how to make the noise
-            
-            # and then we will use this noise to noisy the input
-            
-            # but when compute the loss we need the noise design again 
-            
-            # targets is easy right
-            
+            # BD3LM mode: inputs are masked versions of targets using MASK token
+            # targets are the clean tokens
+            targets_cpu = torch.tensor(tokens, dtype=torch.long, pin_memory=use_cuda_optimizations)
+            targets_cpu = targets_cpu.view(B, T)
+
+            # Sample noise level t per block: shape (B, num_blocks)
+            t = sample_t(
+                batch_size=B,
+                num_blocks=num_blocks,
+                sampling_eps_min=1e-3,
+                sampling_eps_max=1.0,
+                device="cpu",
+                antithetic_sampling=True,
+            )
+
+            # Apply masking: q_xt converts clean tokens to noisy (masked) tokens
+            # inputs_cpu shape: (B, T), mask shape: (B, T)
+            inputs_cpu, mask = q_xt(
+                x0=targets_cpu,
+                t=t,
+                mask_token_id=mask_token_id,
+                block_size=bd3lm_block_size,
+                ignore_first_token=(prefix_pure_tokens > 0),
+            )
+
+            # Handle target_shift mode: always mask position target_shift within each block
+            if target_shift >= 0:
+                # Vectorized: create indices for position target_shift in all blocks at once
+                # e.g., if block_size=8, target_shift=3: positions = [3, 11, 19, 27, ...]
+                positions_to_mask = torch.arange(target_shift, T, bd3lm_block_size)
+                inputs_cpu[:, positions_to_mask] = mask_token_id
+
+            # Compute loss_scale from t: shape (B, num_blocks) -> (B, T)
+            loss_scale_per_block = get_loss_scale(t)  # (B, num_blocks)
+            loss_scale = expand_block_to_seq(loss_scale_per_block, bd3lm_block_size)  # (B, T)
+
+            # Move to device
+            inputs = inputs_cpu.to(device=device, non_blocking=use_cuda_optimizations)
+            targets = targets_cpu.to(device=device, non_blocking=use_cuda_optimizations)
+            loss_scale = loss_scale.to(device=device, non_blocking=use_cuda_optimizations)
+            loss_extras = {"loss_scale": loss_scale}
+
         elif model_type == "pdlm":
             # PDLM mode: inputs are noisy versions of targets
             # pick a random training step surrogate for noise scheduling if requested
@@ -160,14 +217,15 @@ def tokenizing_distributed_data_loader_with_state(
             # Reshape to 2D and move to GPU async
             inputs = inputs_cpu.to(device=device, non_blocking=use_cuda_optimizations)
             targets = targets_cpu.to(device=device, non_blocking=use_cuda_optimizations)
+            loss_extras = None
 
         else:
             raise ValueError(f"Unsupported model_type: {model_type}")
 
         state_dict = {"pq_idx": pq_idx, "rg_idx": rg_idx} # we need this in case we wish to approximately resume training
-        yield inputs, targets, state_dict
+        yield inputs, targets, loss_extras, state_dict
 
 def tokenizing_distributed_data_loader(*args, **kwargs):
-    # helper function that only emits the inputs/targets and not the state_dict
-    for inputs, targets, state_dict in tokenizing_distributed_data_loader_with_state(*args, **kwargs):
+    # helper function that only emits the inputs/targets and not the state_dict or loss_extras
+    for inputs, targets, loss_extras, state_dict in tokenizing_distributed_data_loader_with_state(*args, **kwargs):
         yield inputs, targets

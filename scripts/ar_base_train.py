@@ -20,7 +20,7 @@ import wandb
 import torch
 
 from nanochat.gpt import GPT, GPTConfig
-from nanochat.dataloader import tokenizing_distributed_data_loader, tokenizing_distributed_data_loader_with_state
+from nanochat.gpt_dataloader import tokenizing_distributed_data_loader, tokenizing_distributed_data_loader_with_state
 from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, print_banner, get_base_dir, autodetect_device_type
 from nanochat.tokenizer import get_tokenizer, get_token_bytes
 from nanochat.checkpoint_manager import save_checkpoint, load_checkpoint
