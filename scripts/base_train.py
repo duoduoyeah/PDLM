@@ -11,6 +11,7 @@ import wandb
 import torch
 
 from nanochat.pdlm import PDLM, PDLMConfig
+from nanochat.bd3lm import BDLM, BDLMConfig
 from nanochat.dataloader import tokenizing_distributed_data_loader, tokenizing_distributed_data_loader_with_state
 from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, print_banner, get_base_dir, autodetect_device_type
 from nanochat.tokenizer import get_tokenizer, get_token_bytes
@@ -146,9 +147,15 @@ model_config_kwargs = dict(
     is_causal=is_causal,
     model_name=run
 )
+# Select model class based on model_type
+if model_type == "bd3lm":
+    ModelConfig, Model = BDLMConfig, BDLM
+else:
+    # next_token_ar and pdlm both use PDLM
+    ModelConfig, Model = PDLMConfig, PDLM
 with torch.device("meta"):
-    model_config = PDLMConfig(**model_config_kwargs)
-    model = PDLM(model_config)
+    model_config = ModelConfig(**model_config_kwargs)
+    model = Model(model_config)
 model.to_empty(device=device)
 model.init_weights()
 # prefix_ar_tokens: for target_shift mode, this will cycle through 0 to block_size-1
@@ -391,7 +398,11 @@ while True:
                     handle.write(f"x={x_cpu.tolist()}\n")
                     handle.write(f"y={y_cpu.tolist()}\n")
         with autocast_ctx:
-            loss = model(x, y, attn_mask=block_diff_mask) #TODO: different model different branch here i guess
+            if model_type == "bd3lm":
+                loss = model(x, y, attn_mask=block_diff_mask, loss_extras=loss_extras)
+            else:
+                # next_token_ar and pdlm
+                loss = model(x, y, attn_mask=block_diff_mask)
         train_loss = loss.detach() # for logging
         loss = loss / grad_accum_steps # each .backward() is a grad sum => normalize loss here
         loss.backward()

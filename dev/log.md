@@ -1,6 +1,11 @@
 01/15
 1. we will need to make sure there will be 4 masks for bs==4
-2. loss = model(x, y, attn_mask=block_diff_mask) #TODO: different model different branch here i guess
+2. loss = model(x, y, attn_mask=block_diff_mask) #TODO: different model different branch here i guess [Done]
+3. make sure the bd3lm forward okay [Checked]
+4. make sure the loss chain(target_shift stuff) [Checked] (verified with scripts/dump/dump_bd3lm_loss.py)
+5. bd3lm inference methods (generate, eval_specify_position) need implementation/fixes [TODO]
+
+
 
 01/14
 1. bd3lm file:
