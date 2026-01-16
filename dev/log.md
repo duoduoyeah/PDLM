@@ -2,6 +2,7 @@
 1. Resolve conflict between target_shift and prefix_pure_tokens [Done]
    - Fixed: `dataloader.py` target_shift is now 1-indexed, and `prefix_pure_tokens` correctly overrides it.
    - Verified with `scripts/dump/dump_bd3lm_target_shift.py`.
+2. Dry run of full BD3LM training loop to verify end-to-end stability [TODO]
 
 01/15
 2. loss = model(x, y, attn_mask=block_diff_mask) #TODO: different model different branch here i guess [Done]
@@ -29,5 +30,4 @@
     * bd3lm also will use the target_shift, when target_shift is -1, bd3lm will just train a model that is the normal bd3lm
     * when shift, we also need to train four times longer since the loss only use 1 positions instead of 4 position? so we need to adjust this part by make sure we use the same amount of tokens to update the model weight.
 
-but later, when we do the Experiment C, I guess we still need to do a target_shift pdlm? thus we also need to use such special mask and compute loss within a specific position. 
-
+but later, when we do the Experiment C, I guess we still need to do a target_shift pdlm? thus we also need to use such special mask and compute loss within a specific position.
