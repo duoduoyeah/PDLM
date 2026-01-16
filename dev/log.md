@@ -1,5 +1,7 @@
 01/16
-1. Resolve conflict between target_shift and prefix_pure_tokens [TODO]
+1. Resolve conflict between target_shift and prefix_pure_tokens [Done]
+   - Fixed: `dataloader.py` target_shift is now 1-indexed, and `prefix_pure_tokens` correctly overrides it.
+   - Verified with `scripts/dump/dump_bd3lm_target_shift.py`.
 
 01/15
 2. loss = model(x, y, attn_mask=block_diff_mask) #TODO: different model different branch here i guess [Done]

@@ -70,6 +70,8 @@ def tokenizing_distributed_data_loader_with_state(
         assert bd3lm_block_size >= 1, "block_size must be >= 1 for bd3lm"
         assert T % bd3lm_block_size == 0, f"T ({T}) must be divisible by block_size ({bd3lm_block_size})"
         assert bd3lm_mask_token_id is not None, "bd3lm_mask_token_id must be provided for bd3lm"
+        if target_shift >= 0:
+            assert 1 <= target_shift <= bd3lm_block_size, f"target_shift must be in [1, block_size] for bd3lm, got {target_shift}"
 
     # infinite iterator over document batches (list of text strings)
     ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
@@ -182,14 +184,21 @@ def tokenizing_distributed_data_loader_with_state(
                 prefix_pure_tokens=prefix_pure_tokens,
             )
 
-            # Handle target_shift mode: always mask position target_shift within each block
-            # Note: when target_shift >= 0, we ignore prefix_pure_tokens for this masking
-            if target_shift >= 0:
-                # Vectorized: create indices for position target_shift in all blocks at once
-                # e.g., if block_size=8, target_shift=3: positions = [3, 11, 19, 27, ...]
-                positions_to_mask = torch.arange(target_shift, T, bd3lm_block_size)
+            # Handle target_shift mode: always mask position (target_shift-1) within each block
+            # target_shift is 1-indexed: 1 = first position, block_size = last position
+            # prefix_pure_tokens is stronger: positions in prefix range stay unmasked
+            if target_shift >= 1:
+                # Vectorized: create indices for position (target_shift-1) in all blocks
+                # e.g., if block_size=4, target_shift=1: positions = [0, 4, 8, 12, ...] (first of each block)
+                # e.g., if block_size=4, target_shift=4: positions = [3, 7, 11, 15, ...] (last of each block)
+                positions_to_mask = torch.arange(target_shift - 1, T, bd3lm_block_size)
                 inputs_cpu[:, positions_to_mask] = bd3lm_mask_token_id
-                mask[:, positions_to_mask] = True  # Update mask to reflect additional masking
+                mask[:, positions_to_mask] = True
+
+                # prefix_pure_tokens overrides target_shift: restore prefix positions to unmasked
+                if prefix_pure_tokens > 0:
+                    inputs_cpu[:, :prefix_pure_tokens] = targets_cpu[:, :prefix_pure_tokens]
+                    mask[:, :prefix_pure_tokens] = False
 
             # Compute loss_scale from t: shape (B, num_blocks) -> (B, T)
             loss_scale_per_block = get_loss_scale(t)  # (B, num_blocks)
