@@ -1,3 +1,6 @@
+01/16
+1.
+
 01/15
 2. loss = model(x, y, attn_mask=block_diff_mask) #TODO: different model different branch here i guess [Done]
 3. make sure the bd3lm forward okay [Checked]
@@ -9,6 +12,7 @@
 9. Adjusted BD3LM iterations using `bd3lm_effective_ratio` to ensure fair comparison of total effective (masked) supervision tokens [Done].
 10. Refactored attention mask to use bidirectional sliding prefix for target shift [Done].
 11. Implemented BD3LM inference `generate` method (block-wise decoding) and refactored model init in `base_train.py` [Done].
+12. we need to verify the dataloader work good with the mask change [TODO]
 
 01/14
 1. bd3lm file:

@@ -194,11 +194,20 @@ with torch.device("meta"):
     model = Model(model_config)
 model.to_empty(device=device)
 model.init_weights()
-# prefix_sliding_tokens: for target_shift mode, cycles through 0 to block_size-1 across shard loops
-# For normal bd3lm (target_shift=-1), this should be 0
-# Note: this is separate from prefix_pure_tokens (which is about masking/loss, not attention)
-prefix_sliding_tokens = 0  # TODO: implement cycling for target_shift mode
-block_diff_mask = gen_mask(max_seq_len, block_size, attn_backend="sdpa", is_causal=is_causal, prefix_sliding_tokens=prefix_sliding_tokens).to(device=device)
+
+# Generate attention masks
+# For BD3LM with target_shift >= 0: pre-generate block_size masks for prefix_sliding_tokens cycling
+# For other cases: single mask with prefix_sliding_tokens = 0
+if model_type == "bd3lm" and target_shift >= 0:
+    # Pre-generate all masks for cycling prefix_sliding_tokens = 0, 1, ..., block_size-1
+    block_diff_masks = [
+        gen_mask(max_seq_len, block_size, attn_backend="sdpa", is_causal=is_causal, prefix_sliding_tokens=i).to(device=device)
+        for i in range(block_size)
+    ]
+    print0(f"Pre-generated {block_size} attention masks for prefix_sliding_tokens cycling")
+else:
+    # Single mask with prefix_sliding_tokens = 0
+    block_diff_masks = [gen_mask(max_seq_len, block_size, attn_backend="sdpa", is_causal=is_causal, prefix_sliding_tokens=0).to(device=device)]
 
 # If we are resuming, overwrite the model parameters with those of the checkpoint
 base_dir = get_base_dir()
@@ -343,13 +352,15 @@ while True:
         model.eval()
         val_loader = build_val_loader()
         eval_steps = eval_tokens // (device_batch_size * max_seq_len * ddp_world_size)
+        # next_token_ar (GPT) doesn't use attn_mask
+        eval_attn_mask = None if model_type == "next_token_ar" else block_diff_masks[0]
         with autocast_ctx:
             val_bpb = evaluate_bpb(
                 model,
                 val_loader,
                 eval_steps,
                 token_bytes,
-                attn_mask=block_diff_mask,
+                attn_mask=eval_attn_mask,
                 prefix_pure_tokens=prefix_pure_tokens,
             )
         print0(f"Step {step:05d} | Validation bpb: {val_bpb:.4f}")
@@ -446,12 +457,18 @@ while True:
                     handle.write(f"y={y_cpu.tolist()}\n")
         with autocast_ctx:
             if model_type == "bd3lm":
+                # Select attention mask based on epoch (for target_shift cycling)
+                epoch = dataloader_state_dict.get("epoch", 0)
+                block_diff_mask = block_diff_masks[epoch % len(block_diff_masks)]
                 loss = model(x, y, attn_mask=block_diff_mask, loss_extras=loss_extras)
                 # Count effective tokens (masked positions that contribute to loss)
                 total_effective_tokens += loss_extras["mask"].sum().item() * ddp_world_size
+            elif model_type == "pdlm":
+                loss = model(x, y, attn_mask=block_diff_masks[0])
+                total_effective_tokens += x.numel() * ddp_world_size
             else:
-                # next_token_ar and pdlm: all tokens contribute to loss
-                loss = model(x, y, attn_mask=block_diff_mask)
+                # next_token_ar: GPT forward doesn't take attn_mask
+                loss = model(x, y)
                 total_effective_tokens += x.numel() * ddp_world_size
         train_loss = loss.detach() # for logging
         loss = loss / grad_accum_steps # each .backward() is a grad sum => normalize loss here
