@@ -1,5 +1,5 @@
 01/16
-1.
+1. Resolve conflict between target_shift and prefix_pure_tokens [TODO]
 
 01/15
 2. loss = model(x, y, attn_mask=block_diff_mask) #TODO: different model different branch here i guess [Done]
