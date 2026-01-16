@@ -11,7 +11,7 @@ except Exception:
     FLEX_ATTN_AVAILABLE = False
 
 
-def block_diff_mask(b, h, q_idx, kv_idx, block_size=None, n=None, prefix_ar_tokens=0):
+def block_diff_mask(b, h, q_idx, kv_idx, block_size=None, n=None, prefix_sliding_tokens=0):
     """
     Constructs the specialized block diffusion attention mask for training
     composed of three masks:
@@ -19,15 +19,16 @@ def block_diff_mask(b, h, q_idx, kv_idx, block_size=None, n=None, prefix_ar_toke
     - **Offset Block Causal Mask (M_OBC)**: Cross-attention for conditional context
     - **Block Causal Mask (M_BC)**: Attention to update x0
 
-    When prefix_ar_tokens > 0, the first `prefix_ar_tokens` positions use standard
-    causal AR attention (not part of any block). Blocks start after the prefix.
+    When prefix_sliding_tokens > 0, the first `prefix_sliding_tokens` positions form
+    a sliding prefix (for target_shift mode). Within this prefix, attention is
+    bidirectional. Blocks start after the prefix.
 
     Args:
         b, h: Batch and head indices (ignored for mask logic).
         q_idx, kv_idx: Query and Key indices.
         n: Sequence length (L), total is 2L for [xt | x0].
         block_size: Defines the block structure.
-        prefix_ar_tokens: Number of AR prefix tokens before blocks start.
+        prefix_sliding_tokens: Number of sliding prefix tokens before blocks start.
 
     Returns:
         A boolean attention mask.
@@ -40,39 +41,39 @@ def block_diff_mask(b, h, q_idx, kv_idx, block_size=None, n=None, prefix_ar_toke
     x0_flag_q = q_idx >= n
     x0_flag_kv = kv_idx >= n
 
-    # Indicate whether token is in AR prefix (not in any block)
-    is_prefix_q = pos_in_half_q < prefix_ar_tokens
-    is_prefix_kv = pos_in_half_kv < prefix_ar_tokens
+    # Indicate whether token is in sliding prefix (not in any block)
+    is_prefix_q = pos_in_half_q < prefix_sliding_tokens
+    is_prefix_kv = pos_in_half_kv < prefix_sliding_tokens
 
     # Compute block indices (only meaningful for non-prefix tokens)
-    # Blocks start after prefix_ar_tokens
+    # Blocks start after prefix_sliding_tokens
     block_q = torch.where(
         x0_flag_q == 1,
-        (q_idx - n - prefix_ar_tokens) // block_size,
-        (q_idx - prefix_ar_tokens) // block_size
+        (q_idx - n - prefix_sliding_tokens) // block_size,
+        (q_idx - prefix_sliding_tokens) // block_size
     )
     block_kv = torch.where(
         x0_flag_kv == 1,
-        (kv_idx - n - prefix_ar_tokens) // block_size,
-        (kv_idx - prefix_ar_tokens) // block_size
+        (kv_idx - n - prefix_sliding_tokens) // block_size,
+        (kv_idx - prefix_sliding_tokens) // block_size
     )
 
     # =========================================================================
-    # AR Prefix Attention (standard causal within prefix)
+    # Sliding Prefix Attention (bidirectional within prefix)
     # =========================================================================
-    # Prefix in xt attends to prefix in xt (causally)
-    prefix_xt_to_xt = is_prefix_q & ~x0_flag_q & is_prefix_kv & ~x0_flag_kv & (pos_in_half_q >= pos_in_half_kv)
+    # Prefix in xt attends to all prefix in xt (bidirectional)
+    prefix_xt_to_xt = is_prefix_q & ~x0_flag_q & is_prefix_kv & ~x0_flag_kv
 
-    # Prefix in x0 attends to prefix in xt (causally)
-    prefix_x0_to_xt = is_prefix_q & x0_flag_q & is_prefix_kv & ~x0_flag_kv & (pos_in_half_q >= pos_in_half_kv)
+    # Prefix in x0 attends to all prefix in xt
+    prefix_x0_to_xt = is_prefix_q & x0_flag_q & is_prefix_kv & ~x0_flag_kv
 
-    # Prefix in x0 attends to prefix in x0 (causally)
-    prefix_x0_to_x0 = is_prefix_q & x0_flag_q & is_prefix_kv & x0_flag_kv & (pos_in_half_q >= pos_in_half_kv)
+    # Prefix in x0 attends to all prefix in x0 (bidirectional)
+    prefix_x0_to_x0 = is_prefix_q & x0_flag_q & is_prefix_kv & x0_flag_kv
 
-    ar_prefix_mask = prefix_xt_to_xt | prefix_x0_to_xt | prefix_x0_to_x0
+    sliding_prefix_mask = prefix_xt_to_xt | prefix_x0_to_xt | prefix_x0_to_x0
 
     # =========================================================================
-    # Block tokens attend to AR prefix
+    # Block tokens attend to sliding prefix
     # =========================================================================
     # Block tokens in xt can attend to all prefix tokens in xt
     block_xt_to_prefix_xt = ~is_prefix_q & ~x0_flag_q & is_prefix_kv & ~x0_flag_kv
@@ -101,10 +102,10 @@ def block_diff_mask(b, h, q_idx, kv_idx, block_size=None, n=None, prefix_ar_toke
     block_causal = (block_q >= block_kv) & (x0_flag_kv == 1) & (x0_flag_q == 1) & not_prefix_q & not_prefix_kv
 
     # **4. Combine All Masks **
-    return ar_prefix_mask | block_to_prefix_mask | block_diagonal | offset_block_causal | block_causal
+    return sliding_prefix_mask | block_to_prefix_mask | block_diagonal | offset_block_causal | block_causal
 
 
-def block_diff_mask_causal(b, h, q_idx, kv_idx, block_size=None, n=None, prefix_ar_tokens=0):
+def block_diff_mask_causal(b, h, q_idx, kv_idx, block_size=None, n=None, prefix_sliding_tokens=0):
     """
     Constructs the specialized block diffusion attention mask for training
     with within-block causality, composed of three masks:
@@ -112,15 +113,16 @@ def block_diff_mask_causal(b, h, q_idx, kv_idx, block_size=None, n=None, prefix_
     - **Offset Block Causal Mask (M_OBC)**: Cross-attention for conditional context
     - **Block Causal Mask (M_BC)**: Attention to update x0
 
-    When prefix_ar_tokens > 0, the first `prefix_ar_tokens` positions use standard
-    causal AR attention (not part of any block). Blocks start after the prefix.
+    When prefix_sliding_tokens > 0, the first `prefix_sliding_tokens` positions form
+    a sliding prefix (for target_shift mode). Within this prefix, attention is
+    bidirectional. Blocks start after the prefix.
 
     Args:
         b, h: Batch and head indices (ignored for mask logic).
         q_idx, kv_idx: Query and Key indices.
         n: Sequence length (L), total is 2L for [xt | x0].
         block_size: Defines the block structure.
-        prefix_ar_tokens: Number of AR prefix tokens before blocks start.
+        prefix_sliding_tokens: Number of sliding prefix tokens before blocks start.
 
     Returns:
         A boolean attention mask.
@@ -133,51 +135,51 @@ def block_diff_mask_causal(b, h, q_idx, kv_idx, block_size=None, n=None, prefix_
     x0_flag_q = q_idx >= n
     x0_flag_kv = kv_idx >= n
 
-    # Indicate whether token is in AR prefix (not in any block)
-    is_prefix_q = pos_in_half_q < prefix_ar_tokens
-    is_prefix_kv = pos_in_half_kv < prefix_ar_tokens
+    # Indicate whether token is in sliding prefix (not in any block)
+    is_prefix_q = pos_in_half_q < prefix_sliding_tokens
+    is_prefix_kv = pos_in_half_kv < prefix_sliding_tokens
 
     # Compute block indices (only meaningful for non-prefix tokens)
-    # Blocks start after prefix_ar_tokens
+    # Blocks start after prefix_sliding_tokens
     block_q = torch.where(
         x0_flag_q == 1,
-        (q_idx - n - prefix_ar_tokens) // block_size,
-        (q_idx - prefix_ar_tokens) // block_size
+        (q_idx - n - prefix_sliding_tokens) // block_size,
+        (q_idx - prefix_sliding_tokens) // block_size
     )
     block_kv = torch.where(
         x0_flag_kv == 1,
-        (kv_idx - n - prefix_ar_tokens) // block_size,
-        (kv_idx - prefix_ar_tokens) // block_size
+        (kv_idx - n - prefix_sliding_tokens) // block_size,
+        (kv_idx - prefix_sliding_tokens) // block_size
     )
 
     # Position within block (for within-block causality)
     pos_in_block_q = torch.where(
         x0_flag_q == 1,
-        (q_idx - n - prefix_ar_tokens) % block_size,
-        (q_idx - prefix_ar_tokens) % block_size
+        (q_idx - n - prefix_sliding_tokens) % block_size,
+        (q_idx - prefix_sliding_tokens) % block_size
     )
     pos_in_block_kv = torch.where(
         x0_flag_kv == 1,
-        (kv_idx - n - prefix_ar_tokens) % block_size,
-        (kv_idx - prefix_ar_tokens) % block_size
+        (kv_idx - n - prefix_sliding_tokens) % block_size,
+        (kv_idx - prefix_sliding_tokens) % block_size
     )
 
     # =========================================================================
-    # AR Prefix Attention (standard causal within prefix)
+    # Sliding Prefix Attention (bidirectional within prefix)
     # =========================================================================
-    # Prefix in xt attends to prefix in xt (causally)
-    prefix_xt_to_xt = is_prefix_q & ~x0_flag_q & is_prefix_kv & ~x0_flag_kv & (pos_in_half_q >= pos_in_half_kv)
+    # Prefix in xt attends to all prefix in xt (bidirectional)
+    prefix_xt_to_xt = is_prefix_q & ~x0_flag_q & is_prefix_kv & ~x0_flag_kv
 
-    # Prefix in x0 attends to prefix in xt (causally)
-    prefix_x0_to_xt = is_prefix_q & x0_flag_q & is_prefix_kv & ~x0_flag_kv & (pos_in_half_q >= pos_in_half_kv)
+    # Prefix in x0 attends to all prefix in xt
+    prefix_x0_to_xt = is_prefix_q & x0_flag_q & is_prefix_kv & ~x0_flag_kv
 
-    # Prefix in x0 attends to prefix in x0 (causally)
-    prefix_x0_to_x0 = is_prefix_q & x0_flag_q & is_prefix_kv & x0_flag_kv & (pos_in_half_q >= pos_in_half_kv)
+    # Prefix in x0 attends to all prefix in x0 (bidirectional)
+    prefix_x0_to_x0 = is_prefix_q & x0_flag_q & is_prefix_kv & x0_flag_kv
 
-    ar_prefix_mask = prefix_xt_to_xt | prefix_x0_to_xt | prefix_x0_to_x0
+    sliding_prefix_mask = prefix_xt_to_xt | prefix_x0_to_xt | prefix_x0_to_x0
 
     # =========================================================================
-    # Block tokens attend to AR prefix
+    # Block tokens attend to sliding prefix
     # =========================================================================
     # Block tokens in xt can attend to all prefix tokens in xt
     block_xt_to_prefix_xt = ~is_prefix_q & ~x0_flag_q & is_prefix_kv & ~x0_flag_kv
@@ -215,10 +217,10 @@ def block_diff_mask_causal(b, h, q_idx, kv_idx, block_size=None, n=None, prefix_
     )
 
     # **4. Combine All Masks **
-    return ar_prefix_mask | block_to_prefix_mask | block_diagonal | offset_block_causal | block_causal
+    return sliding_prefix_mask | block_to_prefix_mask | block_diagonal | offset_block_causal | block_causal
 
 
-def gen_mask(seqlen, block_size, attn_backend="sdpa", is_causal=False, prefix_ar_tokens=0):
+def gen_mask(seqlen, block_size, attn_backend="sdpa", is_causal=False, prefix_sliding_tokens=0):
     """
     Builds a 2L x 2L mask for xt || x0.
 
@@ -227,8 +229,8 @@ def gen_mask(seqlen, block_size, attn_backend="sdpa", is_causal=False, prefix_ar
         block_size: Size of each block for block diffusion.
         attn_backend: "sdpa" or "flex".
         is_causal: If True, use within-block causality.
-        prefix_ar_tokens: Number of AR prefix tokens before blocks start.
-                         These tokens use standard causal attention.
+        prefix_sliding_tokens: Number of sliding prefix tokens before blocks start.
+                              These tokens use bidirectional attention within the prefix.
 
     Returns:
         Attention mask of shape (2L, 2L) for sdpa or BlockMask for flex.
@@ -236,7 +238,7 @@ def gen_mask(seqlen, block_size, attn_backend="sdpa", is_causal=False, prefix_ar
     mask_fn = block_diff_mask_causal if is_causal else block_diff_mask
     if attn_backend == "flex" and FLEX_ATTN_AVAILABLE:
         return create_block_mask(
-            partial(mask_fn, block_size=block_size, n=seqlen, prefix_ar_tokens=prefix_ar_tokens),
+            partial(mask_fn, block_size=block_size, n=seqlen, prefix_sliding_tokens=prefix_sliding_tokens),
             B=None,
             H=None,
             Q_LEN=seqlen * 2,
@@ -250,7 +252,7 @@ def gen_mask(seqlen, block_size, attn_backend="sdpa", is_causal=False, prefix_ar
             kv_idx=torch.arange(seqlen * 2)[None, :],
             block_size=block_size,
             n=seqlen,
-            prefix_ar_tokens=prefix_ar_tokens,
+            prefix_sliding_tokens=prefix_sliding_tokens,
         )
     raise ValueError("Unknown attention backend")
 

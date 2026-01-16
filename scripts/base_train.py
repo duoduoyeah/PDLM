@@ -160,10 +160,11 @@ with torch.device("meta"):
     model = Model(model_config)
 model.to_empty(device=device)
 model.init_weights()
-# prefix_ar_tokens: for target_shift mode, this will cycle through 0 to block_size-1
-# to slide blocks and train on all positions. For now, default to 0.
-prefix_ar_tokens = 0
-block_diff_mask = gen_mask(max_seq_len, block_size, attn_backend="sdpa", is_causal=is_causal, prefix_ar_tokens=prefix_ar_tokens).to(device=device)
+# prefix_sliding_tokens: for target_shift mode, cycles through 0 to block_size-1 across shard loops
+# For normal bd3lm (target_shift=-1), this should be 0
+# Note: this is separate from prefix_pure_tokens (which is about masking/loss, not attention)
+prefix_sliding_tokens = 0  # TODO: implement cycling for target_shift mode
+block_diff_mask = gen_mask(max_seq_len, block_size, attn_backend="sdpa", is_causal=is_causal, prefix_sliding_tokens=prefix_sliding_tokens).to(device=device)
 
 # If we are resuming, overwrite the model parameters with those of the checkpoint
 base_dir = get_base_dir()
