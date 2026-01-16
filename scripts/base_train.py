@@ -18,10 +18,8 @@ from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, p
 from nanochat.tokenizer import get_tokenizer, get_token_bytes
 from nanochat.sp_tokens.token_map import get_token_map
 from nanochat.checkpoint_manager import save_checkpoint, load_checkpoint
-from nanochat.loss_eval import evaluate_bpb
 from nanochat.engine import Engine
 from nanochat.attn_masks import gen_mask
-from scripts.base_eval import evaluate_model
 print_banner()
 
 # -----------------------------------------------------------------------------
@@ -63,10 +61,7 @@ warmdown_ratio = 0.2 # ratio of iterations for LR warmdown
 final_lr_frac = 0.0 # final LR is this fraction of the initial LR
 resume_from_step = -1 # resume training from this step of the optimization (-1 = disable)
 # Evaluation
-eval_every = -1 # every how many steps to evaluate the model for val bpb(-1 = disable)
-eval_tokens = 20*524288 # number of tokens to evaluate val loss on
-core_metric_every = -1 # every how many steps to evaluate the core metric (-1 = disable)
-core_metric_max_per_task = 500 # examples per task in estimating the core metric
+eval_every = -1 # TODO: new eval logic placeholder (-1 = disable)
 sample_every = 2000 # every how many steps to sample from the model
 save_every = -1 # every how many steps to save model checkpoints (-1 = disable, and save only at the end of the run)
 # Output
@@ -282,18 +277,6 @@ train_loader = tokenizing_distributed_data_loader_with_state(
     bd3lm_block_size=block_size,
     bd3lm_mask_token_id=mask_token_id,
 )
-build_val_loader = lambda: tokenizing_distributed_data_loader(
-    device_batch_size,
-    max_seq_len,
-    split="val",
-    device=device,
-    noise_total_steps=noise_total_steps,
-    prefix_pure_tokens=max(prefix_pure_tokens, 0),
-    model_type=model_type,
-    target_shift=target_shift,
-    bd3lm_block_size=block_size,
-    bd3lm_mask_token_id=mask_token_id,
-)
 x, y, loss_extras, dataloader_state_dict = next(train_loader) # kick off load of the very first batch of data
 debug_dump_path = None
 if debug:
@@ -327,16 +310,12 @@ def get_muon_momentum(it):
 
 if not resuming:
     step = 0
-    min_val_bpb = float("inf")
     smooth_train_loss = 0 # EMA of training loss
     total_training_time = 0 # total wall-clock time of training
     total_effective_tokens = 0 # for bd3lm: actual masked tokens that contribute to loss
-    val_bpb = 0
 else:
     step = meta_data["step"]
     loop_state = meta_data["loop_state"]
-    val_bpb = meta_data["val_bpb"]
-    min_val_bpb = loop_state["min_val_bpb"]
     smooth_train_loss = loop_state["smooth_train_loss"]
     total_training_time = loop_state["total_training_time"]
     total_effective_tokens = loop_state.get("total_effective_tokens", 0)
@@ -347,48 +326,9 @@ while True:
     last_step = step == num_iterations # loop runs num_iterations+1 times so that we can eval/save at the end
     flops_so_far = num_flops_per_token * total_batch_size * step
 
-    # once in a while: evaluate the val bpb (all ranks participate)
-    if eval_every > 0 and (last_step or step % eval_every == 0):
-        model.eval()
-        val_loader = build_val_loader()
-        eval_steps = eval_tokens // (device_batch_size * max_seq_len * ddp_world_size)
-        # next_token_ar (GPT) doesn't use attn_mask
-        eval_attn_mask = None if model_type == "next_token_ar" else block_diff_masks[0]
-        with autocast_ctx:
-            val_bpb = evaluate_bpb(
-                model,
-                val_loader,
-                eval_steps,
-                token_bytes,
-                attn_mask=eval_attn_mask,
-                prefix_pure_tokens=prefix_pure_tokens,
-            )
-        print0(f"Step {step:05d} | Validation bpb: {val_bpb:.4f}")
-        if val_bpb < min_val_bpb:
-            min_val_bpb = val_bpb
-        wandb_run.log({
-            "step": step,
-            "total_training_flops": flops_so_far,
-            "total_training_time": total_training_time,
-            "val/bpb": val_bpb,
-        })
-        model.train()
-
-    # once in a while: estimate the CORE metric (all ranks participate)
-    # use the original uncompiled model because the inputs keep changing shape
-    results = {}
-    if core_metric_every > 0 and (last_step or (step > 0 and step % core_metric_every == 0)):
-        model.eval()
-        with autocast_ctx:
-            results = evaluate_model(orig_model, tokenizer, device, max_per_task=core_metric_max_per_task)
-        print0(f"Step {step:05d} | CORE metric: {results['core_metric']:.4f}")
-        wandb_run.log({
-            "step": step,
-            "total_training_flops": flops_so_far,
-            "core_metric": results["core_metric"],
-            "centered_results": results["centered_results"],
-        })
-        model.train()
+    # TODO: new evaluation logic placeholder
+    # if eval_every > 0 and (last_step or step % eval_every == 0):
+    #     pass
 
     # once in a while: sample from the model (only on master process)
     # use the original uncompiled model because the inputs keep changing shape
@@ -420,14 +360,12 @@ while True:
             [opt.state_dict() for opt in optimizers], # optimizer states
             { # metadata saved as json
                 "step": step,
-                "val_bpb": val_bpb, # loss at last step
                 "model_config": model_config_kwargs,
                 "user_config": user_config, # inputs to the training script
                 "device_batch_size": device_batch_size,
                 "max_seq_len": max_seq_len,
                 "dataloader_state_dict": dataloader_state_dict,
                 "loop_state": { # all loop state (other than step) so that we can resume training
-                    "min_val_bpb": min_val_bpb,
                     "smooth_train_loss": smooth_train_loss,
                     "total_training_time": total_training_time,
                     "total_effective_tokens": total_effective_tokens,
@@ -530,7 +468,6 @@ while True:
 # print a few more stats
 print0(f"Peak memory usage: {get_max_memory() / 1024 / 1024:.2f}MiB")
 print0(f"Total training time: {total_training_time/60:.2f}m")
-print0(f"Minimum validation bpb: {min_val_bpb:.4f}")
 print0(f"Total effective tokens: {total_effective_tokens:,}")
 effective_ratio_actual = total_effective_tokens / (total_batch_size * num_iterations) if num_iterations > 0 else 0
 print0(f"Actual effective ratio: {effective_ratio_actual:.4f}")
@@ -551,9 +488,6 @@ get_report().log(section="Base model training", data=[
         "final_lr_frac": final_lr_frac,
     },
     { # stats about training outcomes
-        "Minimum validation bpb": min_val_bpb,
-        "Final validation bpb": val_bpb,
-        "CORE metric estimate": results.get("core_metric", None),
         "MFU %": f"{mfu:.2f}%",
         "Total training flops": f"{flops_so_far:e}",
         "Total training time": f"{total_training_time/60:.2f}m",
