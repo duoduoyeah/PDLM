@@ -10,6 +10,7 @@ from contextlib import nullcontext
 import wandb
 import torch
 
+from nanochat.gpt import GPT, GPTConfig
 from nanochat.pdlm import PDLM, PDLMConfig
 from nanochat.bd3lm import BDLM, BDLMConfig
 from nanochat.dataloader import tokenizing_distributed_data_loader, tokenizing_distributed_data_loader_with_state
@@ -95,8 +96,17 @@ wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat", 
 tokenizer = get_tokenizer()
 token_bytes = get_token_bytes(device=device)
 all_vocab_size = tokenizer.get_vocab_size()
-token_map = get_token_map(device="cpu")
-pure_vocab_size = token_map.pure_to_noisy_map.shape[0]
+if model_type == "next_token_ar":
+    pure_vocab_size = all_vocab_size
+    token_map = None
+elif model_type == "bd3lm":
+    pure_vocab_size = all_vocab_size - 1  # MASK is the only extra token
+    token_map = None
+elif model_type == "pdlm":
+    token_map = get_token_map(device="cpu")
+    pure_vocab_size = token_map.pure_to_noisy_map.shape[0]
+else:
+    raise ValueError(f"Unknown model_type: {model_type}")
 assert pure_vocab_size <= all_vocab_size, "pure_vocab_size should not exceed all_vocab_size"
 mask_token_id = -1
 try:
@@ -135,26 +145,50 @@ print0(f"Total batch size {total_batch_size:,} => gradient accumulation steps: {
 # -----------------------------------------------------------------------------
 # Initialize the Model
 
-# Create a new model with random weights
-model_config_kwargs = dict(
-    sequence_len=max_seq_len,
-    pure_vocab_size=pure_vocab_size,
-    all_vocab_size=all_vocab_size,
-    n_layer=num_layers,
-    n_head=num_heads,
-    n_kv_head=num_kv_heads,
-    n_embd=model_dim,
-    prefix_pure_tokens=prefix_pure_tokens,
-    mask_token_id=mask_token_id,
-    is_causal=is_causal,
-    model_name=run
-)
-# Select model class based on model_type
-if model_type == "bd3lm":
+# Create model config based on model_type
+if model_type == "next_token_ar":
+    ModelConfig, Model = GPTConfig, GPT
+    model_config_kwargs = dict(
+        sequence_len=max_seq_len,
+        vocab_size=all_vocab_size,
+        n_layer=num_layers,
+        n_head=num_heads,
+        n_kv_head=num_kv_heads,
+        n_embd=model_dim,
+    )
+elif model_type == "bd3lm":
     ModelConfig, Model = BDLMConfig, BDLM
-else:
-    # next_token_ar and pdlm both use PDLM
+    model_config_kwargs = dict(
+        sequence_len=max_seq_len,
+        pure_vocab_size=pure_vocab_size,
+        all_vocab_size=all_vocab_size,
+        n_layer=num_layers,
+        n_head=num_heads,
+        n_kv_head=num_kv_heads,
+        n_embd=model_dim,
+        prefix_pure_tokens=prefix_pure_tokens,
+        mask_token_id=mask_token_id,
+        is_causal=is_causal,
+        bucket_size=block_size,
+        model_name=run,
+    )
+elif model_type == "pdlm":
     ModelConfig, Model = PDLMConfig, PDLM
+    model_config_kwargs = dict(
+        sequence_len=max_seq_len,
+        pure_vocab_size=pure_vocab_size,
+        all_vocab_size=all_vocab_size,
+        n_layer=num_layers,
+        n_head=num_heads,
+        n_kv_head=num_kv_heads,
+        n_embd=model_dim,
+        prefix_pure_tokens=prefix_pure_tokens,
+        mask_token_id=mask_token_id,
+        is_causal=is_causal,
+        model_name=run,
+    )
+else:
+    raise ValueError(f"Unknown model_type: {model_type}")
 with torch.device("meta"):
     model_config = ModelConfig(**model_config_kwargs)
     model = Model(model_config)

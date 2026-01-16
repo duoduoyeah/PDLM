@@ -8,12 +8,13 @@
 8. BD3LM loss now only computed for MASKED positions [Done]
 9. Adjusted BD3LM iterations using `bd3lm_effective_ratio` to ensure fair comparison of total effective (masked) supervision tokens [Done].
 10. Refactored attention mask to use bidirectional sliding prefix for target shift [Done].
+11. Implemented BD3LM inference `generate` method (block-wise decoding) and refactored model init in `base_train.py` [Done].
 
 01/14
 1. bd3lm file:
     * config [Done]
-    * the lm_head and wte shape -> all_vocab_size [TODO]
-    * the inference method
+    * the lm_head and wte shape -> all_vocab_size [Done] (wte uses all_vocab, lm_head uses pure_vocab)
+    * the inference method [Done] (implemented block-wise generate)
     * check the attention part, should be similar to pdlm, not sure
 2. pdlm_base_train
     * only pdlm has the pure_to_noisy_map stuff, while ar and bd3lm do not have

@@ -15,7 +15,6 @@ import torch.nn.functional as F
 from nanochat.common import get_dist_info
 from nanochat.muon import Muon, DistMuon
 from nanochat.adamw import DistAdamW
-from nanochat.sp_tokens.token_map import get_token_map
 from nanochat.bd3lm_utils.bd3lm_loss import compute_bd3lm_loss
 
 @dataclass
@@ -153,7 +152,6 @@ class BDLM(nn.Module):
         cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim)
         self.register_buffer("cos", cos, persistent=False) # persistent=False means it's not saved to the checkpoint
         self.register_buffer("sin", sin, persistent=False)
-        self._token_map = None
         self._is_causal = self.config.is_causal
         self.inference_mask = None
         self.bucket_size = config.bucket_size
@@ -310,38 +308,86 @@ class BDLM(nn.Module):
             return logits
 
     @torch.inference_mode()
-    def generate(self, tokens, max_tokens, bucket_size=8): #TODO: the mask_tokens probably need to repair since we now use batch here
+    def generate(self, tokens, max_tokens, bucket_size=None, tokens_per_step=1):
         """
-        Naive autoregressive streaming inference.
-        To make it super simple, let's assume:
-        - batch size is 1
-        - ids and the yielded tokens are simple Python lists and ints
-        """
-        
-        ## tokens could be shape B, seq
-        
-        ## we will add bucket to make sure the new ids will still be a multiple of bucket size
-        ids = F.pad(ids, (0, bucket_size), value=mask_id) # add bucket
-        
-        ## we loop in generation
-        while True:
-            logits = self.forward(ids) # (B, T, pure_vocab_size)
-            logits = logits[:, -bucket_size:, :] # (B, bucket_size, pure_vocab_size) -> this is the current decoding block
+        Block diffusion generation: decode one block at a time, unmasking tokens_per_step tokens per forward pass.
 
-            #TODO: some method here so that we could unmask some positions. currently we just unmask the position that 
-            # has the highest prob and then use the temperature == 0, i.e. use the argmax to find the token we need
-            # one time one token
-            
-            if self._token_map.is_all_pure_tokens(next_ids):
-                if ids.numel() >= max_tokens:
-                    #TODO: delete the last several tokens if ids are longer than the max_tokens i guess?
+        Args:
+            tokens: List of token ids (prompt). Batch size is 1.
+            max_tokens: Maximum total tokens (prompt + generated).
+            bucket_size: Block size for generation. If None, uses config.bucket_size.
+            tokens_per_step: Number of tokens to unmask per step within a block (default=1).
+
+        Returns:
+            Generated token ids as a 1D tensor.
+        """
+        assert isinstance(tokens, list), "tokens must be a list"
+        assert self.config.mask_token_id != -1, "mask_token_id must be set for generate"
+
+        device = self.get_device()
+        mask_id = self.config.mask_token_id
+
+        if bucket_size is None:
+            bucket_size = self.bucket_size
+        assert bucket_size > 0, "bucket_size must be set in config or passed as arg"
+
+        # Convert to tensor and add batch dim
+        ids = torch.tensor([tokens], dtype=torch.long, device=device)  # (1, prompt_len)
+
+        # Pad to next bucket_size boundary with masks
+        # If prompt is exactly at boundary, add a full block
+        prompt_len = ids.size(1)
+        remainder = prompt_len % bucket_size
+        pad_len = bucket_size if remainder == 0 else (bucket_size - remainder)
+        ids = F.pad(ids, (0, pad_len), value=mask_id)
+
+        while True:
+            # Forward pass to get logits
+            logits = self.forward(ids)  # (1, T, pure_vocab_size)
+            block_logits = logits[:, -bucket_size:, :]  # (1, bucket_size, pure_vocab_size)
+
+            # Get current block tokens
+            block_ids = ids[:, -bucket_size:]  # (1, bucket_size)
+
+            # Find masked positions in the block
+            is_masked = (block_ids == mask_id)  # (1, bucket_size)
+            num_masked = is_masked.sum().item()
+
+            # Get max prob for each position (confidence)
+            probs = F.softmax(block_logits.float(), dim=-1)  # (1, bucket_size, vocab)
+            max_probs, best_tokens = probs.max(dim=-1)  # (1, bucket_size)
+
+            # Only consider masked positions for unmasking
+            # Set confidence of non-masked positions to -inf so they won't be selected
+            masked_confidence = max_probs.clone()
+            masked_confidence[~is_masked] = -float('inf')
+
+            # Select top tokens_per_step positions to unmask
+            num_to_unmask = min(tokens_per_step, num_masked)
+            _, top_positions = masked_confidence.topk(num_to_unmask, dim=-1)  # (1, num_to_unmask)
+
+            # Unmask selected positions using argmax tokens
+            new_block = block_ids.clone()
+            for i in range(num_to_unmask):
+                pos = top_positions[0, i].item()
+                new_block[0, pos] = best_tokens[0, pos]
+
+            # Update ids with the new block
+            ids = torch.cat([ids[:, :-bucket_size], new_block], dim=1)
+
+            # Check if block is fully decoded
+            num_masked_after = (ids[:, -bucket_size:] == mask_id).sum().item()
+            if num_masked_after == 0:
+                if ids.size(1) >= max_tokens:
+                    ids = ids[:, :max_tokens]
                     break
                 else:
+                    # Add a new masked block
                     ids = F.pad(ids, (0, bucket_size), value=mask_id)
-        return ids
+
+        return ids[0]  # Return 1D tensor (remove batch dim)
     
-    
-    
+
     @torch.inference_mode()
     def eval_specify_position(self, tokens, bucket_size=4, position=1, mask_other_pos=True, prefix_pure=None):
         """
@@ -377,120 +423,4 @@ class BDLM(nn.Module):
         ## call forward and get the loss
         
 
-    @torch.inference_mode()
-    def generate_with_blocks(self, tokens, max_new_tokens, 
-                             attn_mask=None, 
-                             bucket_size=None, 
-                             topk=5, 
-                             temperature=0, 
-                             seed=42,
-                             transit_topk=10):
-        """
-        max_new_tokens: The number of new tokens to generate (excluding prompt).
-        """
-        assert isinstance(tokens, list) # B == 1
-        assert self.config.mask_token_id != -1, "mask_token_id must be set for generate"
-        device = self.get_device()
-        
-        if bucket_size is None:
-            bucket_size = self.bucket_size
-        assert bucket_size > 0, "bucket_size must be set in config or passed as arg"
-        
-        rng = None
-        if temperature > 0:
-            rng = torch.Generator(device=device)
-            rng.manual_seed(seed)
-            
-        if self._token_map is None or self._token_map.device != device:
-            self._token_map = get_token_map(device=device)
-
-        if not self._is_causal:
-            assert attn_mask is not None, "need attn-mask when the model is non-causal"
-        
-        ids = torch.tensor([tokens], dtype=torch.long, device=device) # add batch dim
-        prompt_ids = ids.clone()
-        prompt_len = ids.size(1)
-        target_len = prompt_len + max_new_tokens
-        
-        mask_id = self.config.mask_token_id
-
-        if self._is_causal:
-            ids = F.pad(ids, (0, bucket_size), value=mask_id) # add bucket
-            current_mask = None
-        else:
-            pad_len = bucket_size - (ids.size(1) % bucket_size)
-            ids = F.pad(ids, (0, pad_len), value=mask_id)
-            T = ids.size(1)
-            current_mask = attn_mask[:T, :T]
-
-        block_debug = []
-        step = 0
-        while True:
-            logits = self.forward(ids, attn_mask=current_mask) # (B, T, pure_vocab_size)
-            logits = logits[:, -bucket_size:, :] # (B, bucket_size, pure_vocab_size)
-            max_topk_logits = logits.size(-1)
-            
-            # Reporting/Sampling (topk)
-            k_report = min(topk, max_topk_logits)
-            if k_report < 1: raise ValueError("topk must be >= 1")
-            _, topk_ids_report = torch.topk(logits, k=k_report, dim=-1) # (B, bucket, k_report)
-            probs = torch.softmax(logits.float(), dim=-1)
-            topk_probs_report = torch.gather(probs, -1, topk_ids_report) # (B, bucket, k_report)
-            
-            noisy_ids = ids[:, -bucket_size:] # (B, bucket)
-            entry = {
-                "step": step,
-                "noisy_ids": noisy_ids.detach().cpu(),
-                "pure_ids": topk_ids_report.detach().cpu(),
-                "pure_probs": topk_probs_report.detach().cpu(),
-            }
-
-            if transit_topk > 0:
-                k_transit = min(transit_topk, max_topk_logits)
-                _, topk_ids_transit = torch.topk(logits, k=k_transit, dim=-1)
-                topk_probs_transit = torch.gather(probs, -1, topk_ids_transit)
-                
-                next_ids = self._token_map.transit_noisy_tokens(
-                    topk_ids_transit, noisy_ids, pure_probs=topk_probs_transit
-                )
-                entry["sampled_ids"] = topk_ids_report[..., 0].detach().cpu()
-            else:
-                if topk > 0:
-                    v, _ = torch.topk(logits, min(topk, logits.size(-1)), dim=-1)
-                    logits[logits < v[:, :, [-1]]] = -float('Inf')
-                if temperature > 0:
-                    logits_temp = logits / temperature
-                    probs_temp = F.softmax(logits_temp, dim=-1)
-                    probs_2d = probs_temp.reshape(-1, probs_temp.size(-1))
-                    pure_ids = torch.multinomial(probs_2d, num_samples=1, generator=rng)
-                    pure_ids = pure_ids.reshape(probs.shape[:-1])
-                else:
-                    pure_ids = topk_ids_report[..., 0] # (B, bucket)
-                
-                entry["sampled_ids"] = pure_ids.detach().cpu()
-                
-                next_ids = self._token_map.transit_noisy_tokens(pure_ids, noisy_ids)
-            
-            next_is_pure = self._token_map.is_all_pure_tokens(next_ids)
-            if next_is_pure:
-                entry["next_ids"] = next_ids.detach().cpu()
-            block_debug.append(entry)
-            ids = torch.cat((ids[:, :-next_ids.size(1)], next_ids), dim=1)
-            
-            # Restore prompt
-            if ids.size(1) >= prompt_ids.size(1):
-                ids[:, :prompt_ids.size(1)] = prompt_ids
-            
-            if next_is_pure:
-                if ids.numel() >= target_len:
-                    # Truncate to exact target length
-                    ids = ids[:, :target_len]
-                    break
-                else:
-                    ids = F.pad(ids, (0, bucket_size), value=mask_id)
-                    if not self._is_causal:
-                        T = ids.size(1)
-                        current_mask = attn_mask[:T, :T]
-            step += 1
-        return ids, block_debug
 
