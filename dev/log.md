@@ -3,6 +3,9 @@
    - Fixed: `dataloader.py` target_shift is now 1-indexed, and `prefix_pure_tokens` correctly overrides it.
    - Verified with `scripts/dump/dump_bd3lm_target_shift.py`.
 2. Dry run of full BD3LM training loop to verify end-to-end stability [TODO]
+3. Cleanup and update evaluation logic in `base_train.py` [TODO]
+   - Remove outdated evaluation code.
+   - Implement new evaluation metrics/logic.
 
 01/15
 2. loss = model(x, y, attn_mask=block_diff_mask) #TODO: different model different branch here i guess [Done]
