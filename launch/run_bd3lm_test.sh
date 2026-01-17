@@ -13,13 +13,17 @@ MODEL_REPO="duoduoyeah/bd3lm_d4"
 DRIVE_BASE="/content/drive/MyDrive/nanochat"
 BASE_TOKENIZER_REPO="/content/drive/MyDrive/nanochat/tokenizer/simplestory_tokenizer/4096/tokenizer_with_mask"
 
-# Secrets should be set by running: %run launch/test_colab_secrets.py
-# Check if they are set
-if [ -z "${HF_TOKEN}" ]; then
-    echo "Warning: HF_TOKEN not set. Run '%run launch/test_colab_secrets.py' first"
+# Load secrets from .env file (created by: %run launch/setup_secrets.py)
+if [ -f "launch/.env" ]; then
+    source launch/.env
+    echo "Loaded secrets from launch/.env"
+else
+    echo "Warning: launch/.env not found. Run '%run launch/setup_secrets.py' first"
 fi
-if [ -z "${WANDB_API_KEY}" ]; then
-    echo "Warning: WANDB_API_KEY not set. Run '%run launch/test_colab_secrets.py' first"
+
+# Wandb login
+if [ -n "${WANDB_API_KEY}" ]; then
+    wandb login --relogin "${WANDB_API_KEY}"
 fi
 
 # Export environment variables

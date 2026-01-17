@@ -7,3 +7,5 @@ report.md
 eval_bundle/
 *.txt
 temp*
+.env
+launch/.env
