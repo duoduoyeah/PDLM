@@ -26,6 +26,11 @@ if [ -n "${WANDB_API_KEY}" ]; then
     wandb login --relogin "${WANDB_API_KEY}"
 fi
 
+# Test mode: add "_test" suffix to model name
+if [ "${TEST_MODE}" = "true" ]; then
+    MODEL_NAME="${MODEL_NAME}_test"
+fi
+
 # Export environment variables
 export MODEL_NAME
 export WANDB_GROUP
@@ -41,10 +46,19 @@ echo "=== Test mode: ${TEST_MODE} ==="
 # Setup (run once per model)
 # ============================================================
 
-# In test mode, remove old model dir if exists (for repeated testing)
-if [ "${TEST_MODE}" = "true" ] && [ -d "${NANOCHAT_BASE_DIR}" ]; then
-    echo "Test mode: Removing old model dir ${NANOCHAT_BASE_DIR}"
-    rm -rf "${NANOCHAT_BASE_DIR}"
+# Handle existing model dir
+if [ -d "${NANOCHAT_BASE_DIR}" ]; then
+    if [ "${TEST_MODE}" = "true" ]; then
+        # Test mode: remove old dir
+        echo "Test mode: Removing old model dir ${NANOCHAT_BASE_DIR}"
+        rm -rf "${NANOCHAT_BASE_DIR}"
+    else
+        # Production mode: backup old dir with timestamp
+        TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+        BACKUP_DIR="${NANOCHAT_BASE_DIR}_backup_${TIMESTAMP}"
+        echo "Production mode: Backing up ${NANOCHAT_BASE_DIR} to ${BACKUP_DIR}"
+        mv "${NANOCHAT_BASE_DIR}" "${BACKUP_DIR}"
+    fi
 fi
 
 # Prepare tokenizer

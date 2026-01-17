@@ -23,7 +23,7 @@ from nanochat.common import get_base_dir
 DATASET_REPO = "duoduoyeah/simple-story-shuffle"
 REPO_PATH = "data"
 BASE_URL = f"https://huggingface.co/datasets/{DATASET_REPO}/resolve/main/{REPO_PATH}"
-MAX_SHARD = 16 # the last datashard is shard_00006.parquet
+MAX_SHARD = 10 # the last datashard is shard_00006.parquet
 index_to_filename = lambda index: f"shard_{index:05d}.parquet" # format of the filenames
 base_dir = get_base_dir()
 DATA_DIR = os.path.join(base_dir, "simple_story_data")

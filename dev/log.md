@@ -7,7 +7,7 @@
 3. Cleanup and update evaluation logic in `base_train.py` [Done]
 4. make sure the colab has the hf token [TODO]
 5. we need to test the bd3lm target shift on on depth 8, ratio 10 and only 1 shard i guess to make sure our loop is okay to run [TODO]
-
+6. do we need to still keep mask ratio around 50% for the target_shift, current it is apparent that more than 505 since we just force one pos to be MASK [TODO]
 01/15
 2. loss = model(x, y, attn_mask=block_diff_mask) #TODO: different model different branch here i guess [Done]
 3. make sure the bd3lm forward okay [Checked]
