@@ -13,10 +13,14 @@ MODEL_REPO="duoduoyeah/bd3lm_d4"
 DRIVE_BASE="/content/drive/MyDrive/nanochat"
 BASE_TOKENIZER_REPO="/content/drive/MyDrive/nanochat/tokenizer/simplestory_tokenizer/4096/tokenizer_with_mask"
 
-# Get secrets from Colab (set these in Colab sidebar -> key icon)
-export HF_TOKEN=$(python -c "from google.colab import userdata; print(userdata.get('HF_TOKEN'))")
-export WANDB_API_KEY=$(python -c "from google.colab import userdata; print(userdata.get('WANDB_API_KEY'))")
-wandb login --relogin "${WANDB_API_KEY}"
+# Secrets should be set by running: %run launch/test_colab_secrets.py
+# Check if they are set
+if [ -z "${HF_TOKEN}" ]; then
+    echo "Warning: HF_TOKEN not set. Run '%run launch/test_colab_secrets.py' first"
+fi
+if [ -z "${WANDB_API_KEY}" ]; then
+    echo "Warning: WANDB_API_KEY not set. Run '%run launch/test_colab_secrets.py' first"
+fi
 
 # Export environment variables
 export MODEL_NAME
