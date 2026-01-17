@@ -1,13 +1,44 @@
 #!/bin/bash
 
-## BD3LM Dry Run Configurations
-## depth=4, block_size=4, target_param_data_ratio=10 for quick testing
+## BD3LM Training Script
+## Test mode: depth=4, block_size=4, data_ratio=10
+## Production mode: depth=4, block_size=4, data_ratio=20 (or user specified)
+##
+## Usage:
+##   bash launch/run_bd3lm.sh --model_name=bd3lm_d4_b4_normal
+##   bash launch/run_bd3lm.sh --model_name=bd3lm_d4_b4_ts1 --test_mode=false --data_ratio=30
 
 # ============================================================
-# Configuration - modify these for each run
+# Default values
 # ============================================================
-MODEL_NAME="${1:-bd3lm_d4_b4_normal}"  # pass as first arg, default to normal
-TEST_MODE="${2:-true}"  # pass as second arg, default to true (removes old model dir)
+BASE_MODEL_NAME="bd3lm_d4_b4_normal"
+TEST_MODE="true"
+DATA_RATIO="10"  # default 10 for test mode
+DEPTH="4"  # model depth
+
+# Parse named arguments
+for arg in "$@"; do
+    case $arg in
+        --model_name=*)
+            BASE_MODEL_NAME="${arg#*=}"
+            ;;
+        --test_mode=*)
+            TEST_MODE="${arg#*=}"
+            ;;
+        --data_ratio=*)
+            DATA_RATIO="${arg#*=}"
+            ;;
+        --depth=*)
+            DEPTH="${arg#*=}"
+            ;;
+        *)
+            echo "Unknown argument: $arg"
+            echo "Usage: bash launch/run_bd3lm.sh --model_name=xxx [--test_mode=true] [--data_ratio=10] [--depth=${DEPTH}]"
+            exit 1
+            ;;
+    esac
+done
+
 WANDB_GROUP="bd3lm_d4"
 MODEL_REPO="duoduoyeah/bd3lm_d4"
 DRIVE_BASE="/content/drive/MyDrive/nanochat"
@@ -26,13 +57,17 @@ if [ -n "${WANDB_API_KEY}" ]; then
     wandb login --relogin "${WANDB_API_KEY}"
 fi
 
-# Test mode: add "_test" suffix to model name
+# Build model name with ratio suffix, and "_test" suffix in test mode
 if [ "${TEST_MODE}" = "true" ]; then
-    MODEL_NAME="${MODEL_NAME}_test"
+    MODEL_NAME="${BASE_MODEL_NAME}_r${DATA_RATIO}_test"
+else
+    MODEL_NAME="${BASE_MODEL_NAME}_r${DATA_RATIO}"
 fi
 
 # Export environment variables
 export MODEL_NAME
+export DATA_RATIO
+export DEPTH
 export WANDB_GROUP
 export MODEL_REPO
 export NANOCHAT_BASE_DIR="${DRIVE_BASE}/${MODEL_NAME}"
@@ -41,6 +76,8 @@ export BASE_TOKENIZER_REPO
 echo "=== Running model: ${MODEL_NAME} ==="
 echo "=== Base dir: ${NANOCHAT_BASE_DIR} ==="
 echo "=== Test mode: ${TEST_MODE} ==="
+echo "=== Data ratio: ${DATA_RATIO} ==="
+echo "=== Depth: ${DEPTH} ==="
 
 # ============================================================
 # Setup (run once per model)
@@ -83,19 +120,19 @@ echo "Dataset download complete."
 # Training - select config based on MODEL_NAME
 # ============================================================
 
-case "${MODEL_NAME}" in
+case "${BASE_MODEL_NAME}" in
     "bd3lm_d4_b4_normal")
         # Run 1: Normal BD3LM (random masking, ~50% tokens masked)
         python -m scripts.base_train \
             --run="${MODEL_NAME}" \
             --wandb_group="${WANDB_GROUP}" \
-            --depth=4 \
+            --depth=${DEPTH} \
             --block_size=4 \
             --prefix_pure_tokens=1 \
             --is_causal=False \
             --max_seq_len=512 \
             --device_batch_size=128 \
-            --target_param_data_ratio=10 \
+            --target_param_data_ratio=${DATA_RATIO} \
             --target_shift=-1 \
             --bd3lm_effective_ratio=0.5
         ;;
@@ -104,13 +141,13 @@ case "${MODEL_NAME}" in
         python -m scripts.base_train \
             --run="${MODEL_NAME}" \
             --wandb_group="${WANDB_GROUP}" \
-            --depth=4 \
+            --depth=${DEPTH} \
             --block_size=4 \
             --prefix_pure_tokens=1 \
             --is_causal=False \
             --max_seq_len=512 \
             --device_batch_size=128 \
-            --target_param_data_ratio=10 \
+            --target_param_data_ratio=${DATA_RATIO} \
             --target_shift=1 \
             --bd3lm_effective_ratio=0.25
         ;;
@@ -119,13 +156,13 @@ case "${MODEL_NAME}" in
         python -m scripts.base_train \
             --run="${MODEL_NAME}" \
             --wandb_group="${WANDB_GROUP}" \
-            --depth=4 \
+            --depth=${DEPTH} \
             --block_size=4 \
             --prefix_pure_tokens=1 \
             --is_causal=False \
             --max_seq_len=512 \
             --device_batch_size=128 \
-            --target_param_data_ratio=10 \
+            --target_param_data_ratio=${DATA_RATIO} \
             --target_shift=2 \
             --bd3lm_effective_ratio=0.25
         ;;
@@ -134,18 +171,18 @@ case "${MODEL_NAME}" in
         python -m scripts.base_train \
             --run="${MODEL_NAME}" \
             --wandb_group="${WANDB_GROUP}" \
-            --depth=4 \
+            --depth=${DEPTH} \
             --block_size=4 \
             --prefix_pure_tokens=1 \
             --is_causal=False \
             --max_seq_len=512 \
             --device_batch_size=128 \
-            --target_param_data_ratio=10 \
+            --target_param_data_ratio=${DATA_RATIO} \
             --target_shift=4 \
             --bd3lm_effective_ratio=0.25
         ;;
     *)
-        echo "Unknown model: ${MODEL_NAME}"
+        echo "Unknown model: ${BASE_MODEL_NAME}"
         echo "Available: bd3lm_d4_b4_normal, bd3lm_d4_b4_ts1, bd3lm_d4_b4_ts2, bd3lm_d4_b4_ts4"
         exit 1
         ;;

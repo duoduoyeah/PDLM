@@ -1,3 +1,6 @@
+01/17
+1. set up new eval, both loss and perp, for later paper [TODO]
+
 01/16
 1. Resolve conflict between target_shift and prefix_pure_tokens [Done]
    - Fixed: `dataloader.py` target_shift is now 1-indexed, and `prefix_pure_tokens` correctly overrides it.
@@ -5,15 +8,16 @@
 2. Dry run of full BD3LM training loop to verify end-to-end stability [In Progress]
 
 3. Cleanup and update evaluation logic in `base_train.py` [Done]
-4. make sure the colab has the hf token [TODO]
+4. make sure the colab has the hf token [Done]
 5. we need to test the bd3lm target shift on on depth 8, ratio 10 and only 1 shard i guess to make sure our loop is okay to run [TODO]
-6. do we need to still keep mask ratio around 50% for the target_shift, current it is apparent that more than 505 since we just force one pos to be MASK [TODO]
+6. we need to still keep mask ratio around 50% for the target_shift, current it is apparent that more than 505 since we just force one pos to be MASK [TODO]
+
 01/15
 2. loss = model(x, y, attn_mask=block_diff_mask) #TODO: different model different branch here i guess [Done]
 3. make sure the bd3lm forward okay [Checked]
 4. make sure the loss chain(target_shift stuff) [Checked] (verified with scripts/dump/dump_bd3lm_loss.py)
 5. bd3lm inference methods (generate, eval_specify_position) need implementation/fixes [TODO]
-6. we will use the same data multiple times because of shift, but this will be in a whole loop way, i mean, after we loop through all shards, then we will shift 1, and use the new mask [TODO]
+6. we will use the same data multiple times because of shift, but this will be in a whole loop way, i mean, after we loop through all shards, then we will shift 1, and use the new mask [Done]
 7. we tend to ignore the prefix_pure_tokens of bd3lm when there is target_shift [Done] (added comment in dataloader.py)
 8. BD3LM loss now only computed for MASKED positions [Done]
 9. Adjusted BD3LM iterations using `bd3lm_effective_ratio` to ensure fair comparison of total effective (masked) supervision tokens [Done].
