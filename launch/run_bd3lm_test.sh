@@ -13,6 +13,11 @@ MODEL_REPO="duoduoyeah/bd3lm_d4"
 DRIVE_BASE="/content/drive/MyDrive/nanochat"
 BASE_TOKENIZER_REPO="/content/drive/MyDrive/nanochat/tokenizer/simplestory_tokenizer/4096/tokenizer_with_mask"
 
+# Get secrets from Colab (set these in Colab sidebar -> key icon)
+export HF_TOKEN=$(python -c "from google.colab import userdata; print(userdata.get('HF_TOKEN'))")
+export WANDB_API_KEY=$(python -c "from google.colab import userdata; print(userdata.get('WANDB_API_KEY'))")
+wandb login --relogin "${WANDB_API_KEY}"
+
 # Export environment variables
 export MODEL_NAME
 export WANDB_GROUP
@@ -137,6 +142,8 @@ echo "=== Training complete for ${MODEL_NAME} ==="
 if [ "${TEST_MODE}" = "true" ]; then
     echo "Test mode: Skipping HuggingFace upload"
 else
+
+
     # Prepare upload folder
     mkdir -p /content/upload_to_huggingface
     cp -r "${NANOCHAT_BASE_DIR}" /content/upload_to_huggingface/
