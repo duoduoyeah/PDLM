@@ -14,6 +14,7 @@ from nanochat.gpt import GPT, GPTConfig
 from nanochat.pdlm import PDLM, PDLMConfig
 from nanochat.bd3lm import BDLM, BDLMConfig
 from nanochat.dataloader import tokenizing_distributed_data_loader, tokenizing_distributed_data_loader_with_state
+from nanochat.bd3lm_eval import eval_bd3lm
 from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, print_banner, get_base_dir, autodetect_device_type
 from nanochat.tokenizer import get_tokenizer, get_token_bytes
 from nanochat.sp_tokens.token_map import get_token_map
@@ -61,7 +62,9 @@ warmdown_ratio = 0.2 # ratio of iterations for LR warmdown
 final_lr_frac = 0.0 # final LR is this fraction of the initial LR
 resume_from_step = -1 # resume training from this step of the optimization (-1 = disable)
 # Evaluation
-eval_every = -1 # TODO: new eval logic placeholder (-1 = disable)
+eval_every = -1 # evaluate every N steps (-1 = disable)
+eval_num_batches = 20 # number of batches for intermediate evaluation (quick)
+eval_num_batches_final = 100 # number of batches for final evaluation (thorough)
 sample_every = 2000 # every how many steps to sample from the model
 save_every = -1 # every how many steps to save model checkpoints (-1 = disable, and save only at the end of the run)
 # Output
@@ -278,6 +281,33 @@ train_loader = tokenizing_distributed_data_loader_with_state(
     bd3lm_mask_token_id=mask_token_id,
 )
 x, y, loss_extras, dataloader_state_dict = next(train_loader) # kick off load of the very first batch of data
+
+# Initialize validation dataloader and eval-specific resources (model-type specific)
+val_loader = None
+eval_attn_mask = None
+if eval_every > 0:
+    if model_type == "bd3lm":
+        val_loader = tokenizing_distributed_data_loader_with_state(
+            device_batch_size,
+            max_seq_len,
+            split="val",
+            device=device,
+            resume_state_dict=None,  # always start fresh for validation
+            noise_total_steps=noise_total_steps,
+            prefix_pure_tokens=max(prefix_pure_tokens, 0),
+            model_type=model_type,
+            target_shift=target_shift,
+            bd3lm_block_size=block_size,
+            bd3lm_mask_token_id=mask_token_id,
+        )
+        # Eval uses prefix_sliding_tokens=0 (no sliding prefix for eval)
+        eval_attn_mask = gen_mask(max_seq_len, block_size, attn_backend="sdpa", is_causal=is_causal, prefix_sliding_tokens=0).to(device=device)
+        print0(f"Initialized validation dataloader and eval attention mask for BD3LM evaluation")
+    elif model_type == "pdlm":
+        pass  # TODO: PDLM validation setup
+    elif model_type == "next_token_ar":
+        pass  # TODO: AR validation setup
+
 debug_dump_path = None
 if debug:
     debug_dir = os.path.join(os.getcwd(), "temp")
@@ -326,30 +356,48 @@ while True:
     last_step = step == num_iterations # loop runs num_iterations+1 times so that we can eval/save at the end
     flops_so_far = num_flops_per_token * total_batch_size * step
 
-    # TODO: new evaluation logic placeholder
-    # if eval_every > 0 and (last_step or step % eval_every == 0):
-    #     pass
-
-    # once in a while: sample from the model (only on master process)
-    # use the original uncompiled model because the inputs keep changing shape
-    if False and master_process and (last_step or (step > 0 and step % sample_every == 0)):
-        model.eval()
-        prompts = [
-            "The capital of France is",
-            "The chemical symbol of gold is",
-            "If yesterday was Friday, then tomorrow will be",
-            "The opposite of hot is",
-            "The planets of the solar system are:",
-            "My favorite color is",
-            "If 5*x + 3 = 13, then x is",
-        ]
-        engine = Engine(orig_model, tokenizer) # use orig_model to avoid recompilation
-        for prompt in prompts:
-            tokens = tokenizer(prompt, prepend="<|bos|>")
-            with autocast_ctx:
-                sample, _ = engine.generate_batch(tokens, num_samples=1, max_tokens=16, temperature=0)
-            print0(tokenizer.decode(sample[0]))
-        model.train()
+    # Evaluation (model-type specific)
+    if eval_every > 0 and (last_step or (step > 0 and step % eval_every == 0)):
+        # Use more batches for final evaluation
+        current_eval_batches = eval_num_batches_final if last_step else eval_num_batches
+        if model_type == "bd3lm":
+            print0(f"Running BD3LM evaluation at step {step} ({current_eval_batches} batches)...")
+            eval_result = eval_bd3lm(
+                model=orig_model,  # use uncompiled model
+                val_loader=val_loader,
+                block_size=block_size,
+                target_shift=target_shift,
+                num_batches=current_eval_batches,
+                attn_mask=eval_attn_mask,
+                device=device,
+                autocast_ctx=autocast_ctx,
+                mask_token_id=mask_token_id,
+            )
+            # Log eval results
+            if target_shift >= 1:
+                print0(f"  [target_shift={target_shift}] loss: {eval_result['loss']:.4f}, ppl: {eval_result['ppl']:.2f}")
+                wandb_run.log({
+                    "step": step,
+                    "eval/loss": eval_result["loss"],
+                    "eval/ppl": eval_result["ppl"],
+                })
+            else:
+                print0(f"  [normal mode] overall_loss: {eval_result['overall_loss']:.4f}, overall_ppl: {eval_result['overall_ppl']:.2f}")
+                for pos in range(block_size):
+                    print0(f"    pos {pos}: loss={eval_result['per_pos_loss'][pos]:.4f}, ppl={eval_result['per_pos_ppl'][pos]:.2f}")
+                log_data = {
+                    "step": step,
+                    "eval/overall_loss": eval_result["overall_loss"],
+                    "eval/overall_ppl": eval_result["overall_ppl"],
+                }
+                for pos in range(block_size):
+                    log_data[f"eval/pos_{pos}_loss"] = eval_result["per_pos_loss"][pos]
+                    log_data[f"eval/pos_{pos}_ppl"] = eval_result["per_pos_ppl"][pos]
+                wandb_run.log(log_data)
+        elif model_type == "pdlm":
+            pass  # TODO: PDLM evaluation
+        elif model_type == "next_token_ar":
+            pass  # TODO: AR evaluation
 
     # save checkpoint: at the end of the run, or every save_every steps, except at the first step or the resume step
     if last_step or (step > 0 and step != resume_from_step and save_every > 0 and step % save_every == 0):

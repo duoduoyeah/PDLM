@@ -388,39 +388,44 @@ class BDLM(nn.Module):
         return ids[0]  # Return 1D tensor (remove batch dim)
     
 
-    @torch.inference_mode()
-    def eval_specify_position(self, tokens, bucket_size=4, position=1, mask_other_pos=True, prefix_pure=None):
+    def forward_for_eval(self, idx, targets, attn_mask):
         """
-        generate the token for a give position of each block.
-        the difference of this method compared to the train one, is that this no need to do backgrad,
-        so it is under inference mode
-        
-        Example is like, if the tokens input is shape 2,1024, and bucket size == 4,
-        then the first bucket is pure and no need to change, but for every those suffix
-        bucket, we will generate the token at `position' of that bucket.
-        And then we will compute the loss.
-        
-        
-        mask_other_pos: when True, other positions in the same block will be masked.
-        tokens: shape B, seq
+        Forward pass for evaluation that returns logits instead of loss.
+
+        Args:
+            idx: (B, L) input tokens (should be all MASK for eval)
+            targets: (B, L) clean target tokens
+            attn_mask: attention mask for block diffusion
+
+        Returns:
+            logits: (B, L, vocab_size) logits for the xt (input) positions
         """
-        
-        assert self.config.mask_token_id != -1, "mask_token_id must be set for generate"
-        device = self.get_device()
+        B, T = idx.size()
+        assert targets.size(1) == T, "Targets should match input length"
 
-        if prefix_pure is None:
-            prefix_pure = bucket_size # give one whole bucket as prefix pure
+        # Concatenate [xt | x0] = [idx | targets]
+        idx = torch.cat((idx, targets), dim=1)  # (B, 2L)
 
-        ids = tokens #TODO: make sure ids is on device, also im not sure if copy() should be used here
-        mask_id = self.config.mask_token_id
+        # Get rotary embeddings for 2L sequence
+        cos = self.cos[:, :T]
+        sin = self.sin[:, :T]
+        cos_sin = (torch.cat((cos, cos), dim=1), torch.cat((sin, sin), dim=1))
 
-        ## mask the ids, i mean for its like mask all tokens that are not the prefix pure part
-        
-        ## design a 2L inputs
-        
-        ## init the targets
-        
-        ## call forward and get the loss
+        # Forward through transformer
+        x = self.transformer.wte(idx)
+        x = norm(x)
+        for block in self.transformer.h:
+            x = block(x, cos_sin, kv_cache=None, attn_mask=attn_mask)
+        x = norm(x)
+
+        # Compute logits
+        softcap = 15
+        logits = self.lm_head(x)
+        logits = logits.float()
+        logits = softcap * torch.tanh(logits / softcap)
+
+        # Return logits for xt part (first L positions)
+        return logits[:, :T, :]
         
 
 

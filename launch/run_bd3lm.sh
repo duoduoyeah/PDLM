@@ -111,9 +111,9 @@ python -c "from nanochat.common import get_base_dir; print('Base dir:', get_base
 # Prepare report
 python -m nanochat.report reset
 
-# Download dataset
+# Download dataset (train and validation shards)
 echo "Downloading dataset..."
-python -m nanochat.dataset -n 10
+python -m nanochat.dataset -n 10 --split both
 echo "Dataset download complete."
 
 # ============================================================
@@ -134,7 +134,10 @@ case "${BASE_MODEL_NAME}" in
             --device_batch_size=128 \
             --target_param_data_ratio=${DATA_RATIO} \
             --target_shift=-1 \
-            --bd3lm_effective_ratio=0.5
+            --bd3lm_effective_ratio=0.5 \
+            --eval_every=1000 \
+            --eval_num_batches=20 \
+            --eval_num_batches_final=100
         ;;
     "bd3lm_d4_b4_ts1")
         # Run 2: BD3LM with target_shift=1 (predict 1st position in each block)
@@ -149,7 +152,10 @@ case "${BASE_MODEL_NAME}" in
             --device_batch_size=128 \
             --target_param_data_ratio=${DATA_RATIO} \
             --target_shift=1 \
-            --bd3lm_effective_ratio=0.25
+            --bd3lm_effective_ratio=0.25 \
+            --eval_every=1000 \
+            --eval_num_batches=20 \
+            --eval_num_batches_final=100
         ;;
     "bd3lm_d4_b4_ts2")
         # Run 3: BD3LM with target_shift=2 (predict 2nd position in each block)
@@ -164,7 +170,10 @@ case "${BASE_MODEL_NAME}" in
             --device_batch_size=128 \
             --target_param_data_ratio=${DATA_RATIO} \
             --target_shift=2 \
-            --bd3lm_effective_ratio=0.25
+            --bd3lm_effective_ratio=0.25 \
+            --eval_every=1000 \
+            --eval_num_batches=20 \
+            --eval_num_batches_final=100
         ;;
     "bd3lm_d4_b4_ts4")
         # Run 4: BD3LM with target_shift=4 (predict 4th/last position in each block)
@@ -179,7 +188,10 @@ case "${BASE_MODEL_NAME}" in
             --device_batch_size=128 \
             --target_param_data_ratio=${DATA_RATIO} \
             --target_shift=4 \
-            --bd3lm_effective_ratio=0.25
+            --bd3lm_effective_ratio=0.25 \
+            --eval_every=1000 \
+            --eval_num_batches=20 \
+            --eval_num_batches_final=100
         ;;
     *)
         echo "Unknown model: ${BASE_MODEL_NAME}"
