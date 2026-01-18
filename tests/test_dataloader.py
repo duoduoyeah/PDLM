@@ -47,18 +47,21 @@ class TestListParquetFiles:
         assert default_files == train_files
 
 
+def _tokenizer_available():
+    """Check if tokenizer is available."""
+    try:
+        from nanochat.tokenizer import get_tokenizer
+        get_tokenizer()
+        return True
+    except (FileNotFoundError, ImportError):
+        return False
+
+
 class TestDataloaderSplits:
     """Test that dataloader uses correct files for each split."""
 
-    @pytest.fixture
-    def skip_if_no_data(self):
-        """Skip tests if no data files are available."""
-        train_files = list_parquet_files(split="train")
-        val_files = list_parquet_files(split="val")
-        if len(train_files) == 0 and len(val_files) == 0:
-            pytest.skip("No parquet files available for testing")
-
-    def test_train_loader_yields_batches(self, skip_if_no_data):
+    @pytest.mark.skipif(not _tokenizer_available(), reason="Tokenizer not available")
+    def test_train_loader_yields_batches(self):
         """Train dataloader should yield batches from shard_* files."""
         train_files = list_parquet_files(split="train")
         if len(train_files) == 0:
@@ -79,7 +82,8 @@ class TestDataloaderSplits:
         assert inputs.shape == (2, 64), f"Expected shape (2, 64), got {inputs.shape}"
         assert targets.shape == (2, 64), f"Expected shape (2, 64), got {targets.shape}"
 
-    def test_val_loader_yields_batches(self, skip_if_no_data):
+    @pytest.mark.skipif(not _tokenizer_available(), reason="Tokenizer not available")
+    def test_val_loader_yields_batches(self):
         """Val dataloader should yield batches from validation_* files."""
         val_files = list_parquet_files(split="val")
         if len(val_files) == 0:
