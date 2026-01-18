@@ -1,9 +1,13 @@
-
 01/18
 1. 
 
 01/17
-1. set up new eval, both loss and perp, for later paper [TODO]
+1. Implement training-time evaluation logic [TODO]
+   - **Data**: Update `dataset.py` and `dataloader` to support validation shards.
+   - **Method**: Implement `bd3lm.eval_specify_position`.
+     - Normal mode: Evaluate loss across all block positions, , the report should be like pos 1 is xx loss, pos 2 is xx loss, and finally an overall loss
+     - Target_shift mode: Evaluate loss only at the target position.
+   - **Integration**: Hook into `base_train.py` (BD3LM active, AR/PDLM placeholders).
 2. Fixed BD3LM masking: now guarantees at least 1 mask per block, t sampled from [1/block_size, 1], adjusted p' for remaining positions; normal and target_shift use same logic [Done]
 
 01/16
