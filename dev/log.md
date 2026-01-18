@@ -1,5 +1,10 @@
+
+01/18
+1. 
+
 01/17
 1. set up new eval, both loss and perp, for later paper [TODO]
+2. Fixed BD3LM masking: now guarantees at least 1 mask per block, t sampled from [1/block_size, 1], adjusted p' for remaining positions; normal and target_shift use same logic [Done]
 
 01/16
 1. Resolve conflict between target_shift and prefix_pure_tokens [Done]
@@ -10,7 +15,8 @@
 3. Cleanup and update evaluation logic in `base_train.py` [Done]
 4. make sure the colab has the hf token [Done]
 5. we need to test the bd3lm target shift on on depth 8, ratio 10 and only 1 shard i guess to make sure our loop is okay to run [TODO]
-6. we need to still keep mask ratio around 50% for the target_shift, current it is apparent that more than 505 since we just force one pos to be MASK [TODO]
+6. we need to still keep mask ratio around 50% for the target_shift, current it is apparent that more than 505 since we just force one pos to be MASK [Done]
+7. answer the question that why bd3lm target_shift has larger loss? could be eval method difference [TODO]
 
 01/15
 2. loss = model(x, y, attn_mask=block_diff_mask) #TODO: different model different branch here i guess [Done]

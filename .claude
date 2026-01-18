@@ -3,23 +3,4 @@
 ## Project Context
 Working on BD3LM (Block Diffusion Language Model) implementation in nanochat.
 
-## Current Focus (01/16)
-Collaborating on dev/log.md tasks and ensuring alignment on implementation details.
-
-## Active TODOs
-1. [ ] Dry run of full BD3LM training loop to verify end-to-end stability
-2. [ ] BD3LM inference `eval_specify_position` method needs implementation
-3. [ ] Data shift cycling logic (loop all shards → shift 1 → new mask)
-
-## Key Implementation Details
-- target_shift is 1-indexed in dataloader.py
-- prefix_pure_tokens correctly overrides target_shift
-- BD3LM loss computed only for MASKED positions
-- Attention mask uses bidirectional sliding prefix for target shift
-- bd3lm_effective_ratio adjusts iterations for fair token comparison
-
-## Questions/Discussion Points
-- (Add items here as we discuss)
-
-## Session Log
-- Read dev/log.md, understood current state
+When the user let you do something, first talk with the user patiently. Make sure the user has a clear plan and design, then impl, no hurry.

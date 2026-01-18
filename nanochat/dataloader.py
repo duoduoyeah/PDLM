@@ -165,16 +165,24 @@ def tokenizing_distributed_data_loader_with_state(
             targets_cpu = targets_cpu.view(B, T)
 
             # Sample noise level t per block: shape (B, num_blocks)
+            # t is sampled from [1/block_size, 1] to ensure at least 1 mask per block
             t = sample_t(
                 batch_size=B,
                 num_blocks=num_blocks,
-                sampling_eps_min=1e-3,
+                block_size=bd3lm_block_size,
                 sampling_eps_max=1.0,
                 device="cpu",
                 antithetic_sampling=True,
             )
 
+            # Determine forced mask position:
+            # - target_shift >= 1: force position (target_shift-1) in each block (0-indexed)
+            # - target_shift < 0: random position per block (normal BD3LM)
+            forced_mask_position = (target_shift - 1) if target_shift >= 1 else None
+
             # Apply masking: q_xt converts clean tokens to noisy (masked) tokens
+            # - First, one position per block is forced to be masked
+            # - Then, remaining positions are masked with adjusted probability p'
             # inputs_cpu shape: (B, T), mask shape: (B, T)
             inputs_cpu, mask = q_xt(
                 x0=targets_cpu,
@@ -182,23 +190,8 @@ def tokenizing_distributed_data_loader_with_state(
                 mask_token_id=bd3lm_mask_token_id,
                 block_size=bd3lm_block_size,
                 prefix_pure_tokens=prefix_pure_tokens,
+                forced_mask_position=forced_mask_position,
             )
-
-            # Handle target_shift mode: always mask position (target_shift-1) within each block
-            # target_shift is 1-indexed: 1 = first position, block_size = last position
-            # prefix_pure_tokens is stronger: positions in prefix range stay unmasked
-            if target_shift >= 1:
-                # Vectorized: create indices for position (target_shift-1) in all blocks
-                # e.g., if block_size=4, target_shift=1: positions = [0, 4, 8, 12, ...] (first of each block)
-                # e.g., if block_size=4, target_shift=4: positions = [3, 7, 11, 15, ...] (last of each block)
-                positions_to_mask = torch.arange(target_shift - 1, T, bd3lm_block_size)
-                inputs_cpu[:, positions_to_mask] = bd3lm_mask_token_id
-                mask[:, positions_to_mask] = True
-
-                # prefix_pure_tokens overrides target_shift: restore prefix positions to unmasked
-                if prefix_pure_tokens > 0:
-                    inputs_cpu[:, :prefix_pure_tokens] = targets_cpu[:, :prefix_pure_tokens]
-                    mask[:, :prefix_pure_tokens] = False
 
             # Compute loss_scale from t: shape (B, num_blocks) -> (B, T)
             loss_scale_per_block = get_loss_scale(t)  # (B, num_blocks)
