@@ -4,8 +4,7 @@
 01/17
 1. Update `dataset.py` and `dataloader` to support validation shards. [Done]
 2. Implement `bd3lm.eval_specify_position` logic (implemented via `bd3lm_eval.py`). [Done]
-   - Normal mode: Evaluates loss across all block positions; reports per-position loss and overall.
-   - Target_shift mode: Evaluates loss only at the target position.
+
 3. Hook evaluation logic into `base_train.py` (BD3LM active). [Done]
 4. Fixed BD3LM masking: now guarantees at least 1 mask per block, t sampled from [1/block_size, 1], adjusted p' for remaining positions; normal and target_shift use same logic [Done]
 

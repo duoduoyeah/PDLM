@@ -19,7 +19,6 @@ from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, p
 from nanochat.tokenizer import get_tokenizer, get_token_bytes
 from nanochat.sp_tokens.token_map import get_token_map
 from nanochat.checkpoint_manager import save_checkpoint, load_checkpoint
-from nanochat.engine import Engine
 from nanochat.attn_masks import gen_mask
 print_banner()
 
@@ -65,7 +64,6 @@ resume_from_step = -1 # resume training from this step of the optimization (-1 =
 eval_every = -1 # evaluate every N steps (-1 = disable)
 eval_num_batches = 20 # number of batches for intermediate evaluation (quick)
 eval_num_batches_final = 100 # number of batches for final evaluation (thorough)
-sample_every = 2000 # every how many steps to sample from the model
 save_every = -1 # every how many steps to save model checkpoints (-1 = disable, and save only at the end of the run)
 # Output
 model_tag = "" # optionally override the model tag for the output checkpoint directory name
