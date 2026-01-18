@@ -1,5 +1,6 @@
 01/18
 1. Verified train/val split separation with new test script `tests/test_dataloader.py`. [Done]
+2. Auto-compute `bd3lm_effective_ratio` from `target_shift` and `block_size`; added `rl_tok/sec` (real loss tokens/sec) metric to logging. [Done]
 
 01/17
 1. Update `dataset.py` and `dataloader` to support validation shards. [Done]

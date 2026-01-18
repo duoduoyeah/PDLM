@@ -129,7 +129,7 @@ echo "Dataset download complete."
 
 case "${VARIANT}" in
     "normal")
-        # Normal BD3LM (random masking, ~50% tokens masked)
+        # Normal BD3LM (random masking, ~62.5% tokens masked for block_size=4)
         python -m scripts.base_train \
             --run="${MODEL_NAME}" \
             --wandb_group="${WANDB_GROUP}" \
@@ -141,7 +141,6 @@ case "${VARIANT}" in
             --device_batch_size=128 \
             --target_param_data_ratio=${DATA_RATIO} \
             --target_shift=-1 \
-            --bd3lm_effective_ratio=0.5 \
             --eval_every=1000 \
             --eval_num_batches=20 \
             --eval_num_batches_final=100
@@ -159,7 +158,6 @@ case "${VARIANT}" in
             --device_batch_size=128 \
             --target_param_data_ratio=${DATA_RATIO} \
             --target_shift=1 \
-            --bd3lm_effective_ratio=0.25 \
             --eval_every=1000 \
             --eval_num_batches=20 \
             --eval_num_batches_final=100
@@ -177,7 +175,6 @@ case "${VARIANT}" in
             --device_batch_size=128 \
             --target_param_data_ratio=${DATA_RATIO} \
             --target_shift=2 \
-            --bd3lm_effective_ratio=0.25 \
             --eval_every=1000 \
             --eval_num_batches=20 \
             --eval_num_batches_final=100
@@ -195,7 +192,6 @@ case "${VARIANT}" in
             --device_batch_size=128 \
             --target_param_data_ratio=${DATA_RATIO} \
             --target_shift=4 \
-            --bd3lm_effective_ratio=0.25 \
             --eval_every=1000 \
             --eval_num_batches=20 \
             --eval_num_batches_final=100

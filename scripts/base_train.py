@@ -40,8 +40,7 @@ prefix_pure_tokens = 1 # pure prefix tokens (0 = disabled)
 is_causal = True # the model' attn direction
 
 noise_total_steps = 16 # Noisy for pdlm
-bd3lm_effective_ratio = 0.5 # For bd3lm: ratio of tokens that contribute to loss (avg mask rate)
-                            # ~0.5 for normal bd3lm (LogLinear), ~1/block_size for target_shift mode
+bd3lm_effective_ratio = None # For bd3lm: auto-computed if None, or override with explicit value
 # Debug
 debug = False
 # Training horizon. Only one of these 3 will be used, in this order of precedence.
@@ -241,10 +240,21 @@ else:
 
 # For BD3LM: adjust iterations to account for lower effective token ratio
 # BD3LM only computes loss on masked positions, so we need more iterations to see same effective tokens
-if model_type == "bd3lm" and bd3lm_effective_ratio < 1.0:
-    original_iterations = num_iterations
-    num_iterations = int(num_iterations / bd3lm_effective_ratio)
-    print0(f"BD3LM effective_ratio={bd3lm_effective_ratio:.2f} => adjusted iterations: {original_iterations:,} -> {num_iterations:,}")
+if model_type == "bd3lm":
+    # Auto-compute bd3lm_effective_ratio if not specified
+    if bd3lm_effective_ratio is None:
+        if target_shift >= 1:
+            # Target_shift mode: exactly 1 position per block is masked
+            bd3lm_effective_ratio = 1.0 / block_size
+        else:
+            # Normal mode: t ~ Uniform[1/block_size, 1], E[t] = (1/block_size + 1) / 2
+            bd3lm_effective_ratio = (1.0 / block_size + 1.0) / 2.0
+        print0(f"BD3LM auto-computed effective_ratio={bd3lm_effective_ratio:.4f} (target_shift={target_shift}, block_size={block_size})")
+
+    if bd3lm_effective_ratio < 1.0:
+        original_iterations = num_iterations
+        num_iterations = int(num_iterations / bd3lm_effective_ratio)
+        print0(f"BD3LM effective_ratio={bd3lm_effective_ratio:.4f} => adjusted iterations: {original_iterations:,} -> {num_iterations:,}")
 total_tokens = total_batch_size * num_iterations
 print0(f"Total number of training tokens: {total_tokens:,}")
 print0(f"Tokens : Params ratio: {total_batch_size * num_iterations / num_params:.2f}") # Chinchilla is ~20
@@ -429,6 +439,7 @@ while True:
     # evaluate the gradient
     synchronize()
     t0 = time.time()
+    step_effective_tokens = 0  # effective tokens this step (for rl_tok/sec)
     for micro_step in range(grad_accum_steps):
         if debug:
             x_cpu = x.detach().cpu()
@@ -446,7 +457,9 @@ while True:
                 block_diff_mask = block_diff_masks[epoch % len(block_diff_masks)]
                 loss = model(x, y, attn_mask=block_diff_mask, loss_extras=loss_extras)
                 # Count effective tokens (masked positions that contribute to loss)
-                total_effective_tokens += loss_extras["mask"].sum().item() * ddp_world_size
+                batch_effective_tokens = loss_extras["mask"].sum().item() * ddp_world_size
+                step_effective_tokens += batch_effective_tokens
+                total_effective_tokens += batch_effective_tokens
             elif model_type == "pdlm":
                 loss = model(x, y, attn_mask=block_diff_masks[0])
                 total_effective_tokens += x.numel() * ddp_world_size
@@ -485,13 +498,15 @@ while True:
     debiased_smooth_loss = smooth_train_loss / (1 - ema_beta**(step + 1)) # debias the EMA
     pct_done = 100 * step / num_iterations
     tok_per_sec = int(total_batch_size / dt)
+    rl_tok_per_sec = int(step_effective_tokens / dt) if model_type == "bd3lm" else None
     flops_per_sec = num_flops_per_token * total_batch_size / dt
     promised_flops_per_sec_h100 = 989e12 * ddp_world_size # bfloat16 H100 SXM and without 2:4 sparsity
     mfu = 100 * flops_per_sec / promised_flops_per_sec_h100 # in %
     if step > 10:
         total_training_time += dt # only count the time after the first 10 steps
     print_grad_norm = f" grad norm: {grad_norm:.4f} |" if grad_clip_enabled else ""
-    print0(f"step {step:05d}/{num_iterations:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f} |{print_grad_norm} lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.2f} | total time: {total_training_time/60:.2f}m")
+    print_rl_tok = f" rl_tok/sec: {rl_tok_per_sec:,} |" if rl_tok_per_sec is not None else ""
+    print0(f"step {step:05d}/{num_iterations:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f} |{print_grad_norm} lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} |{print_rl_tok} mfu: {mfu:.2f} | total time: {total_training_time/60:.2f}m")
     if step % 100 == 0:
         log_data = {
             "step": step,
@@ -506,6 +521,8 @@ while True:
         }
         if grad_clip_enabled:
             log_data["train/grad_norm"] = grad_norm
+        if rl_tok_per_sec is not None:
+            log_data["train/rl_tok_per_sec"] = rl_tok_per_sec
         wandb_run.log(log_data)
 
     # state update
