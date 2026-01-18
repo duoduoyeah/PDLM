@@ -2,13 +2,17 @@
 1. 
 
 01/17
-1. Implement training-time evaluation logic [TODO]
-   - **Data**: Update `dataset.py` and `dataloader` to support validation shards.
-   - **Method**: Implement `bd3lm.eval_specify_position`.
-     - Normal mode: Evaluate loss across all block positions, , the report should be like pos 1 is xx loss, pos 2 is xx loss, and finally an overall loss
-     - Target_shift mode: Evaluate loss only at the target position.
-   - **Integration**: Hook into `base_train.py` (BD3LM active, AR/PDLM placeholders).
-2. Fixed BD3LM masking: now guarantees at least 1 mask per block, t sampled from [1/block_size, 1], adjusted p' for remaining positions; normal and target_shift use same logic [Done]
+
+1. - **Data**: Update `dataset.py` and `dataloader` to support validation shards.
+
+2. - **Method**: Implement `bd3lm.eval_specify_position`.
+
+3. eval logic for bd3lm:
+    - Hook into `base_train.py` (BD3LM active, AR/PDLM placeholders).
+    - Normal mode: Evaluate loss across all block positions, , the report should be like pos 1 is xx loss, pos 2 is xx loss, and finally an overall loss.
+    - Target_shift mode: Evaluate loss only at the target position.
+
+4. Fixed BD3LM masking: now guarantees at least 1 mask per block, t sampled from [1/block_size, 1], adjusted p' for remaining positions; normal and target_shift use same logic [Done]
 
 01/16
 1. Resolve conflict between target_shift and prefix_pure_tokens [Done]
