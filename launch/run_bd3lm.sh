@@ -1,26 +1,27 @@
 #!/bin/bash
 
 ## BD3LM Training Script
-## Test mode: depth=4, block_size=4, data_ratio=10
-## Production mode: depth=4, block_size=4, data_ratio=20 (or user specified)
+## Test mode: data_ratio=10
+## Production mode: data_ratio=20 (or user specified)
 ##
 ## Usage:
-##   bash launch/run_bd3lm.sh --model_name=bd3lm_d4_b4_normal
-##   bash launch/run_bd3lm.sh --model_name=bd3lm_d4_b4_ts1 --test_mode=false --data_ratio=30
+##   bash launch/run_bd3lm.sh --variant=normal
+##   bash launch/run_bd3lm.sh --variant=ts1 --depth=8 --test_mode=false --data_ratio=30
 
 # ============================================================
 # Default values
 # ============================================================
-BASE_MODEL_NAME="bd3lm_d4_b4_normal"
+VARIANT="normal"  # normal, ts1, ts2, ts4
 TEST_MODE="true"
 DATA_RATIO="10"  # default 10 for test mode
 DEPTH="4"  # model depth
+BLOCK_SIZE="4"  # block size
 
 # Parse named arguments
 for arg in "$@"; do
     case $arg in
-        --model_name=*)
-            BASE_MODEL_NAME="${arg#*=}"
+        --variant=*)
+            VARIANT="${arg#*=}"
             ;;
         --test_mode=*)
             TEST_MODE="${arg#*=}"
@@ -31,16 +32,22 @@ for arg in "$@"; do
         --depth=*)
             DEPTH="${arg#*=}"
             ;;
+        --block_size=*)
+            BLOCK_SIZE="${arg#*=}"
+            ;;
         *)
             echo "Unknown argument: $arg"
-            echo "Usage: bash launch/run_bd3lm.sh --model_name=xxx [--test_mode=true] [--data_ratio=10] [--depth=${DEPTH}]"
+            echo "Usage: bash launch/run_bd3lm.sh --variant=normal [--depth=4] [--block_size=4] [--test_mode=true] [--data_ratio=10]"
             exit 1
             ;;
     esac
 done
 
-WANDB_GROUP="bd3lm_d4"
-MODEL_REPO="duoduoyeah/bd3lm_d4"
+# Build base model name from depth, block_size, and variant
+BASE_MODEL_NAME="bd3lm_d${DEPTH}_b${BLOCK_SIZE}_${VARIANT}"
+
+WANDB_GROUP="bd3lm_d${DEPTH}"
+MODEL_REPO="duoduoyeah/bd3lm_d${DEPTH}"
 DRIVE_BASE="/content/drive/MyDrive/nanochat"
 BASE_TOKENIZER_REPO="/content/drive/MyDrive/nanochat/tokenizer/simplestory_tokenizer/4096/tokenizer_with_mask"
 
@@ -120,14 +127,14 @@ echo "Dataset download complete."
 # Training - select config based on MODEL_NAME
 # ============================================================
 
-case "${BASE_MODEL_NAME}" in
-    "bd3lm_d4_b4_normal")
-        # Run 1: Normal BD3LM (random masking, ~50% tokens masked)
+case "${VARIANT}" in
+    "normal")
+        # Normal BD3LM (random masking, ~50% tokens masked)
         python -m scripts.base_train \
             --run="${MODEL_NAME}" \
             --wandb_group="${WANDB_GROUP}" \
             --depth=${DEPTH} \
-            --block_size=4 \
+            --block_size=${BLOCK_SIZE} \
             --prefix_pure_tokens=1 \
             --is_causal=False \
             --max_seq_len=512 \
@@ -139,13 +146,13 @@ case "${BASE_MODEL_NAME}" in
             --eval_num_batches=20 \
             --eval_num_batches_final=100
         ;;
-    "bd3lm_d4_b4_ts1")
-        # Run 2: BD3LM with target_shift=1 (predict 1st position in each block)
+    "ts1")
+        # BD3LM with target_shift=1 (predict 1st position in each block)
         python -m scripts.base_train \
             --run="${MODEL_NAME}" \
             --wandb_group="${WANDB_GROUP}" \
             --depth=${DEPTH} \
-            --block_size=4 \
+            --block_size=${BLOCK_SIZE} \
             --prefix_pure_tokens=1 \
             --is_causal=False \
             --max_seq_len=512 \
@@ -157,13 +164,13 @@ case "${BASE_MODEL_NAME}" in
             --eval_num_batches=20 \
             --eval_num_batches_final=100
         ;;
-    "bd3lm_d4_b4_ts2")
-        # Run 3: BD3LM with target_shift=2 (predict 2nd position in each block)
+    "ts2")
+        # BD3LM with target_shift=2 (predict 2nd position in each block)
         python -m scripts.base_train \
             --run="${MODEL_NAME}" \
             --wandb_group="${WANDB_GROUP}" \
             --depth=${DEPTH} \
-            --block_size=4 \
+            --block_size=${BLOCK_SIZE} \
             --prefix_pure_tokens=1 \
             --is_causal=False \
             --max_seq_len=512 \
@@ -175,13 +182,13 @@ case "${BASE_MODEL_NAME}" in
             --eval_num_batches=20 \
             --eval_num_batches_final=100
         ;;
-    "bd3lm_d4_b4_ts4")
-        # Run 4: BD3LM with target_shift=4 (predict 4th/last position in each block)
+    "ts4")
+        # BD3LM with target_shift=4 (predict 4th/last position in each block)
         python -m scripts.base_train \
             --run="${MODEL_NAME}" \
             --wandb_group="${WANDB_GROUP}" \
             --depth=${DEPTH} \
-            --block_size=4 \
+            --block_size=${BLOCK_SIZE} \
             --prefix_pure_tokens=1 \
             --is_causal=False \
             --max_seq_len=512 \
@@ -194,8 +201,8 @@ case "${BASE_MODEL_NAME}" in
             --eval_num_batches_final=100
         ;;
     *)
-        echo "Unknown model: ${BASE_MODEL_NAME}"
-        echo "Available: bd3lm_d4_b4_normal, bd3lm_d4_b4_ts1, bd3lm_d4_b4_ts2, bd3lm_d4_b4_ts4"
+        echo "Unknown variant: ${VARIANT}"
+        echo "Available: normal, ts1, ts2, ts4"
         exit 1
         ;;
 esac
