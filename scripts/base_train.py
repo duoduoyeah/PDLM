@@ -13,7 +13,7 @@ import torch
 from nanochat.gpt import GPT, GPTConfig
 from nanochat.pdlm import PDLM, PDLMConfig
 from nanochat.bd3lm import BDLM, BDLMConfig
-from nanochat.dataloader import tokenizing_distributed_data_loader, tokenizing_distributed_data_loader_with_state
+from nanochat.dataloader import tokenizing_distributed_data_loader_with_state
 from nanochat.bd3lm_eval import eval_bd3lm
 from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, print_banner, get_base_dir, autodetect_device_type
 from nanochat.tokenizer import get_tokenizer, get_token_bytes
