@@ -50,9 +50,7 @@ def tokenizing_distributed_data_loader_with_state(
     block_size: block size for bd3lm mode (sequence is divided into blocks)
     mask_token_id: token id used for masking in bd3lm mode
 
-    NOTE: this loader uses shard-based split logic (val is the last shard) and
-    train includes all shards. A separate validation set can be used elsewhere
-    and should be totally different from this shard-based eval.
+    NOTE: train uses shard_*.parquet files, val uses validation_*.parquet files.
 
     Returns:
         inputs: (B, T) input token ids
@@ -76,9 +74,7 @@ def tokenizing_distributed_data_loader_with_state(
     # infinite iterator over document batches (list of text strings)
     ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
     def document_batches():
-        parquet_paths = list_parquet_files()
-        if split == "val":
-            parquet_paths = parquet_paths[-1:]
+        parquet_paths = list_parquet_files(split=split)
         resume_pq_idx = resume_state_dict["pq_idx"] if resume_state_dict is not None else 0
         resume_rg_idx = resume_state_dict["rg_idx"] if resume_state_dict is not None else None
         resume_epoch = resume_state_dict.get("epoch", 0) if resume_state_dict is not None else 0

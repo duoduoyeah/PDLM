@@ -23,8 +23,12 @@ from nanochat.common import get_base_dir
 DATASET_REPO = "duoduoyeah/simple-story-shuffle"
 REPO_PATH = "data"
 BASE_URL = f"https://huggingface.co/datasets/{DATASET_REPO}/resolve/main/{REPO_PATH}"
-MAX_SHARD = 10 # the last datashard is shard_00006.parquet
-index_to_filename = lambda index: f"shard_{index:05d}.parquet" # format of the filenames
+# Training shards: shard_00000.parquet to shard_00009.parquet
+MAX_SHARD = 9  # last index (0-indexed)
+train_index_to_filename = lambda index: f"shard_{index:05d}.parquet"
+# Validation shards: validation_00000.parquet to validation_00009.parquet
+MAX_VAL_SHARD = 9  # last index (0-indexed)
+val_index_to_filename = lambda index: f"validation_{index:05d}.parquet"
 base_dir = get_base_dir()
 DATA_DIR = os.path.join(base_dir, "simple_story_data")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -32,12 +36,20 @@ os.makedirs(DATA_DIR, exist_ok=True)
 # -----------------------------------------------------------------------------
 # These functions are useful utilities to other modules, can/should be imported
 
-def list_parquet_files(data_dir=None):
-    """ Looks into a data dir and returns full paths to all parquet files. """
+def list_parquet_files(split="train", data_dir=None):
+    """
+    Looks into a data dir and returns full paths to parquet files for the given split.
+
+    Args:
+        split: "train" for shard_*.parquet, "val" for validation_*.parquet
+        data_dir: directory to look in (default: DATA_DIR)
+    """
+    assert split in ["train", "val"], f"split must be 'train' or 'val', got {split}"
     data_dir = DATA_DIR if data_dir is None else data_dir
+    prefix = "shard_" if split == "train" else "validation_"
     parquet_files = sorted([
         f for f in os.listdir(data_dir)
-        if f.endswith('.parquet') and not f.endswith('.tmp')
+        if f.startswith(prefix) and f.endswith('.parquet') and not f.endswith('.tmp')
     ])
     parquet_paths = [os.path.join(data_dir, f) for f in parquet_files]
     return parquet_paths
@@ -45,16 +57,12 @@ def list_parquet_files(data_dir=None):
 def parquets_iter_batched(split, start=0, step=1):
     """
     Iterate through the dataset, in batches of underlying row_groups for efficiency.
-    - split can be "train" or "val". val uses the last parquet file.
-      train uses all shards (including the last), so eval overlaps with train.
-      NOTE: this is only for shard-based pretraining here; a separate validation
-      set can be plugged in elsewhere and should be totally different.
+    - split can be "train" or "val".
+      train uses shard_*.parquet files, val uses validation_*.parquet files.
     - start/step are useful for skipping rows in DDP. e.g. start=rank, step=world_size
     """
     assert split in ["train", "val"], "split must be 'train' or 'val'"
-    parquet_paths = list_parquet_files()
-    if split == "val":
-        parquet_paths = parquet_paths[-1:]
+    parquet_paths = list_parquet_files(split=split)
     for filepath in parquet_paths:
         pf = pq.ParquetFile(filepath)
         for rg_idx in range(start, pf.num_row_groups, step):
@@ -63,8 +71,15 @@ def parquets_iter_batched(split, start=0, step=1):
             yield texts
 
 # -----------------------------------------------------------------------------
-def download_single_file(index):
-    """ Downloads a single file index, with some backoff """
+def download_single_file(args):
+    """
+    Downloads a single file, with some backoff.
+
+    Args:
+        args: tuple of (index, split) where split is "train" or "val"
+    """
+    index, split = args
+    index_to_filename = train_index_to_filename if split == "train" else val_index_to_filename
 
     # Construct the local filepath for this file and skip if it already exists
     filename = index_to_filename(index)
@@ -116,25 +131,37 @@ def download_single_file(index):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Download FineWeb-Edu 100BT dataset shards")
-    parser.add_argument("-n", "--num-files", type=int, default=-1, help="Number of shards to download (default: -1), -1 = disable")
+    parser = argparse.ArgumentParser(description="Download dataset shards (train and/or validation)")
+    parser.add_argument("-n", "--num-files", type=int, default=-1, help="Number of shards per split to download (-1 = all)")
     parser.add_argument("-w", "--num-workers", type=int, default=4, help="Number of parallel download workers (default: 4)")
+    parser.add_argument("--split", type=str, default="both", choices=["train", "val", "both"],
+                        help="Which split to download: train, val, or both (default: both)")
     args = parser.parse_args()
 
-    num = MAX_SHARD + 1 if args.num_files == -1 else min(args.num_files, MAX_SHARD + 1)
-    ids_to_download = list(range(num))
     print("Dataset download info:")
     print(f"  Dataset repo: {DATASET_REPO}")
     print(f"  Base URL: {BASE_URL}")
-    print(f"  Shard pattern: {index_to_filename(0)} .. {index_to_filename(MAX_SHARD)}")
-    print(f"  Max shard index: {MAX_SHARD}")
+    print(f"  Target directory: {DATA_DIR}")
     print()
-    print(f"Downloading {len(ids_to_download)} shards using {args.num_workers} workers...")
-    print(f"Target directory: {DATA_DIR}")
+
+    # Build list of (index, split) tuples to download
+    download_args = []
+    if args.split in ["train", "both"]:
+        num_train = MAX_SHARD + 1 if args.num_files == -1 else min(args.num_files, MAX_SHARD + 1)
+        download_args.extend([(i, "train") for i in range(num_train)])
+        print(f"  Train shards: {train_index_to_filename(0)} .. {train_index_to_filename(MAX_SHARD)} ({num_train} files)")
+    if args.split in ["val", "both"]:
+        num_val = MAX_VAL_SHARD + 1 if args.num_files == -1 else min(args.num_files, MAX_VAL_SHARD + 1)
+        download_args.extend([(i, "val") for i in range(num_val)])
+        print(f"  Val shards: {val_index_to_filename(0)} .. {val_index_to_filename(MAX_VAL_SHARD)} ({num_val} files)")
+
     print()
+    print(f"Downloading {len(download_args)} files using {args.num_workers} workers...")
+    print()
+
     with Pool(processes=args.num_workers) as pool:
-        results = pool.map(download_single_file, ids_to_download)
+        results = pool.map(download_single_file, download_args)
 
     # Report results
     successful = sum(1 for success in results if success)
-    print(f"Done! Downloaded: {successful}/{len(ids_to_download)} shards to {DATA_DIR}")
+    print(f"Done! Downloaded: {successful}/{len(download_args)} files to {DATA_DIR}")
