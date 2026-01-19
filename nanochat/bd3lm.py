@@ -294,12 +294,8 @@ class BDLM(nn.Module):
 
             # Build attention_mask for loss: only compute loss at loss_mask positions
             # loss_mask is bool (True=compute loss), convert to float for attention_mask (1=compute loss)
+            # Note: prefix_pure_tokens exclusion is already handled in dataloader
             attention_mask = loss_mask.float()
-
-            # Also exclude prefix_pure_tokens from loss
-            prefix_pure_tokens = self.config.prefix_pure_tokens
-            if prefix_pure_tokens > 0:
-                attention_mask[:, :prefix_pure_tokens] = 0
 
             loss, _ = compute_bd3lm_loss(logits, targets, loss_scale, attention_mask=attention_mask)
             return loss
