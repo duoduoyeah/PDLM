@@ -456,8 +456,8 @@ while True:
                 epoch = dataloader_state_dict.get("epoch", 0)
                 block_diff_mask = block_diff_masks[epoch % len(block_diff_masks)]
                 loss = model(x, y, attn_mask=block_diff_mask, loss_extras=loss_extras)
-                # Count effective tokens (masked positions that contribute to loss)
-                batch_effective_tokens = loss_extras["mask"].sum().item() * ddp_world_size
+                # Count effective tokens (positions that contribute to loss)
+                batch_effective_tokens = loss_extras["loss_mask"].sum().item() * ddp_world_size
                 step_effective_tokens += batch_effective_tokens
                 total_effective_tokens += batch_effective_tokens
             elif model_type == "pdlm":

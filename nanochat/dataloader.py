@@ -56,7 +56,9 @@ def tokenizing_distributed_data_loader_with_state(
         inputs: (B, T) input token ids
         targets: (B, T) target token ids
         loss_extras: dict with model-specific loss info, or None
-                     - For bd3lm: {"loss_scale": (B, T)}
+                     - For bd3lm: {"loss_scale": (B, T), "loss_mask": (B, T)}
+                       NOTE: loss_mask indicates positions to compute loss, NOT input mask positions.
+                       For target_shift mode, loss_mask only includes the target position (1 per block).
                      - For others: None
         state_dict: dict for resuming training
     """
@@ -193,12 +195,27 @@ def tokenizing_distributed_data_loader_with_state(
             loss_scale_per_block = get_loss_scale(t)  # (B, num_blocks)
             loss_scale = expand_block_to_seq(loss_scale_per_block, bd3lm_block_size)  # (B, T)
 
+            # Create loss_mask: positions where loss is computed (not same as input mask for target_shift)
+            if forced_mask_position is not None:
+                # Target_shift mode: only compute loss at the forced position (1 per block)
+                num_blocks = T // bd3lm_block_size
+                loss_mask = torch.zeros_like(targets_cpu, dtype=torch.bool)
+                for block_idx in range(num_blocks):
+                    pos = block_idx * bd3lm_block_size + forced_mask_position
+                    loss_mask[:, pos] = True
+                # Exclude prefix_pure_tokens from loss
+                if prefix_pure_tokens > 0:
+                    loss_mask[:, :prefix_pure_tokens] = False
+            else:
+                # Normal mode: compute loss on all masked positions
+                loss_mask = mask
+
             # Move to device
             inputs = inputs_cpu.to(device=device, non_blocking=use_cuda_optimizations)
             targets = targets_cpu.to(device=device, non_blocking=use_cuda_optimizations)
             loss_scale = loss_scale.to(device=device, non_blocking=use_cuda_optimizations)
-            mask = mask.to(device=device, non_blocking=use_cuda_optimizations)
-            loss_extras = {"loss_scale": loss_scale, "mask": mask}
+            loss_mask = loss_mask.to(device=device, non_blocking=use_cuda_optimizations)
+            loss_extras = {"loss_scale": loss_scale, "loss_mask": loss_mask}
 
         elif model_type == "pdlm":
             # PDLM mode: inputs are noisy versions of targets

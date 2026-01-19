@@ -1,6 +1,10 @@
 01/18
 1. Verified train/val split separation with new test script `tests/test_dataloader.py`. [Done]
 2. Auto-compute `bd3lm_effective_ratio` from `target_shift` and `block_size`; added `rl_tok/sec` (real loss tokens/sec) metric to logging. [Done]
+3. Bug fix: Corrected `loss_mask` usage in `dataloader.py`, `bd3lm.py`, and `base_train.py`. [Done]
+   - Renamed `mask` -> `loss_mask` in `loss_extras` to clarify distinction between input mask and loss positions.
+   - For `target_shift` mode, `loss_mask` now strictly includes only the forced position (1/block_size), fixing an issue where all masked positions were counting towards loss.
+   - Result: `rl_tok/sec` for target_shift mode dropped from ~145k (incorrect, similar to normal) to ~58k (correct, 1/4 of total).
 
 01/17
 1. Update `dataset.py` and `dataloader` to support validation shards. [Done]

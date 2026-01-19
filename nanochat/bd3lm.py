@@ -286,15 +286,15 @@ class BDLM(nn.Module):
         if targets is not None:
             logits = logits[:, :T, :]
 
-            # Get loss_scale and mask from loss_extras
+            # Get loss_scale and loss_mask from loss_extras
             assert loss_extras is not None and "loss_scale" in loss_extras, "BD3LM requires loss_extras with loss_scale"
-            assert "mask" in loss_extras, "BD3LM requires loss_extras with mask"
+            assert "loss_mask" in loss_extras, "BD3LM requires loss_extras with loss_mask"
             loss_scale = loss_extras["loss_scale"]
-            mask = loss_extras["mask"]  # True = masked position, compute loss here
+            loss_mask = loss_extras["loss_mask"]  # True = position to compute loss (not same as input mask for target_shift)
 
-            # Build attention_mask for loss: only compute loss for masked positions
-            # mask is bool (True=masked), convert to float for attention_mask (1=compute loss)
-            attention_mask = mask.float()
+            # Build attention_mask for loss: only compute loss at loss_mask positions
+            # loss_mask is bool (True=compute loss), convert to float for attention_mask (1=compute loss)
+            attention_mask = loss_mask.float()
 
             # Also exclude prefix_pure_tokens from loss
             prefix_pure_tokens = self.config.prefix_pure_tokens
