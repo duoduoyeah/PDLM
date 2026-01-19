@@ -7,3 +7,4 @@ When the user let you do something, first talk with the user patiently. Make sur
 
 ## Notes
 - User runs commands on VM, so just provide the `python -m` command instead of running directly.
+- some dump script could be run locally, use `uv run -m` command

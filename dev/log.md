@@ -7,7 +7,12 @@
    - Added `.ai/prefix_tokens_design.md` documenting `prefix_pure_tokens` vs `prefix_sliding_tokens`.
 2. continue working on the tokenizer, need some rewrite of previous code [TODO]
 3. Cleanup: Removed `bd3lms/` folder and `CLAUDE.md` as part of repository cleanup. [Done]
-
+4. Updated `bd3lm_eval.py` to report suffix metrics in addition to all-masked eval. [Done]
+   - For each prediction position, also evaluate with N suffix tokens revealed (clean instead of masked).
+   - target_shift mode: reports `loss`, `ppl` (core) + `loss_Nsuffix`, `ppl_Nsuffix` for N=1,2,...
+   - normal mode: reports original metrics + `suffix_N` dicts with per-position metrics.
+   - Updated logging in `base_train.py` to handle new eval result format.
+5. indenpendent bd3lm eval stuff that get the model from the checkpoint or finished model, not only at the end of training. [TODO]
 01/18
 1. Verified train/val split separation with new test script `tests/test_dataloader.py`. [Done]
 2. Auto-compute `bd3lm_effective_ratio` from `target_shift` and `block_size`; added `rl_tok/sec` (real loss tokens/sec) metric to logging. [Done]

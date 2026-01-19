@@ -5,7 +5,7 @@ Computes loss and perplexity for BD3LM models on validation data.
 
 Evaluation setup:
 - Input is [xt | x0] of length 2L
-- xt (first L): ALL tokens are MASKED
+- xt (first L): ALL tokens are MASKED (or partially masked with suffix clear)
 - x0 (second L): ALL tokens are clean
 - Skip block 0 for loss computation (no previous context to condition on)
 - Compute loss from blocks 1, 2, ... (they have clean context via cross-attention)
@@ -14,11 +14,16 @@ Two evaluation modes:
 - Normal mode (target_shift < 0): compute overall + per-position metrics
 - Target_shift mode (target_shift >= 1): compute metrics only at specific position
 
-Example (L=16, block_size=4, 4 blocks):
-    xt:  [MASK MASK MASK MASK | MASK MASK MASK MASK | MASK MASK MASK MASK | MASK MASK MASK MASK]
-          ^-- block 0 (skip) --^ ^---- block 1 ----^ ^---- block 2 ----^ ^---- block 3 ----^
-    x0:  [clean clean clean clean | clean clean clean clean | ...]
-    Loss computed from blocks 1, 2, 3 only.
+Suffix metrics:
+- In addition to all-masked eval, we also report metrics with N suffix tokens clear
+- For position p, suffix tokens are positions p+1, p+2, ..., block_size-1
+- This shows how much the model benefits from seeing clean context after prediction target
+
+Example (L=16, block_size=4, 4 blocks, target_shift=1):
+    All masked:   [MASK MASK MASK MASK | MASK MASK MASK MASK | ...]
+    1 suffix:     [MASK clean MASK MASK | MASK clean MASK MASK | ...]  (pos 1 clear)
+    2 suffix:     [MASK clean clean MASK | MASK clean clean MASK | ...]  (pos 1,2 clear)
+    3 suffix:     [MASK clean clean clean | MASK clean clean clean | ...]  (pos 1,2,3 clear)
 """
 
 import torch
@@ -53,14 +58,24 @@ def eval_bd3lm(
 
     Returns:
         dict with evaluation results:
-        - target_shift >= 1:
-            {"loss": float, "ppl": float}
+        - target_shift >= 1 (e.g., ts=1, block_size=4):
+            {
+                "loss": float, "ppl": float,  # all masked (core metric)
+                "loss_1suffix": float, "ppl_1suffix": float,  # pos 1 clear
+                "loss_2suffix": float, "ppl_2suffix": float,  # pos 1,2 clear
+                "loss_3suffix": float, "ppl_3suffix": float,  # pos 1,2,3 clear
+            }
         - target_shift < 0 (normal mode):
             {
-                "overall_loss": float,
-                "overall_ppl": float,
-                "per_pos_loss": [loss_0, loss_1, ..., loss_{block_size-1}],
-                "per_pos_ppl": [ppl_0, ppl_1, ..., ppl_{block_size-1}],
+                "overall_loss": float, "overall_ppl": float,
+                "per_pos_loss": [loss_0, ..., loss_{bs-1}],
+                "per_pos_ppl": [ppl_0, ..., ppl_{bs-1}],
+                "suffix_1": {
+                    "positions": [0, 1, 2],  # positions with 1+ suffix
+                    "overall_loss": float, "overall_ppl": float,
+                    "per_pos_loss": [...], "per_pos_ppl": [...],
+                },
+                "suffix_2": {...}, "suffix_3": {...},
             }
     """
     was_training = model.training
@@ -101,6 +116,49 @@ def _prepare_eval_batch(targets, mask_token_id):
     return inputs, targets
 
 
+def _prepare_eval_batch_with_suffix(targets, mask_token_id, block_size, pred_position, num_suffix_clear):
+    """
+    Prepare evaluation batch with N suffix positions revealed (not masked).
+
+    For each block, positions 0 to pred_position are masked, and positions
+    (pred_position+1) to (pred_position+num_suffix_clear) are revealed (clean).
+    Remaining positions after the suffix are still masked.
+
+    Args:
+        targets: (B, L) clean target tokens (already on device)
+        mask_token_id: token id for MASK
+        block_size: size of each block
+        pred_position: the position being predicted (0-indexed within block)
+        num_suffix_clear: number of suffix positions to reveal (0 = all masked)
+
+    Returns:
+        inputs: (B, L) tokens with suffix positions revealed
+        targets: (B, L) clean targets (unchanged)
+
+    Example (block_size=4, pred_position=0, num_suffix_clear=2):
+        Block pattern: [MASK, clean, clean, MASK]
+                        ^pred  ^suf1  ^suf2  ^still masked
+    """
+    B, L = targets.shape
+    num_blocks = L // block_size
+
+    # Start with all masked
+    inputs = torch.full((B, L), mask_token_id, dtype=torch.long, device=targets.device)
+
+    # Reveal suffix positions in each block
+    if num_suffix_clear > 0:
+        for block_idx in range(num_blocks):
+            block_start = block_idx * block_size
+            # Suffix positions: pred_position+1, pred_position+2, ..., pred_position+num_suffix_clear
+            for suffix_offset in range(1, num_suffix_clear + 1):
+                suffix_pos = pred_position + suffix_offset
+                if suffix_pos < block_size:  # don't go beyond block boundary
+                    abs_pos = block_start + suffix_pos
+                    inputs[:, abs_pos] = targets[:, abs_pos]
+
+    return inputs, targets
+
+
 def _eval_target_shift_mode(
     model, val_loader, block_size, target_shift,
     num_batches, attn_mask, device, autocast_ctx, mask_token_id
@@ -108,49 +166,71 @@ def _eval_target_shift_mode(
     """
     Evaluate in target_shift mode: compute loss only at position (target_shift-1).
     Skip block 0, compute from blocks 1 onwards.
+
+    Also computes suffix metrics: with N suffix positions revealed.
+    For target_shift=1 (pred pos 0), max suffix = block_size - 1.
+    For target_shift=4 (pred pos 3, last), max suffix = 0.
     """
     position = target_shift - 1  # convert to 0-indexed
+    max_suffix = block_size - 1 - position  # how many suffix positions available
 
-    total_nll = 0.0
-    total_tokens = 0
+    # Accumulators for each suffix count (0 = all masked, 1 = 1 suffix clear, etc.)
+    nll_by_suffix = {s: 0.0 for s in range(max_suffix + 1)}
+    tokens_by_suffix = {s: 0 for s in range(max_suffix + 1)}
 
+    # Collect all batches first (we need to iterate multiple times for different suffix counts)
+    all_targets = []
     for batch_idx in range(num_batches):
-        # Get batch from val_loader
-        # val_loader yields (inputs, targets, loss_extras, state_dict)
-        # We ignore inputs and create our own (all masked)
         _, targets_batch, _, _ = next(val_loader)
+        all_targets.append(targets_batch)
 
-        B, L = targets_batch.shape
-        num_blocks = L // block_size
+    # Evaluate for each suffix count
+    for num_suffix in range(max_suffix + 1):
+        for targets_batch in all_targets:
+            B, L = targets_batch.shape
+            num_blocks = L // block_size
 
-        # Prepare inputs: all masked
-        inputs, targets = _prepare_eval_batch(targets_batch, mask_token_id)
+            # Prepare inputs with appropriate suffix clearing
+            if num_suffix == 0:
+                inputs, targets = _prepare_eval_batch(targets_batch, mask_token_id)
+            else:
+                inputs, targets = _prepare_eval_batch_with_suffix(
+                    targets_batch, mask_token_id, block_size, position, num_suffix
+                )
 
-        with autocast_ctx:
-            # Forward pass: returns logits of shape (B, L, vocab_size)
-            logits = model.forward_for_eval(inputs, targets, attn_mask=attn_mask)
+            with autocast_ctx:
+                # Forward pass
+                logits = model.forward_for_eval(inputs, targets, attn_mask=attn_mask)
 
-            # Compute log probabilities
-            log_probs = F.log_softmax(logits.float(), dim=-1)
+                # Compute log probabilities
+                log_probs = F.log_softmax(logits.float(), dim=-1)
 
-            # Gather log probs for target tokens: (B, L)
-            target_log_probs = log_probs.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
+                # Gather log probs for target tokens
+                target_log_probs = log_probs.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
 
-            # Compute NLL for the specific position in each block
-            # Skip block 0, compute from blocks 1 onwards
-            for block_idx in range(1, num_blocks):
-                pos_in_seq = block_idx * block_size + position
-                nll = -target_log_probs[:, pos_in_seq]  # (B,)
-                total_nll += nll.sum().item()
-                total_tokens += B
+                # Compute NLL for the specific position in each block
+                # Skip block 0, compute from blocks 1 onwards
+                for block_idx in range(1, num_blocks):
+                    pos_in_seq = block_idx * block_size + position
+                    nll = -target_log_probs[:, pos_in_seq]
+                    nll_by_suffix[num_suffix] += nll.sum().item()
+                    tokens_by_suffix[num_suffix] += B
 
-    avg_loss = total_nll / total_tokens if total_tokens > 0 else 0.0
-    ppl = torch.exp(torch.tensor(avg_loss)).item()
+    # Build result dict
+    result = {}
 
-    return {
-        "loss": avg_loss,
-        "ppl": ppl,
-    }
+    # Core metrics (all masked)
+    avg_loss = nll_by_suffix[0] / tokens_by_suffix[0] if tokens_by_suffix[0] > 0 else 0.0
+    result["loss"] = avg_loss
+    result["ppl"] = torch.exp(torch.tensor(avg_loss)).item()
+
+    # Suffix metrics
+    for num_suffix in range(1, max_suffix + 1):
+        avg_loss_suffix = nll_by_suffix[num_suffix] / tokens_by_suffix[num_suffix] if tokens_by_suffix[num_suffix] > 0 else 0.0
+        result[f"loss_{num_suffix}suffix"] = avg_loss_suffix
+        result[f"ppl_{num_suffix}suffix"] = torch.exp(torch.tensor(avg_loss_suffix)).item()
+
+    return result
 
 
 def _eval_normal_mode(
@@ -160,70 +240,109 @@ def _eval_normal_mode(
     """
     Evaluate in normal mode: compute overall + per-position metrics.
     Skip block 0, compute from blocks 1 onwards.
+
+    Also computes suffix metrics for each position that has suffixes:
+    - Position 0: can have up to block_size-1 suffixes
+    - Position 1: can have up to block_size-2 suffixes
+    - ...
+    - Position block_size-1: no suffixes
     """
-    # Track overall metrics
-    total_nll = 0.0
-    total_tokens = 0
+    max_suffix = block_size - 1  # max possible suffix count (for position 0)
 
-    # Track per-position metrics
-    per_pos_nll = [0.0] * block_size
-    per_pos_tokens = [0] * block_size
-
+    # Collect all batches first (we need to iterate multiple times)
+    all_targets = []
     for batch_idx in range(num_batches):
-        # Get batch from val_loader
         _, targets_batch, _, _ = next(val_loader)
+        all_targets.append(targets_batch)
 
-        B, L = targets_batch.shape
-        num_blocks = L // block_size
-
-        # Prepare inputs: all masked
-        inputs, targets = _prepare_eval_batch(targets_batch, mask_token_id)
-
-        with autocast_ctx:
-            # Forward pass
-            logits = model.forward_for_eval(inputs, targets, attn_mask=attn_mask)
-
-            # Compute log probabilities
-            log_probs = F.log_softmax(logits.float(), dim=-1)
-
-            # Gather log probs for target tokens: (B, L)
-            target_log_probs = log_probs.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
-
-            # Compute NLL = -log_prob
-            nll = -target_log_probs  # (B, L)
-
-            # Skip block 0, compute from blocks 1 onwards
-            for block_idx in range(1, num_blocks):
-                block_start = block_idx * block_size
-                block_end = block_start + block_size
-
-                # Overall metrics: sum all positions in this block
-                block_nll = nll[:, block_start:block_end]  # (B, block_size)
-                total_nll += block_nll.sum().item()
-                total_tokens += B * block_size
-
-                # Per-position metrics
-                for pos in range(block_size):
-                    pos_in_seq = block_start + pos
-                    pos_nll = nll[:, pos_in_seq]  # (B,)
-                    per_pos_nll[pos] += pos_nll.sum().item()
-                    per_pos_tokens[pos] += B
-
-    # Compute averages
-    overall_loss = total_nll / total_tokens if total_tokens > 0 else 0.0
-    overall_ppl = torch.exp(torch.tensor(overall_loss)).item()
-
-    per_pos_avg_loss = [
-        per_pos_nll[i] / per_pos_tokens[i] if per_pos_tokens[i] > 0 else 0.0
-        for i in range(block_size)
-    ]
-    per_pos_ppl = [
-        torch.exp(torch.tensor(loss)).item() for loss in per_pos_avg_loss
-    ]
-
-    return {
-        "overall_loss": overall_loss,
-        "overall_ppl": overall_ppl,
-        "per_pos_loss": per_pos_avg_loss,
-        "per_pos_ppl": per_pos_ppl,
+    # Track metrics: nll_data[num_suffix][pos] = (total_nll, total_tokens)
+    # num_suffix=0 means all masked (original eval)
+    nll_data = {
+        s: {p: {"nll": 0.0, "tokens": 0} for p in range(block_size)}
+        for s in range(max_suffix + 1)
     }
+
+    # Evaluate for each suffix count
+    for num_suffix in range(max_suffix + 1):
+        # For this suffix count, only evaluate positions that have enough suffixes
+        # Position p has (block_size - 1 - p) suffixes available
+        valid_positions = [p for p in range(block_size) if (block_size - 1 - p) >= num_suffix]
+
+        if not valid_positions:
+            continue
+
+        for targets_batch in all_targets:
+            B, L = targets_batch.shape
+            num_blocks = L // block_size
+
+            # For each valid position, prepare batch and compute NLL
+            for pred_pos in valid_positions:
+                if num_suffix == 0:
+                    inputs, targets = _prepare_eval_batch(targets_batch, mask_token_id)
+                else:
+                    inputs, targets = _prepare_eval_batch_with_suffix(
+                        targets_batch, mask_token_id, block_size, pred_pos, num_suffix
+                    )
+
+                with autocast_ctx:
+                    # Forward pass
+                    logits = model.forward_for_eval(inputs, targets, attn_mask=attn_mask)
+
+                    # Compute log probabilities
+                    log_probs = F.log_softmax(logits.float(), dim=-1)
+
+                    # Gather log probs for target tokens
+                    target_log_probs = log_probs.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
+
+                    # Compute NLL at this position in each block (skip block 0)
+                    for block_idx in range(1, num_blocks):
+                        pos_in_seq = block_idx * block_size + pred_pos
+                        nll = -target_log_probs[:, pos_in_seq]
+                        nll_data[num_suffix][pred_pos]["nll"] += nll.sum().item()
+                        nll_data[num_suffix][pred_pos]["tokens"] += B
+
+    # Build result dict
+    result = {}
+
+    # Original metrics (all masked, num_suffix=0)
+    total_nll = sum(nll_data[0][p]["nll"] for p in range(block_size))
+    total_tokens = sum(nll_data[0][p]["tokens"] for p in range(block_size))
+    result["overall_loss"] = total_nll / total_tokens if total_tokens > 0 else 0.0
+    result["overall_ppl"] = torch.exp(torch.tensor(result["overall_loss"])).item()
+
+    result["per_pos_loss"] = []
+    result["per_pos_ppl"] = []
+    for p in range(block_size):
+        loss = nll_data[0][p]["nll"] / nll_data[0][p]["tokens"] if nll_data[0][p]["tokens"] > 0 else 0.0
+        result["per_pos_loss"].append(loss)
+        result["per_pos_ppl"].append(torch.exp(torch.tensor(loss)).item())
+
+    # Suffix metrics
+    for num_suffix in range(1, max_suffix + 1):
+        # Positions that have at least num_suffix suffixes
+        valid_positions = [p for p in range(block_size) if (block_size - 1 - p) >= num_suffix]
+
+        if not valid_positions:
+            continue
+
+        suffix_result = {
+            "positions": valid_positions,
+        }
+
+        # Overall for this suffix count (average over valid positions)
+        total_nll_suffix = sum(nll_data[num_suffix][p]["nll"] for p in valid_positions)
+        total_tokens_suffix = sum(nll_data[num_suffix][p]["tokens"] for p in valid_positions)
+        suffix_result["overall_loss"] = total_nll_suffix / total_tokens_suffix if total_tokens_suffix > 0 else 0.0
+        suffix_result["overall_ppl"] = torch.exp(torch.tensor(suffix_result["overall_loss"])).item()
+
+        # Per-position for this suffix count
+        suffix_result["per_pos_loss"] = []
+        suffix_result["per_pos_ppl"] = []
+        for p in valid_positions:
+            loss = nll_data[num_suffix][p]["nll"] / nll_data[num_suffix][p]["tokens"] if nll_data[num_suffix][p]["tokens"] > 0 else 0.0
+            suffix_result["per_pos_loss"].append(loss)
+            suffix_result["per_pos_ppl"].append(torch.exp(torch.tensor(loss)).item())
+
+        result[f"suffix_{num_suffix}"] = suffix_result
+
+    return result

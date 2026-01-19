@@ -384,13 +384,25 @@ while True:
             )
             # Log eval results
             if target_shift >= 1:
+                # Core metrics (all masked)
                 print0(f"  [target_shift={target_shift}] loss: {eval_result['loss']:.4f}, ppl: {eval_result['ppl']:.2f}")
-                wandb_run.log({
+                log_data = {
                     "step": step,
                     "eval/loss": eval_result["loss"],
                     "eval/ppl": eval_result["ppl"],
-                })
+                }
+                # Suffix metrics
+                max_suffix = block_size - target_shift
+                for s in range(1, max_suffix + 1):
+                    key_loss = f"loss_{s}suffix"
+                    key_ppl = f"ppl_{s}suffix"
+                    if key_loss in eval_result:
+                        print0(f"    {s} suffix clear: loss={eval_result[key_loss]:.4f}, ppl={eval_result[key_ppl]:.2f}")
+                        log_data[f"eval/loss_{s}suffix"] = eval_result[key_loss]
+                        log_data[f"eval/ppl_{s}suffix"] = eval_result[key_ppl]
+                wandb_run.log(log_data)
             else:
+                # Core metrics (all masked)
                 print0(f"  [normal mode] overall_loss: {eval_result['overall_loss']:.4f}, overall_ppl: {eval_result['overall_ppl']:.2f}")
                 for pos in range(block_size):
                     print0(f"    pos {pos}: loss={eval_result['per_pos_loss'][pos]:.4f}, ppl={eval_result['per_pos_ppl'][pos]:.2f}")
@@ -402,6 +414,17 @@ while True:
                 for pos in range(block_size):
                     log_data[f"eval/pos_{pos}_loss"] = eval_result["per_pos_loss"][pos]
                     log_data[f"eval/pos_{pos}_ppl"] = eval_result["per_pos_ppl"][pos]
+                # Suffix metrics
+                for s in range(1, block_size):
+                    suffix_key = f"suffix_{s}"
+                    if suffix_key in eval_result:
+                        suffix_data = eval_result[suffix_key]
+                        print0(f"    {s} suffix clear: overall_loss={suffix_data['overall_loss']:.4f}, overall_ppl={suffix_data['overall_ppl']:.2f}")
+                        log_data[f"eval/suffix_{s}_overall_loss"] = suffix_data["overall_loss"]
+                        log_data[f"eval/suffix_{s}_overall_ppl"] = suffix_data["overall_ppl"]
+                        for i, pos in enumerate(suffix_data["positions"]):
+                            log_data[f"eval/suffix_{s}_pos_{pos}_loss"] = suffix_data["per_pos_loss"][i]
+                            log_data[f"eval/suffix_{s}_pos_{pos}_ppl"] = suffix_data["per_pos_ppl"][i]
                 wandb_run.log(log_data)
         elif model_type == "pdlm":
             pass  # TODO: PDLM evaluation
