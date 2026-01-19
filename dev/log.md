@@ -1,5 +1,10 @@
 01/19
-1. fix the bug that data shift is not correct, and write test file to test this[TODO]
+1. Fixed `prefix_sliding_tokens` synchronization bug between attention mask and data masking. [Done]
+   - Problem: When epoch > 0, attention mask shifted block boundaries but data masking didn't.
+   - Solution: Propagate `prefix_sliding_tokens = epoch % block_size` to both `q_xt` and loss_mask creation.
+   - Files changed: `bd3lm_mask.py`, `dataloader.py`, `base_train.py`
+   - Also applies to normal BD3LM mode (not just target_shift) for better data utilization.
+   - Added `.ai/prefix_tokens_design.md` documenting `prefix_pure_tokens` vs `prefix_sliding_tokens`.
 2. continue working on the tokenizer, need some rewrite of previous code [TODO]
 3. Cleanup: Removed `bd3lms/` folder and `CLAUDE.md` as part of repository cleanup. [Done]
 

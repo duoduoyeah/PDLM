@@ -147,6 +147,7 @@ def q_xt(
     mask_token_id: int,
     block_size: int = 1,
     prefix_pure_tokens: int = 0,
+    prefix_sliding_tokens: int = 0,
     forced_mask_position: Optional[int] = None,
 ) -> Tuple[Tensor, Tensor]:
     """
@@ -159,11 +160,14 @@ def q_xt(
 
     Args:
         x0: Clean input token ids, shape (B, L)
-        t: Noise level, shape (B, num_blocks)
+        t: Noise level, shape (B, num_blocks). num_blocks is inferred from t.shape[1].
         mask_token_id: Token id to use for masked positions
         block_size: Block size for block-wise diffusion
         prefix_pure_tokens: Number of prefix tokens to keep unmasked (AR prefix).
                            These positions will never be masked.
+        prefix_sliding_tokens: Number of sliding prefix tokens (epoch % block_size).
+                              Blocks start after this offset. These positions are not
+                              in any block and won't be masked by block logic.
         forced_mask_position: If None, randomly select one position per block to force mask.
                              If int in [0, block_size-1], force that position in each block.
                              (This is for target_shift mode where we always mask a fixed position)
@@ -173,7 +177,7 @@ def q_xt(
         mask: Boolean mask indicating masked positions, shape (B, L)
     """
     B, L = x0.shape
-    num_blocks = L // block_size
+    num_blocks = t.shape[1]  # infer from t, source of truth
     device = x0.device
 
     # Step 1: Initialize mask as all False
@@ -188,8 +192,9 @@ def q_xt(
         forced_pos_in_block = torch.full((B, num_blocks), forced_mask_position, device=device)
 
     # Convert block-relative positions to absolute positions
-    # block_offsets: [0, block_size, 2*block_size, ...]
-    block_offsets = torch.arange(num_blocks, device=device) * block_size
+    # Blocks start at prefix_sliding_tokens offset
+    # block_offsets: [prefix_sliding_tokens, prefix_sliding_tokens + block_size, ...]
+    block_offsets = torch.arange(num_blocks, device=device) * block_size + prefix_sliding_tokens
     forced_abs_pos = forced_pos_in_block + block_offsets.unsqueeze(0)  # (B, num_blocks)
 
     # Set forced positions in mask
@@ -197,9 +202,14 @@ def q_xt(
     mask[batch_indices.flatten(), forced_abs_pos.flatten()] = True
     mask = mask.view(B, L)
 
-    # Step 3: Apply adjusted probability to non-forced positions
+    # Step 3: Apply adjusted probability to non-forced positions (only in block region)
     p_adjusted = get_adjusted_mask_prob(t, block_size)  # (B, num_blocks)
-    p_adjusted_expanded = expand_block_to_seq(p_adjusted, block_size)  # (B, L)
+    p_adjusted_blocks = expand_block_to_seq(p_adjusted, block_size)  # (B, num_blocks * block_size)
+
+    # Create full-length p_adjusted with zeros for prefix_sliding_tokens region
+    p_adjusted_expanded = torch.zeros(B, L, dtype=p_adjusted_blocks.dtype, device=device)
+    block_region_len = p_adjusted_blocks.shape[1]
+    p_adjusted_expanded[:, prefix_sliding_tokens:prefix_sliding_tokens + block_region_len] = p_adjusted_blocks
 
     # Sample additional masks for non-forced positions
     rand = torch.rand_like(x0, dtype=p_adjusted_expanded.dtype)
@@ -209,6 +219,7 @@ def q_xt(
     mask = mask | additional_mask
 
     # Step 4: Keep prefix tokens unmasked (AR prefix positions)
+    # This is applied last and overrides everything
     if prefix_pure_tokens > 0:
         mask[:, :prefix_pure_tokens] = False
 

@@ -191,10 +191,11 @@ model.to_empty(device=device)
 model.init_weights()
 
 # Generate attention masks
-# For BD3LM with target_shift >= 1: pre-generate block_size masks for prefix_sliding_tokens cycling
-# For other cases: single mask with prefix_sliding_tokens = 0
-if model_type == "bd3lm" and target_shift >= 1:
+# For BD3LM: pre-generate block_size masks for prefix_sliding_tokens cycling (both normal and target_shift modes)
+# For other model types: single mask with prefix_sliding_tokens = 0
+if model_type == "bd3lm":
     # Pre-generate all masks for cycling prefix_sliding_tokens = 0, 1, ..., block_size-1
+    # This ensures block boundaries shift each epoch for better data utilization
     block_diff_masks = [
         gen_mask(max_seq_len, block_size, attn_backend="sdpa", is_causal=is_causal, prefix_sliding_tokens=i).to(device=device)
         for i in range(block_size)

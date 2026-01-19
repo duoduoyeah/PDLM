@@ -44,11 +44,17 @@ def tokenizing_distributed_data_loader_with_state(
 
     target_shift controls:
     - For next_token_ar: how many tokens ahead the target is (1 = next-token)
-    - For bd3lm: if >= 0, always mask position target_shift within each block (plus random masking)
+    - For bd3lm: if >= 1, always mask position target_shift within each block (plus random masking)
                  if < 0, pure random masking based on sampled t
 
     block_size: block size for bd3lm mode (sequence is divided into blocks)
     mask_token_id: token id used for masking in bd3lm mode
+
+    BD3LM block sliding (prefix_sliding_tokens):
+    - Each epoch, block boundaries shift by 1 position (epoch % block_size)
+    - This ensures all positions get trained across epochs
+    - Example with block_size=4: epoch 0 has blocks [0-3],[4-7], epoch 1 has blocks [1-4],[5-8]
+    - The attention mask in base_train.py must use matching prefix_sliding_tokens
 
     NOTE: train uses shard_*.parquet files, val uses validation_*.parquet files.
 
@@ -58,9 +64,9 @@ def tokenizing_distributed_data_loader_with_state(
         loss_extras: dict with model-specific loss info, or None
                      - For bd3lm: {"loss_scale": (B, T), "loss_mask": (B, T)}
                        NOTE: loss_mask indicates positions to compute loss, NOT input mask positions.
-                       For target_shift mode, loss_mask only includes the target position (1 per block).
+                       Block positions are shifted by prefix_sliding_tokens = epoch % block_size.
                      - For others: None
-        state_dict: dict for resuming training
+        state_dict: dict for resuming training (includes epoch for prefix_sliding_tokens sync)
     """
     assert split in ["train", "val"], "split must be 'train' or 'val'"
     assert model_type in ["pdlm", "bd3lm", "next_token_ar"], f"model_type must be 'pdlm', 'bd3lm', or 'next_token_ar', got {model_type}"
@@ -129,8 +135,7 @@ def tokenizing_distributed_data_loader_with_state(
     # token_map is only needed for pdlm mode (bd3lm uses MASK token instead)
     token_map: TokenMap = get_token_map(device="cpu") if model_type == "pdlm" else None
 
-    # num_blocks for bd3lm
-    num_blocks = T // bd3lm_block_size if model_type == "bd3lm" else None
+    # num_blocks for bd3lm is computed per-batch based on prefix_sliding_tokens
 
     # scratch buffer holds the tokens for one iteration
     token_buffer = deque() # we stream tokens on the right and pop from the left
@@ -162,6 +167,11 @@ def tokenizing_distributed_data_loader_with_state(
             targets_cpu = torch.tensor(tokens, dtype=torch.long, pin_memory=use_cuda_optimizations)
             targets_cpu = targets_cpu.view(B, T)
 
+            # Compute prefix_sliding_tokens from epoch for block boundary shifting
+            # This cycles through [0, block_size-1] to ensure all positions get trained
+            prefix_sliding_tokens = epoch % bd3lm_block_size
+            num_blocks = (T - prefix_sliding_tokens) // bd3lm_block_size
+
             # Sample noise level t per block: shape (B, num_blocks)
             # t is sampled from [1/block_size, 1] to ensure at least 1 mask per block
             t = sample_t(
@@ -179,6 +189,7 @@ def tokenizing_distributed_data_loader_with_state(
             forced_mask_position = (target_shift - 1) if target_shift >= 1 else None
 
             # Apply masking: q_xt converts clean tokens to noisy (masked) tokens
+            # - Blocks start at prefix_sliding_tokens offset
             # - First, one position per block is forced to be masked
             # - Then, remaining positions are masked with adjusted probability p'
             # inputs_cpu shape: (B, T), mask shape: (B, T)
@@ -188,30 +199,34 @@ def tokenizing_distributed_data_loader_with_state(
                 mask_token_id=bd3lm_mask_token_id,
                 block_size=bd3lm_block_size,
                 prefix_pure_tokens=prefix_pure_tokens,
+                prefix_sliding_tokens=prefix_sliding_tokens,
                 forced_mask_position=forced_mask_position,
             )
 
-            # Compute loss_scale from t: shape (B, num_blocks) -> (B, T)
+            # Compute loss_scale from t: shape (B, num_blocks) -> padded to (B, T)
             loss_scale_per_block = get_loss_scale(t)  # (B, num_blocks)
-            loss_scale = expand_block_to_seq(loss_scale_per_block, bd3lm_block_size)  # (B, T)
+            loss_scale_blocks = expand_block_to_seq(loss_scale_per_block, bd3lm_block_size)  # (B, num_blocks * block_size)
+            # Pad with zeros for prefix_sliding_tokens region (prefix has no loss)
+            loss_scale = torch.zeros(B, T, dtype=loss_scale_blocks.dtype)
+            block_region_len = loss_scale_blocks.shape[1]
+            loss_scale[:, prefix_sliding_tokens:prefix_sliding_tokens + block_region_len] = loss_scale_blocks
 
-            # Create loss_mask: positions where loss is computed (not same as input mask for target_shift)
+            # Create loss_mask: positions where loss is computed
+            # Both modes use shifted block positions
             if forced_mask_position is not None:
                 # Target_shift mode: only compute loss at the forced position (1 per block)
-                num_blocks = T // bd3lm_block_size
                 loss_mask = torch.zeros_like(targets_cpu, dtype=torch.bool)
                 for block_idx in range(num_blocks):
-                    pos = block_idx * bd3lm_block_size + forced_mask_position
+                    pos = prefix_sliding_tokens + block_idx * bd3lm_block_size + forced_mask_position
                     loss_mask[:, pos] = True
-                # Exclude prefix_pure_tokens from loss
-                if prefix_pure_tokens > 0:
-                    loss_mask[:, :prefix_pure_tokens] = False
             else:
                 # Normal mode: compute loss on all masked positions
                 loss_mask = mask
 
-            #TODO: for claude, what do you think we put the prefix_pure_tokens here?
-            
+            # Exclude prefix_pure_tokens from loss (applied uniformly to both modes)
+            if prefix_pure_tokens > 0:
+                loss_mask[:, :prefix_pure_tokens] = False
+
             # Move to device
             inputs = inputs_cpu.to(device=device, non_blocking=use_cuda_optimizations)
             targets = targets_cpu.to(device=device, non_blocking=use_cuda_optimizations)
