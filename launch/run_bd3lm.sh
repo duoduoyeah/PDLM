@@ -179,6 +179,23 @@ case "${VARIANT}" in
             --eval_num_batches=20 \
             --eval_num_batches_final=100
         ;;
+    "ts3")
+        # BD3LM with target_shift=3 (predict 3rd position in each block)
+        python -m scripts.base_train \
+            --run="${MODEL_NAME}" \
+            --wandb_group="${WANDB_GROUP}" \
+            --depth=${DEPTH} \
+            --block_size=${BLOCK_SIZE} \
+            --prefix_pure_tokens=1 \
+            --is_causal=False \
+            --max_seq_len=512 \
+            --device_batch_size=128 \
+            --target_param_data_ratio=${DATA_RATIO} \
+            --target_shift=3 \
+            --eval_every=1000 \
+            --eval_num_batches=20 \
+            --eval_num_batches_final=100
+        ;;
     "ts4")
         # BD3LM with target_shift=4 (predict 4th/last position in each block)
         python -m scripts.base_train \
@@ -198,7 +215,7 @@ case "${VARIANT}" in
         ;;
     *)
         echo "Unknown variant: ${VARIANT}"
-        echo "Available: normal, ts1, ts2, ts4"
+        echo "Available: normal, ts1, ts2, ts3, ts4"
         exit 1
         ;;
 esac

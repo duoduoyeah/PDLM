@@ -6,6 +6,7 @@
    - For `target_shift` mode, `loss_mask` now strictly includes only the forced position (1/block_size), fixing an issue where all masked positions were counting towards loss.
    - Result: `rl_tok/sec` for target_shift mode dropped from ~145k (incorrect, similar to normal) to ~58k (correct, 1/4 of total).
 4. Cleanup: Removed redundant `prefix_pure_tokens` masking in `bd3lm.py` as it is now handled upstream in `dataloader.py`. [Done]
+5. Added `ts3` variant to `launch/run_bd3lm.sh` to support predicting the 3rd position in each block. [Done]
 
 01/17
 1. Update `dataset.py` and `dataloader` to support validation shards. [Done]
