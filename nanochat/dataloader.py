@@ -210,6 +210,8 @@ def tokenizing_distributed_data_loader_with_state(
                 # Normal mode: compute loss on all masked positions
                 loss_mask = mask
 
+            #TODO: for claude, what do you think we put the prefix_pure_tokens here?
+            
             # Move to device
             inputs = inputs_cpu.to(device=device, non_blocking=use_cuda_optimizations)
             targets = targets_cpu.to(device=device, non_blocking=use_cuda_optimizations)

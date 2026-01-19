@@ -1,3 +1,8 @@
+01/19
+1. fix the bug that data shift is not correct, and write test file to test this[TODO]
+2. continue working on the tokenizer, need some rewrite of previous code [TODO]
+3. Cleanup: Removed `bd3lms/` folder and `CLAUDE.md` as part of repository cleanup. [Done]
+
 01/18
 1. Verified train/val split separation with new test script `tests/test_dataloader.py`. [Done]
 2. Auto-compute `bd3lm_effective_ratio` from `target_shift` and `block_size`; added `rl_tok/sec` (real loss tokens/sec) metric to logging. [Done]
