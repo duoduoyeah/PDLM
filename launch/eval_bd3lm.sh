@@ -164,7 +164,7 @@ for MODEL_DIR in "${MODELS[@]}"; do
     # Run evaluation with direct checkpoint path
     # Python script reads target_shift from checkpoint metadata automatically
     OUTPUT=$(python -m scripts.bd3lm_eval \
-        --ckpt_dir="${MODEL_DIR}" \
+        --ckpt_dir="${MODEL_DIR}/base_checkpoints" \
         --num_batches=${NUM_BATCHES} \
         --output_json="${MODEL_DIR}/eval_result.json" 2>&1)
 
