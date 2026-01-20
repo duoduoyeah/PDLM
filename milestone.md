@@ -1,11 +1,25 @@
-## PDLM Project Milestones
+# PDLM Project Milestones
 
+## Current Focus
+1. **Tokenizer Refactor**:
+   - Implement `TokenizerBuilder` for modular creation of MASK-only and hierarchical group tokenizers.
+   - Standardize token map generation (`pure_to_noisy`, `noisy_level`).
+2. **BD3LM Target Shift Experiments**:
+   - Validate `target_shift` training logic (done).
+   - Run depth-8 model training with varying `target_shift` (1-4).
+   - Evaluate with new `eval_bd3lm.sh` script to compare `target_shift` variants against normal BD3LM.
+3. **Evaluation**:
+   - Ensure apples-to-apples comparison between AR, BD3LM (normal), and BD3LM (shifted).
+
+---
+
+## Historical / Archived Notes
+
+### PDLM Project Milestones (Old)
 -  Make a method that will, denoise in the steps we force it to.
-
 -  Train group: predict the next n-th token
 
-
-## Temporary 
+### Temporary
 -  Make `generate_with_blocks` in `nanochat/pdlm.py` compatible with batch processing (B > 1) to speed up evaluation.
 -  Train a group of 8d models on the `SimpleStories` dataset (Group: `simple_stories_8d`).
     -> we need to retrain the vocab stuff for each of these dataset i guess
@@ -29,7 +43,5 @@ Target_shift should be within this range [1, block_size], and when the target_sh
 first impl bd3lm.py
 then continue modify based on base_train file, here check both training and inference stuff.
 
-
-## When spare
+### When spare
 - Multi-machine for training multi model
-
