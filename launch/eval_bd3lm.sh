@@ -189,10 +189,29 @@ for MODEL_DIR in "${MODELS[@]}"; do
     echo "  (target_shift auto-detected from checkpoint)"
     echo "------------------------------------------------------------"
 
+    # Find the directory containing model_*.pt files (handles nested structures)
+    CKPT_DIRS=$(find "${MODEL_DIR}/base_checkpoints" -name "model_*.pt" -printf '%h\n' 2>/dev/null | sort -u)
+    CKPT_COUNT=$(echo "$CKPT_DIRS" | grep -c . 2>/dev/null || echo 0)
+
+    if [ "$CKPT_COUNT" -eq 0 ]; then
+        echo "Error: No checkpoints found in ${MODEL_DIR}/base_checkpoints"
+        RESULTS+=("${MODEL_NAME}|-,-|NO CKPT")
+        continue
+    elif [ "$CKPT_COUNT" -gt 1 ]; then
+        echo "Warning: Multiple checkpoint directories found:"
+        echo "$CKPT_DIRS"
+        echo "Skipping - please specify which one to use."
+        RESULTS+=("${MODEL_NAME}|-,-|MULTI CKPT")
+        continue
+    fi
+
+    CKPT_DIR="$CKPT_DIRS"
+    echo "  Checkpoint dir: ${CKPT_DIR}"
+
     # Run evaluation with direct checkpoint path
     # Python script reads target_shift from checkpoint metadata automatically
     OUTPUT=$(python -m scripts.bd3lm_eval \
-        --ckpt_dir="${MODEL_DIR}/base_checkpoints" \
+        --ckpt_dir="${CKPT_DIR}" \
         --num_batches=${NUM_BATCHES} \
         --output_json="${MODEL_DIR}/eval_result.json" 2>&1)
 

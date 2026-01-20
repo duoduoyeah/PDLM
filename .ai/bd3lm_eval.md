@@ -89,3 +89,12 @@ python -m scripts.bd3lm_eval --model_tag=d4 --step=1000 --target_shift=1
     }
 }
 ```
+
+## Related Files
+
+| File | Description |
+|------|-------------|
+| `scripts/bd3lm_eval.py` | Main evaluation script - computes loss/ppl on validation data |
+| `launch/eval_bd3lm.sh` | Bash launcher - downloads models from HuggingFace and runs evaluation |
+| `nanochat/bd3lm.py` | BD3LM model implementation (forward pass, masking logic) |
+| `nanochat/dataset.py` | Dataset loading and batching for validation data |
