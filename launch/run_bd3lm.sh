@@ -22,7 +22,7 @@ PREFIX_PURE_TOKENS="1"
 IS_CAUSAL="False"
 MAX_SEQ_LEN="512"
 DEVICE_BATCH_SIZE="128"
-EVAL_EVERY="1000"
+EVAL_EVERY="2500"
 EVAL_NUM_BATCHES="20"
 EVAL_NUM_BATCHES_FINAL="100"
 BD3LM_COMPUTE_MATCHED="True"  # True=compute-matched (equal FLOPs), False=supervision-matched (equal loss tokens)

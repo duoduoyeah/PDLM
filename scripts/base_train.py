@@ -167,6 +167,7 @@ elif model_type == "bd3lm":
         is_causal=is_causal,
         bucket_size=block_size,
         model_name=run,
+        target_shift=target_shift,
     )
 elif model_type == "pdlm":
     ModelConfig, Model = PDLMConfig, PDLM

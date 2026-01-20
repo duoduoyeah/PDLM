@@ -88,7 +88,7 @@ def load_bd3lm_model(model_tag=None, step=None, device_type="auto"):
 def run_eval(
     model_tag=None,
     step=None,
-    target_shift=-1,
+    target_shift=None,
     num_batches=20,
     device_type="auto",
 ):
@@ -98,7 +98,7 @@ def run_eval(
     Args:
         model_tag: Model directory name
         step: Checkpoint step
-        target_shift: -1 for normal mode, >= 1 for target_shift mode
+        target_shift: None for auto-detect from checkpoint, -1 for normal mode, >= 1 for target_shift mode
         num_batches: Number of validation batches to evaluate
         device_type: Device type
 
@@ -111,6 +111,12 @@ def run_eval(
     # Extract config from metadata
     user_config = meta_data.get("user_config", {})
     model_config = meta_data["model_config"]
+
+    # Auto-detect target_shift from checkpoint if not provided
+    if target_shift is None:
+        # First try model_config (newer checkpoints), then user_config (older checkpoints)
+        target_shift = model_config.get("target_shift", user_config.get("target_shift", -1))
+        print0(f"Auto-detected target_shift={target_shift} from checkpoint")
 
     max_seq_len = model_config["sequence_len"]
     block_size = model_config.get("bucket_size", user_config.get("block_size", 4))
@@ -209,7 +215,7 @@ def main():
     parser = argparse.ArgumentParser(description="Standalone BD3LM evaluation")
     parser.add_argument("--model_tag", type=str, default=None, help="Model directory name (e.g., d8)")
     parser.add_argument("--step", type=int, default=None, help="Checkpoint step (default: last)")
-    parser.add_argument("--target_shift", type=int, default=-1, help="Target shift mode (-1=normal, >=1=target_shift)")
+    parser.add_argument("--target_shift", type=int, default=None, help="Target shift mode (default: auto-detect from checkpoint)")
     parser.add_argument("--num_batches", type=int, default=20, help="Number of validation batches")
     parser.add_argument("--device", type=str, default="auto", help="Device type (cuda/cpu/mps/auto)")
     parser.add_argument("--output_json", type=str, default=None, help="Optional: save results to JSON file")
@@ -224,7 +230,7 @@ def main():
         device_type=args.device,
     )
 
-    # Get block_size for printing (re-load meta to get it)
+    # Get block_size and target_shift for printing (re-load meta to get it)
     # This is a bit redundant but keeps the code clean
     base_dir = get_base_dir()
     checkpoint_dir = os.path.join(base_dir, "base_checkpoints")
@@ -234,10 +240,16 @@ def main():
     meta_path = os.path.join(ckpt_dir, f"meta_{step:06d}.json")
     with open(meta_path, "r") as f:
         meta_data = json.load(f)
-    block_size = meta_data["model_config"].get("bucket_size", meta_data.get("user_config", {}).get("block_size", 4))
+    model_config = meta_data["model_config"]
+    user_config = meta_data.get("user_config", {})
+    block_size = model_config.get("bucket_size", user_config.get("block_size", 4))
+    # Get target_shift: use CLI arg if provided, otherwise auto-detect from checkpoint
+    target_shift = args.target_shift
+    if target_shift is None:
+        target_shift = model_config.get("target_shift", user_config.get("target_shift", -1))
 
     # Print results
-    print_results(eval_result, args.target_shift, block_size)
+    print_results(eval_result, target_shift, block_size)
 
     # Optionally save to JSON
     if args.output_json:

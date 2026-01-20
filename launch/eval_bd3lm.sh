@@ -18,6 +18,7 @@ BLOCK_SIZE="4"
 NUM_BATCHES="20"
 LOCAL_DIR="/tmp/bd3lm_eval"
 ADJUST="true"  # Use _adjust suffix models
+HF_REPO=""  # Empty = use default pattern (duoduoyeah/bd3lm_d${DEPTH})
 
 # Parse named arguments
 for arg in "$@"; do
@@ -43,17 +44,23 @@ for arg in "$@"; do
         --adjust=*)
             ADJUST="${arg#*=}"
             ;;
+        --repo=*)
+            HF_REPO="${arg#*=}"
+            ;;
         *)
             echo "Unknown argument: $arg"
             echo "Usage: bash launch/eval_bd3lm.sh --depth=8 [--variant=normal] [--data_ratio=20]"
             echo "       [--block_size=4] [--num_batches=20] [--local_dir=/tmp/bd3lm_eval] [--adjust=true]"
+            echo "       [--repo=duoduoyeah/bd3lm_d8]"
             exit 1
             ;;
     esac
 done
 
 # Build HF repo name and suffix
-HF_REPO="duoduoyeah/bd3lm_d${DEPTH}"
+if [ -z "${HF_REPO}" ]; then
+    HF_REPO="duoduoyeah/bd3lm_d${DEPTH}"
+fi
 if [ "${ADJUST}" = "true" ]; then
     SUFFIX="_adjust"
 else
@@ -139,66 +146,27 @@ echo "Step 3: Running evaluation..."
 # Store results for summary
 declare -a RESULTS
 
-# Function to get target_shift from variant name
-get_target_shift() {
-    local model_name="$1"
-    if [[ "$model_name" == *"_normal_"* ]]; then
-        echo "-1"
-    elif [[ "$model_name" == *"_ts1_"* ]]; then
-        echo "1"
-    elif [[ "$model_name" == *"_ts2_"* ]]; then
-        echo "2"
-    elif [[ "$model_name" == *"_ts3_"* ]]; then
-        echo "3"
-    elif [[ "$model_name" == *"_ts4_"* ]]; then
-        echo "4"
-    else
-        echo "-1"  # default to normal
-    fi
-}
-
-# Function to get variant name from model name
-get_variant_name() {
-    local model_name="$1"
-    if [[ "$model_name" == *"_normal_"* ]]; then
-        echo "normal"
-    elif [[ "$model_name" == *"_ts1_"* ]]; then
-        echo "ts1"
-    elif [[ "$model_name" == *"_ts2_"* ]]; then
-        echo "ts2"
-    elif [[ "$model_name" == *"_ts3_"* ]]; then
-        echo "ts3"
-    elif [[ "$model_name" == *"_ts4_"* ]]; then
-        echo "ts4"
-    else
-        echo "unknown"
-    fi
-}
-
 for MODEL_DIR in "${MODELS[@]}"; do
     MODEL_NAME=$(basename "$MODEL_DIR")
-    VARIANT_NAME=$(get_variant_name "$MODEL_NAME")
-    TARGET_SHIFT=$(get_target_shift "$MODEL_NAME")
 
-    # Skip if variant filter is set and doesn't match
-    if [ -n "${VARIANT}" ] && [ "${VARIANT_NAME}" != "${VARIANT}" ]; then
-        echo "Skipping ${MODEL_NAME} (variant=${VARIANT_NAME}, filter=${VARIANT})"
+    # Skip if variant filter is set and doesn't match the folder name
+    if [ -n "${VARIANT}" ] && [[ ! "$MODEL_NAME" == *"_${VARIANT}_"* ]]; then
+        echo "Skipping ${MODEL_NAME} (does not match variant filter: ${VARIANT})"
         continue
     fi
 
     echo ""
     echo "------------------------------------------------------------"
     echo "Evaluating: ${MODEL_NAME}"
-    echo "  Variant: ${VARIANT_NAME}"
-    echo "  Target Shift: ${TARGET_SHIFT}"
+    echo "  (target_shift auto-detected from checkpoint)"
     echo "------------------------------------------------------------"
 
     # Set environment and run evaluation
+    # Python script reads target_shift from checkpoint metadata automatically
     export NANOCHAT_BASE_DIR="${MODEL_DIR}"
 
     # Run evaluation and capture output
     OUTPUT=$(python -m scripts.bd3lm_eval \
-        --target_shift=${TARGET_SHIFT} \
         --num_batches=${NUM_BATCHES} \
         --output_json="${MODEL_DIR}/eval_result.json" 2>&1)
 
@@ -218,12 +186,12 @@ if 'overall_loss' in result:
 else:
     print(f\"{result['loss']:.4f},{result['ppl']:.2f}\")
 " 2>/dev/null)
-            RESULTS+=("${VARIANT_NAME}|${TARGET_SHIFT}|${METRICS}|OK")
+            RESULTS+=("${MODEL_NAME}|${METRICS}|OK")
         else
-            RESULTS+=("${VARIANT_NAME}|${TARGET_SHIFT}|-,-|OK (no JSON)")
+            RESULTS+=("${MODEL_NAME}|-,-|OK (no JSON)")
         fi
     else
-        RESULTS+=("${VARIANT_NAME}|${TARGET_SHIFT}|-,-|FAILED")
+        RESULTS+=("${MODEL_NAME}|-,-|FAILED")
     fi
 done
 
@@ -235,13 +203,13 @@ echo "============================================================"
 echo "EVALUATION SUMMARY"
 echo "============================================================"
 echo ""
-printf "%-10s | %-12s | %-10s | %-10s | %-10s\n" "Variant" "Target Shift" "Loss" "PPL" "Status"
-printf "%s\n" "---------------------------------------------------------------"
+printf "%-40s | %-10s | %-10s | %-10s\n" "Model" "Loss" "PPL" "Status"
+printf "%s\n" "-------------------------------------------------------------------------"
 
 for result in "${RESULTS[@]}"; do
-    IFS='|' read -r variant ts metrics status <<< "$result"
+    IFS='|' read -r model metrics status <<< "$result"
     IFS=',' read -r loss ppl <<< "$metrics"
-    printf "%-10s | %-12s | %-10s | %-10s | %-10s\n" "$variant" "$ts" "$loss" "$ppl" "$status"
+    printf "%-40s | %-10s | %-10s | %-10s\n" "$model" "$loss" "$ppl" "$status"
 done
 
 echo ""

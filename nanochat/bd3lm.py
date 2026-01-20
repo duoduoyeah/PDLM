@@ -26,14 +26,15 @@ class BDLMConfig:
     n_head: int = 6 # number of query heads
     n_kv_head: int = 6 # number of key/value heads (GQA)
     n_embd: int = 768
-    
+
     bucket_size: int = -1
     is_causal: bool = False
 
     # need for training
     model_name: str = "bd3lm"
-    prefix_pure_tokens: int = 1 
+    prefix_pure_tokens: int = 1
     mask_token_id: int = -1
+    target_shift: int = -1  # -1 for normal mode, >= 1 for target_shift mode
 
 def norm(x):
     # Purely functional rmsnorm with no learnable params
