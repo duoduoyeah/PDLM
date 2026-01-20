@@ -275,8 +275,8 @@ esac
 
 echo "=== Training complete for ${MODEL_NAME} ==="
 
-# Remove dataset to save space (optional)
-# rm -rf "${NANOCHAT_BASE_DIR}/tiny_story_data"
+# Remove dataset to save space (not needed in model repo)
+rm -rf "${NANOCHAT_BASE_DIR}/simple_story_data"
 
 # Skip upload in test mode
 if [ "${TEST_MODE}" = "true" ]; then
