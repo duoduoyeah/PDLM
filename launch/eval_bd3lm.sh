@@ -99,7 +99,7 @@ VAL_SHARDS=$(find "${DATA_DIR}" -maxdepth 1 -name "validation_*.parquet" 2>/dev/
 if [ -z "${VAL_SHARDS}" ]; then
     echo "No validation data found in ${DATA_DIR}"
     echo "Downloading validation dataset..."
-    python nanochat/dataset.py --split=val
+    python -m nanochat.dataset --split=val
     if [ $? -ne 0 ]; then
         echo "Error: Failed to download validation dataset"
         exit 1
