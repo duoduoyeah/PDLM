@@ -81,6 +81,34 @@ echo "Adjust:       ${ADJUST}"
 echo "============================================================"
 
 # ============================================================
+# Step 0: Ensure validation dataset exists
+# ============================================================
+echo ""
+echo "Step 0: Checking for validation dataset..."
+
+# Determine data directory (same logic as nanochat/common.py)
+if [ -n "${NANOCHAT_BASE_DIR}" ]; then
+    DATA_DIR="${NANOCHAT_BASE_DIR}/simple_story_data"
+else
+    DATA_DIR="${HOME}/.cache/nanochat/simple_story_data"
+fi
+
+# Check if any validation shards exist
+VAL_SHARDS=$(find "${DATA_DIR}" -maxdepth 1 -name "validation_*.parquet" 2>/dev/null | head -1)
+
+if [ -z "${VAL_SHARDS}" ]; then
+    echo "No validation data found in ${DATA_DIR}"
+    echo "Downloading validation dataset..."
+    python nanochat/dataset.py --split=val
+    if [ $? -ne 0 ]; then
+        echo "Error: Failed to download validation dataset"
+        exit 1
+    fi
+else
+    echo "Validation data found in ${DATA_DIR}"
+fi
+
+# ============================================================
 # Step 1: Download from HuggingFace
 # ============================================================
 echo ""
