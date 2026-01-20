@@ -199,7 +199,7 @@ def print_results(eval_result, target_shift, block_size):
             max_suffix_for_pos = block_size - 1 - pos
             for s in range(1, max_suffix_for_pos + 1):
                 if f"loss_{s}suffix" in pos_data:
-                    line += f" | {s}s={pos_data[f'loss_{s}suffix']:.2f}"
+                    line += f" | {s}s={pos_data[f'loss_{s}suffix']:.2f}/{pos_data[f'ppl_{s}suffix']:.1f}"
             print0(line)
 
     print0("\n" + "=" * 60)

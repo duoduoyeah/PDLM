@@ -8,6 +8,9 @@
 5. Created `scripts/bd3lm_eval.py` for standalone checkpoint evaluation. [Done]
 6. Added `bd3lm_compute_matched` arg (default=True) to control iteration adjustment vs compute-matched. [Done]
 7. Updated `run_bd3lm.sh` to expose `bd3lm_compute_matched` and handle naming. [Done]
+8. test bd3lm_eval.sh [TODO]
+9. train new 8d bd3lm [TODO]
+
 
 01/18
 1. Verified train/val split separation with new test script `tests/test_dataloader.py`. [Done]
