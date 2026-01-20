@@ -1,6 +1,8 @@
 01/19
 1. Fixed `prefix_sliding_tokens` synchronization bug between attention mask and data masking. [Done]
-2. continue working on the tokenizer, need some rewrite of previous code [TODO]
+2. continue working on the tokenizer, need some rewrite of previous code [In Progress]
+    * Refactor tokenizer creation into `TokenizerBuilder` for modularity.
+    * Support multiple variants (MASK-only, hierarchical).
 3. Cleanup: Removed `bd3lms/` folder and `CLAUDE.md` as part of repository cleanup. [Done]
 4. Implemented suffix metrics in `bd3lm_eval.py` to evaluate prediction with revealed context. [Done]
 5. Created `scripts/bd3lm_eval.py` for standalone checkpoint evaluation. [Done]
