@@ -58,6 +58,10 @@ Example (block_size=4):
 | 1 | 1 | `[MASK MASK clean MASK]` |
 | 1 | 2 | `[MASK MASK clean clean]` |
 
+## Implementation Note
+
+All suffix evaluations (0s, 1s, 2s, ...) use identical validation batches - collected once, then reused for each suffix configuration.
+
 ## Usage
 
 ```bash
