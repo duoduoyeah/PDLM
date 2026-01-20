@@ -68,14 +68,15 @@ def eval_bd3lm(
         - target_shift < 0 (normal mode):
             {
                 "overall_loss": float, "overall_ppl": float,
-                "per_pos_loss": [loss_0, ..., loss_{bs-1}],
-                "per_pos_ppl": [ppl_0, ..., ppl_{bs-1}],
-                "suffix_1": {
-                    "positions": [0, 1, 2],  # positions with 1+ suffix
-                    "overall_loss": float, "overall_ppl": float,
-                    "per_pos_loss": [...], "per_pos_ppl": [...],
+                "positions": {
+                    0: {"loss": X, "ppl": Y, "loss_1suffix": A, "ppl_1suffix": B, ...},
+                    1: {"loss": X, "ppl": Y, "loss_1suffix": A, ...},
+                    ...
                 },
-                "suffix_2": {...}, "suffix_3": {...},
+                "suffix_overall": {
+                    1: {"positions": [0, 1, 2], "overall_loss": float, "overall_ppl": float},
+                    2: {...}, ...
+                }
             }
     """
     was_training = model.training
@@ -301,7 +302,7 @@ def _eval_normal_mode(
                         nll_data[num_suffix][pred_pos]["nll"] += nll.sum().item()
                         nll_data[num_suffix][pred_pos]["tokens"] += B
 
-    # Build result dict
+    # Build position-centric result dict
     result = {}
 
     # Original metrics (all masked, num_suffix=0)
@@ -310,14 +311,28 @@ def _eval_normal_mode(
     result["overall_loss"] = total_nll / total_tokens if total_tokens > 0 else 0.0
     result["overall_ppl"] = torch.exp(torch.tensor(result["overall_loss"])).item()
 
-    result["per_pos_loss"] = []
-    result["per_pos_ppl"] = []
-    for p in range(block_size):
-        loss = nll_data[0][p]["nll"] / nll_data[0][p]["tokens"] if nll_data[0][p]["tokens"] > 0 else 0.0
-        result["per_pos_loss"].append(loss)
-        result["per_pos_ppl"].append(torch.exp(torch.tensor(loss)).item())
+    # Position-centric data: for each position, include base metrics + all suffix metrics
+    result["positions"] = {}
+    for pos in range(block_size):
+        pos_data = {}
 
-    # Suffix metrics
+        # Base metrics (all masked)
+        base_loss = nll_data[0][pos]["nll"] / nll_data[0][pos]["tokens"] if nll_data[0][pos]["tokens"] > 0 else 0.0
+        pos_data["loss"] = base_loss
+        pos_data["ppl"] = torch.exp(torch.tensor(base_loss)).item()
+
+        # Suffix metrics for this position
+        # Position pos has (block_size - 1 - pos) suffixes available
+        max_suffix_for_pos = block_size - 1 - pos
+        for s in range(1, max_suffix_for_pos + 1):
+            suffix_loss = nll_data[s][pos]["nll"] / nll_data[s][pos]["tokens"] if nll_data[s][pos]["tokens"] > 0 else 0.0
+            pos_data[f"loss_{s}suffix"] = suffix_loss
+            pos_data[f"ppl_{s}suffix"] = torch.exp(torch.tensor(suffix_loss)).item()
+
+        result["positions"][pos] = pos_data
+
+    # Overall suffix metrics (kept for backward compatibility and wandb logging)
+    result["suffix_overall"] = {}
     for num_suffix in range(1, max_suffix + 1):
         # Positions that have at least num_suffix suffixes
         valid_positions = [p for p in range(block_size) if (block_size - 1 - p) >= num_suffix]
@@ -325,24 +340,13 @@ def _eval_normal_mode(
         if not valid_positions:
             continue
 
-        suffix_result = {
-            "positions": valid_positions,
-        }
-
-        # Overall for this suffix count (average over valid positions)
         total_nll_suffix = sum(nll_data[num_suffix][p]["nll"] for p in valid_positions)
         total_tokens_suffix = sum(nll_data[num_suffix][p]["tokens"] for p in valid_positions)
-        suffix_result["overall_loss"] = total_nll_suffix / total_tokens_suffix if total_tokens_suffix > 0 else 0.0
-        suffix_result["overall_ppl"] = torch.exp(torch.tensor(suffix_result["overall_loss"])).item()
-
-        # Per-position for this suffix count
-        suffix_result["per_pos_loss"] = []
-        suffix_result["per_pos_ppl"] = []
-        for p in valid_positions:
-            loss = nll_data[num_suffix][p]["nll"] / nll_data[num_suffix][p]["tokens"] if nll_data[num_suffix][p]["tokens"] > 0 else 0.0
-            suffix_result["per_pos_loss"].append(loss)
-            suffix_result["per_pos_ppl"].append(torch.exp(torch.tensor(loss)).item())
-
-        result[f"suffix_{num_suffix}"] = suffix_result
+        overall_loss_suffix = total_nll_suffix / total_tokens_suffix if total_tokens_suffix > 0 else 0.0
+        result["suffix_overall"][num_suffix] = {
+            "positions": valid_positions,
+            "overall_loss": overall_loss_suffix,
+            "overall_ppl": torch.exp(torch.tensor(overall_loss_suffix)).item(),
+        }
 
     return result

@@ -11,13 +11,26 @@
 # ============================================================
 # Default values
 # ============================================================
-VARIANT="normal"  # normal, ts1, ts2, ts4
+VARIANT="normal"  # normal, ts1, ts2, ts3, ts4
 TEST_MODE="true"
 DATA_RATIO="10"  # default 10 for test mode
 DEPTH="4"  # model depth
 BLOCK_SIZE="4"  # block size
 
+# Common training arguments (shared across all variants)
+PREFIX_PURE_TOKENS="1"
+IS_CAUSAL="False"
+MAX_SEQ_LEN="512"
+DEVICE_BATCH_SIZE="128"
+EVAL_EVERY="1000"
+EVAL_NUM_BATCHES="20"
+EVAL_NUM_BATCHES_FINAL="100"
+BD3LM_COMPUTE_MATCHED="True"  # True=compute-matched (equal FLOPs), False=supervision-matched (equal loss tokens)
+
 # Parse named arguments
+# Note: bd3lm_compute_matched controls iteration adjustment:
+#   True (default): no adjustment, compare BD3LM vs GPT at equal FLOPs
+#   False: adjust iterations to match total loss tokens (supervision-matched)
 for arg in "$@"; do
     case $arg in
         --variant=*)
@@ -35,9 +48,36 @@ for arg in "$@"; do
         --block_size=*)
             BLOCK_SIZE="${arg#*=}"
             ;;
+        --prefix_pure_tokens=*)
+            PREFIX_PURE_TOKENS="${arg#*=}"
+            ;;
+        --is_causal=*)
+            IS_CAUSAL="${arg#*=}"
+            ;;
+        --max_seq_len=*)
+            MAX_SEQ_LEN="${arg#*=}"
+            ;;
+        --device_batch_size=*)
+            DEVICE_BATCH_SIZE="${arg#*=}"
+            ;;
+        --eval_every=*)
+            EVAL_EVERY="${arg#*=}"
+            ;;
+        --eval_num_batches=*)
+            EVAL_NUM_BATCHES="${arg#*=}"
+            ;;
+        --eval_num_batches_final=*)
+            EVAL_NUM_BATCHES_FINAL="${arg#*=}"
+            ;;
+        --bd3lm_compute_matched=*)
+            BD3LM_COMPUTE_MATCHED="${arg#*=}"
+            ;;
         *)
             echo "Unknown argument: $arg"
             echo "Usage: bash launch/run_bd3lm.sh --variant=normal [--depth=4] [--block_size=4] [--test_mode=true] [--data_ratio=10]"
+            echo "       [--prefix_pure_tokens=1] [--is_causal=False] [--max_seq_len=512] [--device_batch_size=128]"
+            echo "       [--eval_every=1000] [--eval_num_batches=20] [--eval_num_batches_final=100]"
+            echo "       [--bd3lm_compute_matched=True]  # True=equal FLOPs, False=equal loss tokens"
             exit 1
             ;;
     esac
@@ -64,11 +104,15 @@ if [ -n "${WANDB_API_KEY}" ]; then
     wandb login --relogin "${WANDB_API_KEY}"
 fi
 
-# Build model name with ratio suffix, and "_test" suffix in test mode
+# Build model name with ratio suffix, "_adjust" if supervision-matched, "_test" suffix in test mode
 if [ "${TEST_MODE}" = "true" ]; then
     MODEL_NAME="${BASE_MODEL_NAME}_r${DATA_RATIO}_test"
 else
-    MODEL_NAME="${BASE_MODEL_NAME}_r${DATA_RATIO}"
+    if [ "${BD3LM_COMPUTE_MATCHED}" = "False" ]; then
+        MODEL_NAME="${BASE_MODEL_NAME}_r${DATA_RATIO}_adjust"
+    else
+        MODEL_NAME="${BASE_MODEL_NAME}_r${DATA_RATIO}"
+    fi
 fi
 
 # Export environment variables
@@ -135,15 +179,16 @@ case "${VARIANT}" in
             --wandb_group="${WANDB_GROUP}" \
             --depth=${DEPTH} \
             --block_size=${BLOCK_SIZE} \
-            --prefix_pure_tokens=1 \
-            --is_causal=False \
-            --max_seq_len=512 \
-            --device_batch_size=128 \
+            --prefix_pure_tokens=${PREFIX_PURE_TOKENS} \
+            --is_causal=${IS_CAUSAL} \
+            --max_seq_len=${MAX_SEQ_LEN} \
+            --device_batch_size=${DEVICE_BATCH_SIZE} \
             --target_param_data_ratio=${DATA_RATIO} \
             --target_shift=-1 \
-            --eval_every=1000 \
-            --eval_num_batches=20 \
-            --eval_num_batches_final=100
+            --eval_every=${EVAL_EVERY} \
+            --eval_num_batches=${EVAL_NUM_BATCHES} \
+            --eval_num_batches_final=${EVAL_NUM_BATCHES_FINAL} \
+            --bd3lm_compute_matched=${BD3LM_COMPUTE_MATCHED}
         ;;
     "ts1")
         # BD3LM with target_shift=1 (predict 1st position in each block)
@@ -152,15 +197,16 @@ case "${VARIANT}" in
             --wandb_group="${WANDB_GROUP}" \
             --depth=${DEPTH} \
             --block_size=${BLOCK_SIZE} \
-            --prefix_pure_tokens=1 \
-            --is_causal=False \
-            --max_seq_len=512 \
-            --device_batch_size=128 \
+            --prefix_pure_tokens=${PREFIX_PURE_TOKENS} \
+            --is_causal=${IS_CAUSAL} \
+            --max_seq_len=${MAX_SEQ_LEN} \
+            --device_batch_size=${DEVICE_BATCH_SIZE} \
             --target_param_data_ratio=${DATA_RATIO} \
             --target_shift=1 \
-            --eval_every=1000 \
-            --eval_num_batches=20 \
-            --eval_num_batches_final=100
+            --eval_every=${EVAL_EVERY} \
+            --eval_num_batches=${EVAL_NUM_BATCHES} \
+            --eval_num_batches_final=${EVAL_NUM_BATCHES_FINAL} \
+            --bd3lm_compute_matched=${BD3LM_COMPUTE_MATCHED}
         ;;
     "ts2")
         # BD3LM with target_shift=2 (predict 2nd position in each block)
@@ -169,15 +215,16 @@ case "${VARIANT}" in
             --wandb_group="${WANDB_GROUP}" \
             --depth=${DEPTH} \
             --block_size=${BLOCK_SIZE} \
-            --prefix_pure_tokens=1 \
-            --is_causal=False \
-            --max_seq_len=512 \
-            --device_batch_size=128 \
+            --prefix_pure_tokens=${PREFIX_PURE_TOKENS} \
+            --is_causal=${IS_CAUSAL} \
+            --max_seq_len=${MAX_SEQ_LEN} \
+            --device_batch_size=${DEVICE_BATCH_SIZE} \
             --target_param_data_ratio=${DATA_RATIO} \
             --target_shift=2 \
-            --eval_every=1000 \
-            --eval_num_batches=20 \
-            --eval_num_batches_final=100
+            --eval_every=${EVAL_EVERY} \
+            --eval_num_batches=${EVAL_NUM_BATCHES} \
+            --eval_num_batches_final=${EVAL_NUM_BATCHES_FINAL} \
+            --bd3lm_compute_matched=${BD3LM_COMPUTE_MATCHED}
         ;;
     "ts3")
         # BD3LM with target_shift=3 (predict 3rd position in each block)
@@ -186,15 +233,16 @@ case "${VARIANT}" in
             --wandb_group="${WANDB_GROUP}" \
             --depth=${DEPTH} \
             --block_size=${BLOCK_SIZE} \
-            --prefix_pure_tokens=1 \
-            --is_causal=False \
-            --max_seq_len=512 \
-            --device_batch_size=128 \
+            --prefix_pure_tokens=${PREFIX_PURE_TOKENS} \
+            --is_causal=${IS_CAUSAL} \
+            --max_seq_len=${MAX_SEQ_LEN} \
+            --device_batch_size=${DEVICE_BATCH_SIZE} \
             --target_param_data_ratio=${DATA_RATIO} \
             --target_shift=3 \
-            --eval_every=1000 \
-            --eval_num_batches=20 \
-            --eval_num_batches_final=100
+            --eval_every=${EVAL_EVERY} \
+            --eval_num_batches=${EVAL_NUM_BATCHES} \
+            --eval_num_batches_final=${EVAL_NUM_BATCHES_FINAL} \
+            --bd3lm_compute_matched=${BD3LM_COMPUTE_MATCHED}
         ;;
     "ts4")
         # BD3LM with target_shift=4 (predict 4th/last position in each block)
@@ -203,15 +251,16 @@ case "${VARIANT}" in
             --wandb_group="${WANDB_GROUP}" \
             --depth=${DEPTH} \
             --block_size=${BLOCK_SIZE} \
-            --prefix_pure_tokens=1 \
-            --is_causal=False \
-            --max_seq_len=512 \
-            --device_batch_size=128 \
+            --prefix_pure_tokens=${PREFIX_PURE_TOKENS} \
+            --is_causal=${IS_CAUSAL} \
+            --max_seq_len=${MAX_SEQ_LEN} \
+            --device_batch_size=${DEVICE_BATCH_SIZE} \
             --target_param_data_ratio=${DATA_RATIO} \
             --target_shift=4 \
-            --eval_every=1000 \
-            --eval_num_batches=20 \
-            --eval_num_batches_final=100
+            --eval_every=${EVAL_EVERY} \
+            --eval_num_batches=${EVAL_NUM_BATCHES} \
+            --eval_num_batches_final=${EVAL_NUM_BATCHES_FINAL} \
+            --bd3lm_compute_matched=${BD3LM_COMPUTE_MATCHED}
         ;;
     *)
         echo "Unknown variant: ${VARIANT}"

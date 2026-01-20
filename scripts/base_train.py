@@ -41,6 +41,7 @@ is_causal = True # the model' attn direction
 
 noise_total_steps = 16 # Noisy for pdlm
 bd3lm_effective_ratio = None # For bd3lm: auto-computed if None, or override with explicit value
+bd3lm_compute_matched = True # If True, don't adjust iterations for BD3LM (compute-matched). If False, adjust to match loss tokens (supervision-matched).
 # Debug
 debug = False
 # Training horizon. Only one of these 3 will be used, in this order of precedence.
@@ -239,8 +240,10 @@ elif target_param_data_ratio > 0:
 else:
     raise ValueError("No training horizon specified")
 
-# For BD3LM: adjust iterations to account for lower effective token ratio
-# BD3LM only computes loss on masked positions, so we need more iterations to see same effective tokens
+# For BD3LM: optionally adjust iterations to account for lower effective token ratio
+# BD3LM only computes loss on masked positions
+# - bd3lm_compute_matched=True (default): no adjustment, compare at equal compute/FLOPs
+# - bd3lm_compute_matched=False: adjust iterations to match loss tokens (supervision-matched)
 if model_type == "bd3lm":
     # Auto-compute bd3lm_effective_ratio if not specified
     if bd3lm_effective_ratio is None:
@@ -252,10 +255,12 @@ if model_type == "bd3lm":
             bd3lm_effective_ratio = (1.0 / block_size + 1.0) / 2.0
         print0(f"BD3LM auto-computed effective_ratio={bd3lm_effective_ratio:.4f} (target_shift={target_shift}, block_size={block_size})")
 
-    if bd3lm_effective_ratio < 1.0:
+    if bd3lm_compute_matched:
+        print0(f"BD3LM compute_matched=True: no iteration adjustment (comparing at equal FLOPs)")
+    elif bd3lm_effective_ratio < 1.0:
         original_iterations = num_iterations
         num_iterations = int(num_iterations / bd3lm_effective_ratio)
-        print0(f"BD3LM effective_ratio={bd3lm_effective_ratio:.4f} => adjusted iterations: {original_iterations:,} -> {num_iterations:,}")
+        print0(f"BD3LM compute_matched=False, effective_ratio={bd3lm_effective_ratio:.4f} => adjusted iterations: {original_iterations:,} -> {num_iterations:,}")
 total_tokens = total_batch_size * num_iterations
 print0(f"Total number of training tokens: {total_tokens:,}")
 print0(f"Tokens : Params ratio: {total_batch_size * num_iterations / num_params:.2f}") # Chinchilla is ~20
@@ -404,27 +409,36 @@ while True:
             else:
                 # Core metrics (all masked)
                 print0(f"  [normal mode] overall_loss: {eval_result['overall_loss']:.4f}, overall_ppl: {eval_result['overall_ppl']:.2f}")
+                # Position-centric printing: each position on one line with all suffix metrics
                 for pos in range(block_size):
-                    print0(f"    pos {pos}: loss={eval_result['per_pos_loss'][pos]:.4f}, ppl={eval_result['per_pos_ppl'][pos]:.2f}")
+                    pos_data = eval_result["positions"][pos]
+                    line = f"    pos {pos}: loss={pos_data['loss']:.2f}, ppl={pos_data['ppl']:.1f}"
+                    # Append suffix metrics for this position
+                    max_suffix_for_pos = block_size - 1 - pos
+                    for s in range(1, max_suffix_for_pos + 1):
+                        if f"loss_{s}suffix" in pos_data:
+                            line += f" | {s}s={pos_data[f'loss_{s}suffix']:.2f}"
+                    print0(line)
+                # Build log data for wandb
                 log_data = {
                     "step": step,
                     "eval/overall_loss": eval_result["overall_loss"],
                     "eval/overall_ppl": eval_result["overall_ppl"],
                 }
                 for pos in range(block_size):
-                    log_data[f"eval/pos_{pos}_loss"] = eval_result["per_pos_loss"][pos]
-                    log_data[f"eval/pos_{pos}_ppl"] = eval_result["per_pos_ppl"][pos]
-                # Suffix metrics
-                for s in range(1, block_size):
-                    suffix_key = f"suffix_{s}"
-                    if suffix_key in eval_result:
-                        suffix_data = eval_result[suffix_key]
-                        print0(f"    {s} suffix clear: overall_loss={suffix_data['overall_loss']:.4f}, overall_ppl={suffix_data['overall_ppl']:.2f}")
-                        log_data[f"eval/suffix_{s}_overall_loss"] = suffix_data["overall_loss"]
-                        log_data[f"eval/suffix_{s}_overall_ppl"] = suffix_data["overall_ppl"]
-                        for i, pos in enumerate(suffix_data["positions"]):
-                            log_data[f"eval/suffix_{s}_pos_{pos}_loss"] = suffix_data["per_pos_loss"][i]
-                            log_data[f"eval/suffix_{s}_pos_{pos}_ppl"] = suffix_data["per_pos_ppl"][i]
+                    pos_data = eval_result["positions"][pos]
+                    log_data[f"eval/pos_{pos}_loss"] = pos_data["loss"]
+                    log_data[f"eval/pos_{pos}_ppl"] = pos_data["ppl"]
+                    # Log suffix metrics per position
+                    max_suffix_for_pos = block_size - 1 - pos
+                    for s in range(1, max_suffix_for_pos + 1):
+                        if f"loss_{s}suffix" in pos_data:
+                            log_data[f"eval/pos_{pos}_loss_{s}suffix"] = pos_data[f"loss_{s}suffix"]
+                            log_data[f"eval/pos_{pos}_ppl_{s}suffix"] = pos_data[f"ppl_{s}suffix"]
+                # Also log overall suffix metrics
+                for s, suffix_data in eval_result.get("suffix_overall", {}).items():
+                    log_data[f"eval/suffix_{s}_overall_loss"] = suffix_data["overall_loss"]
+                    log_data[f"eval/suffix_{s}_overall_ppl"] = suffix_data["overall_ppl"]
                 wandb_run.log(log_data)
         elif model_type == "pdlm":
             pass  # TODO: PDLM evaluation
