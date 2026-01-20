@@ -161,12 +161,10 @@ for MODEL_DIR in "${MODELS[@]}"; do
     echo "  (target_shift auto-detected from checkpoint)"
     echo "------------------------------------------------------------"
 
-    # Set environment and run evaluation
+    # Run evaluation with direct checkpoint path
     # Python script reads target_shift from checkpoint metadata automatically
-    export NANOCHAT_BASE_DIR="${MODEL_DIR}"
-
-    # Run evaluation and capture output
     OUTPUT=$(python -m scripts.bd3lm_eval \
+        --ckpt_dir="${MODEL_DIR}" \
         --num_batches=${NUM_BATCHES} \
         --output_json="${MODEL_DIR}/eval_result.json" 2>&1)
 

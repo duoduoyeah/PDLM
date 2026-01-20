@@ -1,4 +1,4 @@
-01/19
+01/19~present
 1. Fixed `prefix_sliding_tokens` synchronization bug between attention mask and data masking. [Done]
 2. continue working on the tokenizer, need some rewrite of previous code [In Progress]
     * Refactor tokenizer creation into `TokenizerBuilder` for modularity.
@@ -11,6 +11,7 @@
 8. test bd3lm_eval.sh [Done]
 9. train new 8d bd3lm [TODO]
 10. Enabled `target_shift` passing to `BDLMConfig` and `base_train.py`, and enhanced `eval_bd3lm.sh` to auto-detect `target_shift` from checkpoints and report results more clearly. [Done]
+11. Added `--ckpt_dir` argument to `bd3lm_eval.py` and `eval_bd3lm.sh` to support direct checkpoint path specification, overriding `model_tag`. [Done]
 
 
 01/18

@@ -25,7 +25,7 @@ from nanochat.attn_masks import gen_mask
 from nanochat.tokenizer import get_tokenizer
 
 
-def load_bd3lm_model(model_tag=None, step=None, device_type="auto"):
+def load_bd3lm_model(model_tag=None, step=None, device_type="auto", ckpt_dir=None):
     """
     Load a BD3LM model from checkpoint.
 
@@ -33,6 +33,7 @@ def load_bd3lm_model(model_tag=None, step=None, device_type="auto"):
         model_tag: Model directory name (e.g., "d8"). If None, uses largest model.
         step: Checkpoint step. If None, uses last step.
         device_type: "cuda", "cpu", "mps", or "auto"
+        ckpt_dir: Direct path to checkpoint directory. If provided, overrides model_tag.
 
     Returns:
         model: BD3LM model in eval mode
@@ -43,14 +44,20 @@ def load_bd3lm_model(model_tag=None, step=None, device_type="auto"):
     device_type = autodetect_device_type() if device_type == "auto" else device_type
     ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
 
-    base_dir = get_base_dir()
-    checkpoint_dir = os.path.join(base_dir, "base_checkpoints")
+    # Determine checkpoint directory
+    if ckpt_dir is not None:
+        # Direct path provided - use it directly
+        print0(f"Using direct checkpoint path: {ckpt_dir}")
+    else:
+        # Use base_dir/base_checkpoints/model_tag structure
+        base_dir = get_base_dir()
+        checkpoint_dir = os.path.join(base_dir, "base_checkpoints")
 
-    if model_tag is None:
-        model_tag = find_largest_model(checkpoint_dir)
-        print0(f"No model_tag provided, using largest: {model_tag}")
+        if model_tag is None:
+            model_tag = find_largest_model(checkpoint_dir)
+            print0(f"No model_tag provided, using largest: {model_tag}")
 
-    ckpt_dir = os.path.join(checkpoint_dir, model_tag)
+        ckpt_dir = os.path.join(checkpoint_dir, model_tag)
 
     if step is None:
         step = find_last_step(ckpt_dir)
@@ -91,6 +98,7 @@ def run_eval(
     target_shift=None,
     num_batches=20,
     device_type="auto",
+    ckpt_dir=None,
 ):
     """
     Run BD3LM evaluation.
@@ -101,12 +109,13 @@ def run_eval(
         target_shift: None for auto-detect from checkpoint, -1 for normal mode, >= 1 for target_shift mode
         num_batches: Number of validation batches to evaluate
         device_type: Device type
+        ckpt_dir: Direct path to checkpoint directory. If provided, overrides model_tag.
 
     Returns:
         eval_result: Dict with evaluation metrics
     """
     # Load model
-    model, meta_data, device, autocast_ctx = load_bd3lm_model(model_tag, step, device_type)
+    model, meta_data, device, autocast_ctx = load_bd3lm_model(model_tag, step, device_type, ckpt_dir=ckpt_dir)
 
     # Extract config from metadata
     user_config = meta_data.get("user_config", {})
@@ -219,6 +228,7 @@ def print_results(eval_result, target_shift, block_size):
 def main():
     parser = argparse.ArgumentParser(description="Standalone BD3LM evaluation")
     parser.add_argument("--model_tag", type=str, default=None, help="Model directory name (e.g., d8)")
+    parser.add_argument("--ckpt_dir", type=str, default=None, help="Direct path to checkpoint directory (overrides model_tag)")
     parser.add_argument("--step", type=int, default=None, help="Checkpoint step (default: last)")
     parser.add_argument("--target_shift", type=int, default=None, help="Target shift mode (default: auto-detect from checkpoint)")
     parser.add_argument("--num_batches", type=int, default=20, help="Number of validation batches")
@@ -233,14 +243,18 @@ def main():
         target_shift=args.target_shift,
         num_batches=args.num_batches,
         device_type=args.device,
+        ckpt_dir=args.ckpt_dir,
     )
 
     # Get block_size and target_shift for printing (re-load meta to get it)
-    # This is a bit redundant but keeps the code clean
-    base_dir = get_base_dir()
-    checkpoint_dir = os.path.join(base_dir, "base_checkpoints")
-    model_tag = args.model_tag or find_largest_model(checkpoint_dir)
-    ckpt_dir = os.path.join(checkpoint_dir, model_tag)
+    # Determine ckpt_dir for metadata loading
+    if args.ckpt_dir is not None:
+        ckpt_dir = args.ckpt_dir
+    else:
+        base_dir = get_base_dir()
+        checkpoint_dir = os.path.join(base_dir, "base_checkpoints")
+        model_tag = args.model_tag or find_largest_model(checkpoint_dir)
+        ckpt_dir = os.path.join(checkpoint_dir, model_tag)
     step = args.step or find_last_step(ckpt_dir)
     meta_path = os.path.join(ckpt_dir, f"meta_{step:06d}.json")
     with open(meta_path, "r") as f:
