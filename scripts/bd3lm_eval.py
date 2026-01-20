@@ -22,7 +22,7 @@ from nanochat.bd3lm import BDLM, BDLMConfig
 from nanochat.bd3lm_eval import eval_bd3lm
 from nanochat.dataloader import tokenizing_distributed_data_loader_with_state
 from nanochat.attn_masks import gen_mask
-from nanochat.tokenizer import get_tokenizer
+from nanochat.tokenizer import get_tokenizer, get_tokenizer_from_dir
 
 
 def load_bd3lm_model(model_tag=None, step=None, device_type="auto", ckpt_dir=None):
@@ -135,7 +135,14 @@ def run_eval(
 
     # Get mask token id from tokenizer if not in config
     if mask_token_id == -1:
-        tokenizer = get_tokenizer()
+        # When using direct ckpt_dir (e.g., HF downloaded model), tokenizer is at model_dir/tokenizer/
+        # ckpt_dir structure: ${MODEL_DIR}/base_checkpoints/d8/ -> tokenizer at ${MODEL_DIR}/tokenizer/
+        if ckpt_dir is not None:
+            model_dir = os.path.dirname(os.path.dirname(ckpt_dir))
+            tokenizer_dir = os.path.join(model_dir, "tokenizer")
+            tokenizer = get_tokenizer_from_dir(tokenizer_dir)
+        else:
+            tokenizer = get_tokenizer()
         try:
             mask_token_id = tokenizer.encode_special("<|MASK|>")
         except KeyError:

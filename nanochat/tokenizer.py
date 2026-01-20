@@ -386,6 +386,10 @@ def get_tokenizer():
     # return HuggingFaceTokenizer.from_directory(tokenizer_dir)
     return RustBPETokenizer.from_directory(tokenizer_dir)
 
+def get_tokenizer_from_dir(tokenizer_dir):
+    """Load tokenizer from a specific directory (e.g., HF downloaded model folder)."""
+    return RustBPETokenizer.from_directory(tokenizer_dir)
+
 def get_token_bytes(device="cpu"):
     import torch
     from nanochat.common import get_base_dir

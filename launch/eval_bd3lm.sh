@@ -208,9 +208,6 @@ for MODEL_DIR in "${MODELS[@]}"; do
     CKPT_DIR="$CKPT_DIRS"
     echo "  Checkpoint dir: ${CKPT_DIR}"
 
-    # Set NANOCHAT_BASE_DIR so get_tokenizer() finds the tokenizer in the model directory
-    export NANOCHAT_BASE_DIR="${MODEL_DIR}"
-
     # Run evaluation with direct checkpoint path
     # Python script reads target_shift from checkpoint metadata automatically
     OUTPUT=$(python -m scripts.bd3lm_eval \
