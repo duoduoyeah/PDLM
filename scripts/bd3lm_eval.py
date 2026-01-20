@@ -154,8 +154,13 @@ def run_eval(
     # Generate attention mask for eval (prefix_sliding_tokens=0 for eval)
     attn_mask = gen_mask(max_seq_len, block_size, attn_backend="sdpa", is_causal=is_causal, prefix_sliding_tokens=0).to(device=device)
 
-    # Run evaluation
-    print0(f"Running evaluation on {num_batches} batches...")
+    # Run evaluation - report actual data size
+    total_sequences = num_batches * device_batch_size
+    blocks_per_seq = max_seq_len // block_size
+    eval_blocks_per_seq = blocks_per_seq - 1  # skip block 0
+    total_eval_blocks = total_sequences * eval_blocks_per_seq
+    print0(f"Running evaluation: {num_batches} batches × {device_batch_size} seqs = {total_sequences} sequences")
+    print0(f"  {blocks_per_seq} blocks/seq, {eval_blocks_per_seq} evaluated (skip block 0) = {total_eval_blocks:,} total blocks")
     eval_result = eval_bd3lm(
         model=model,
         val_loader=val_loader,
