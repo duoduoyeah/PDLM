@@ -12,6 +12,7 @@
 9. train new 8d bd3lm [TODO]
 10. Enabled `target_shift` passing to `BDLMConfig` and `base_train.py`, and enhanced `eval_bd3lm.sh` to auto-detect `target_shift` from checkpoints and report results more clearly. [Done]
 11. Added `--ckpt_dir` argument to `bd3lm_eval.py` and `eval_bd3lm.sh` to support direct checkpoint path specification, overriding `model_tag`. [Done]
+12. Documented Stage 1 plan for single-layer group tokens in `sp_tokens_rewrite_plan.md` and added PDLM computational overhead analysis in `computation_overhead.md`. [Done]
 
 
 01/18

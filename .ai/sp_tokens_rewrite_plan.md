@@ -201,3 +201,71 @@ BaseTokenizer (pure)
   ├── tokenizer_full/
   └── tokenizer_soft_cluster/
 ```
+
+---
+
+## Stage 1: Single-Layer Group Tokens
+
+### Base Tokenizers
+
+| Base Tokenizer | Pure Vocab | With MASK | Notes |
+|----------------|------------|-----------|-------|
+| **small** | 4096 | 4096 + 1 = 4097 | |
+| **medium** | 8192 | 8192 + 1 = 8193 | |
+
+### Parameters to Explore
+
+| Parameter | Name | Meaning |
+|-----------|------|---------|
+| **A** | `num_groups` | Number of group tokens at this level. Fewer groups = higher noise (each group covers more pure tokens) |
+| **B** | `overlap_k` | Each pure token belongs to k different group tokens. k=1 is hard clustering, k>1 is overlapping |
+
+### Model Architecture Reference (pdlm.py)
+
+- `wte`: Embedding uses `all_vocab_size` (pure + group + MASK tokens)
+- `lm_head`: Output uses `pure_vocab_size` only (predicts pure tokens)
+- MASK token is NOT a pure token
+
+### Parameter Space
+
+**num_groups** range (for 4096 base):
+| num_groups | tokens/group | noise level |
+|------------|--------------|-------------|
+| 1024 | 4 | lowest |
+| 256 | 16 | low |
+| 64 | 64 | medium |
+| 16 | 256 | high |
+| 4 | 1024 | highest |
+
+**overlap_k**: 1, 2, 4
+
+### Training Matrix (Lower Triangle)
+
+Higher noise allows higher k. Low noise → k=1 only.
+
+```
+                   num_groups (noise level →)
+                 1024   256    64    16     4
+              ┌─────────────────────────────────
+overlap_k=1   │  ✓      ✓      ✓     ✓      ✓
+overlap_k=2   │  -      -      ✓     ✓      ✓
+overlap_k=4   │  -      -      -     ✓      ✓
+```
+
+Same pattern applies to 8192 base (2048, 512, 128, 32, 8 groups).
+
+**Stage 1 scope**: 4096 base only → 10 models
+
+### Design Decisions
+
+**Unequal group sizes from k-means**: Accept it (default). Same as how LM training accepts unequal token lengths - natural imbalance, don't over-engineer. Track stats (min/max/std) for visibility.
+
+**Alternative: bpb-style weighting**: Weight loss by 1/group_size, analogous to how bpb spreads loss over bytes. Large groups get "tolerated" more. Optional experiment for later.
+
+**Evaluation plan**: Analyze per-group accuracy after training - which groups are easy/hard to denoise? Correlate with group size, embedding spread, etc. Reference: `loss_eval.py` uses bpb (bits-per-byte) which weights tokens by byte length - similar idea of non-uniform eval when it makes sense.
+
+### Math Directions (to explore later)
+
+- **Information theory**: H = log₂(tokens/group) bits uncertainty; overlap_k ≤ √(tokens/group) as heuristic
+- **Diffusion analogy**: higher noise needs more redundancy, similar to variance-dependent sampling in score matching
+- **Clustering**: overlap helps boundary tokens; less useful when clusters are small/tight

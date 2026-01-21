@@ -1,7 +1,7 @@
 # Claude Collaboration Notes
 
 ## Project Context
-Working on BD3LM (Block Diffusion Language Model) implementation in nanochat.
+Working on sp_tokens rewrite for flexible tokenizer generation (hierarchical group tokens, configurable layers, overlap tokens). See `.ai/sp_tokens_rewrite_plan.md` for details.
 
 When the user let you do something, first talk with the user patiently. Make sure the user has a clear plan and design, then impl, no hurry.
 
