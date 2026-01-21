@@ -222,9 +222,20 @@ BaseTokenizer (pure)
 
 ### Model Architecture Reference (pdlm.py)
 
-- `wte`: Embedding uses `all_vocab_size` (pure + group + MASK tokens)
-- `lm_head`: Output uses `pure_vocab_size` only (predicts pure tokens)
-- MASK token is NOT a pure token
+**Current design:**
+- `wte`: `all_vocab_size` (pure + group + MASK)
+- `lm_head`: `pure_vocab_size` only
+
+**Proposed design (Stage 1 rewrite):**
+- `wte`: `all_vocab_size` (pure + group + MASK)
+- `lm_head`: `pure_vocab_size + num_groups` (pure + group, NO MASK)
+- **MASK token at end of vocab** - input-only, never predicted
+
+**Two-stage denoising:**
+1. MASK → Group: model predicts group token directly (CE loss on group_id)
+2. Group → Pure: model predicts pure token directly (CE loss on pure_id)
+
+Both stages use standard CE loss and argmax - symmetric and compatible.
 
 ### Parameter Space
 
@@ -263,6 +274,8 @@ Same pattern applies to 8192 base (2048, 512, 128, 32, 8 groups).
 **Alternative: bpb-style weighting**: Weight loss by 1/group_size, analogous to how bpb spreads loss over bytes. Large groups get "tolerated" more. Optional experiment for later.
 
 **Evaluation plan**: Analyze per-group accuracy after training - which groups are easy/hard to denoise? Correlate with group size, embedding spread, etc. Reference: `loss_eval.py` uses bpb (bits-per-byte) which weights tokens by byte length - similar idea of non-uniform eval when it makes sense.
+
+**Logit leakage analysis**: In Stage 2 (Group → Pure), check how much probability mass goes to tokens outside the current group. If model learns group structure well, most mass should stay within group members.
 
 ### Math Directions (to explore later)
 

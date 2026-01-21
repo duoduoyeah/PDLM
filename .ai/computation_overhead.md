@@ -44,25 +44,24 @@ options = pure_to_noisy_map[pure_ids, noisy_levels]  # (B, T) → (B, T, fanout)
 - Tensor indexing: O(B * T)
 - Random sampling: O(B * T)
 
-#### 3.2 transit_noisy_tokens() - Inference time
+#### 3.2 transit_noisy_tokens() - Inference time (OLD design)
 
 ```python
-noisy_levels = noisy_level_map[noisy_ids, 0]  # lookup
-noisy_levels = where(noisy_levels > 0, noisy_levels - 1, noisy_levels)
-noisy_levels = cummax(noisy_levels, dim=-1)  # enforce monotonic
-options = pure_to_noisy_map[pure_ids, noisy_levels]
-```
-
-With topk (pure_ids has shape B, T, K):
-```python
-# scatter_add to aggregate probabilities across K*fanout options
-acc_probs = zeros(B, T, vocab_size)
+# OLD: complex aggregation with topk and scatter_add
 acc_probs.scatter_add_(2, flat_options, flat_weights)
 return acc_probs.argmax(dim=-1)
 ```
 
-- Scatter add: O(B * T * K * fanout)
+- Scatter add: O(B * T * K * fanout) - expensive
 - Argmax over vocab: O(B * T * V)
+
+#### 3.2 NEW design: Direct prediction
+
+With lm_head outputting `pure + group` tokens:
+- Stage 1 (MASK → Group): argmax over group token range
+- Stage 2 (Group → Pure): argmax over pure token range
+
+No scatter_add needed. Just masked argmax: O(B * T)
 
 #### 3.3 get_random_noisy_level() - Training time
 
@@ -81,9 +80,11 @@ levels = dist.sample()
 |-----------|------|------------|-------|
 | 2x sequence length | Train | O(4T² attention) | Main overhead |
 | Larger wte | Both | O(1) extra memory | Negligible compute |
+| Larger lm_head | Both | O(D * num_groups) extra | NEW: output group tokens |
 | noise_tokens | Train | O(B*T) | Cheap |
 | get_random_noisy_level | Train | O(B*T) | Cheap |
-| transit_noisy_tokens | Inference | O(B*T*K*fanout) + O(B*T*V) | Potentially expensive |
+| transit (OLD) | Inference | O(B*T*K*fanout) + O(B*T*V) | scatter_add - expensive |
+| transit (NEW) | Inference | O(B*T) | masked argmax - cheap |
 
 ---
 

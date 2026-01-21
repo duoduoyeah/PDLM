@@ -1,4 +1,14 @@
-01/19~present
+01/21
+1. Created `group_tokenizer/` folder with builder, config, clustering, token_map modules [Done]
+2. Moved `sp_tokens/` to `old_sp_tokens/` for reference [Done]
+3. Modify PDLM lm_head to output `pure + group` tokens (no MASK) [TODO]
+4. Test TokenizerBuilder on real 4096 embeddings [TODO]
+5. Implement two-stage training loss (MASK→Group, Group→Pure) [TODO]
+6. Per-group accuracy evaluation script [TODO]
+7. Logit leakage analysis (check prob mass outside group) [TODO]
+8. 
+
+01/19~01/20
 1. Fixed `prefix_sliding_tokens` synchronization bug between attention mask and data masking. [Done]
 2. continue working on the tokenizer, need some rewrite of previous code [In Progress]
     * Refactor tokenizer creation into `TokenizerBuilder` for modularity.
@@ -9,7 +19,7 @@
 6. Added `bd3lm_compute_matched` arg (default=True) to control iteration adjustment vs compute-matched. [Done]
 7. Updated `run_bd3lm.sh` to expose `bd3lm_compute_matched` and handle naming. [Done]
 8. test bd3lm_eval.sh [Done]
-9. train new 8d bd3lm [TODO]
+9. train new 8d bd3lm [Done]
 10. Enabled `target_shift` passing to `BDLMConfig` and `base_train.py`, and enhanced `eval_bd3lm.sh` to auto-detect `target_shift` from checkpoints and report results more clearly. [Done]
 11. Added `--ckpt_dir` argument to `bd3lm_eval.py` and `eval_bd3lm.sh` to support direct checkpoint path specification, overriding `model_tag`. [Done]
 12. Documented Stage 1 plan for single-layer group tokens in `sp_tokens_rewrite_plan.md` and added PDLM computational overhead analysis in `computation_overhead.md`. [Done]
