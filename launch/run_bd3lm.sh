@@ -90,6 +90,7 @@ WANDB_GROUP="bd3lm_d${DEPTH}"
 MODEL_REPO="duoduoyeah/bd3lm_d${DEPTH}"
 DRIVE_BASE="/content/drive/MyDrive/nanochat"
 BASE_TOKENIZER_REPO="/content/drive/MyDrive/nanochat/tokenizer/simplestory_tokenizer/4096/tokenizer_with_mask"
+LOCAL_DATA_DIR="/content/simple_story_data"
 
 # Load secrets from .env file (created by: %run launch/setup_secrets.py)
 if [ -f "launch/.env" ]; then
@@ -162,10 +163,18 @@ python -c "from nanochat.common import get_base_dir; print('Base dir:', get_base
 # Prepare report
 python -m nanochat.report reset
 
-# Download dataset (train and validation shards)
-echo "Downloading dataset..."
-python -m nanochat.dataset -n 10 --split both
-echo "Dataset download complete."
+# Setup dataset: download to shared local dir once, then symlink to model dir
+if [ ! -d "${LOCAL_DATA_DIR}" ]; then
+    echo "Downloading dataset to shared local dir..."
+    NANOCHAT_BASE_DIR="/content" python -m nanochat.dataset -n 10 --split both
+    echo "Dataset download complete."
+else
+    echo "Shared dataset already exists at ${LOCAL_DATA_DIR}"
+fi
+
+# Symlink model dir to shared local data
+ln -sf "${LOCAL_DATA_DIR}" "${NANOCHAT_BASE_DIR}/simple_story_data"
+echo "Linked: ${NANOCHAT_BASE_DIR}/simple_story_data -> ${LOCAL_DATA_DIR}"
 
 # ============================================================
 # Training - select config based on MODEL_NAME
@@ -275,8 +284,8 @@ esac
 
 echo "=== Training complete for ${MODEL_NAME} ==="
 
-# Remove dataset to save space (not needed in model repo)
-rm -rf "${NANOCHAT_BASE_DIR}/simple_story_data"
+# Remove dataset symlink (not needed in model repo, actual data stays in shared local dir)
+rm -f "${NANOCHAT_BASE_DIR}/simple_story_data"
 
 # Skip upload in test mode
 if [ "${TEST_MODE}" = "true" ]; then
