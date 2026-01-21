@@ -189,6 +189,17 @@ for MODEL_DIR in "${MODELS[@]}"; do
     echo "  (target_shift auto-detected from checkpoint)"
     echo "------------------------------------------------------------"
 
+    # Create symlink to shared data directory so get_base_dir() finds data
+    if [ ! -e "${MODEL_DIR}/simple_story_data" ]; then
+        ln -s "${DATA_DIR}" "${MODEL_DIR}/simple_story_data"
+        echo "  Created symlink: ${MODEL_DIR}/simple_story_data -> ${DATA_DIR}"
+    fi
+
+    # Set NANOCHAT_BASE_DIR to model directory so get_base_dir() finds both:
+    # - tokenizer at ${MODEL_DIR}/tokenizer
+    # - data at ${MODEL_DIR}/simple_story_data (symlink)
+    export NANOCHAT_BASE_DIR="${MODEL_DIR}"
+
     # Find the directory containing model_*.pt files (handles nested structures)
     CKPT_DIRS=$(find "${MODEL_DIR}/base_checkpoints" -name "model_*.pt" -printf '%h\n' 2>/dev/null | sort -u)
     CKPT_COUNT=$(echo "$CKPT_DIRS" | grep -c . 2>/dev/null || echo 0)
