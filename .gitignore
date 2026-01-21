@@ -9,3 +9,4 @@ eval_bundle/
 temp*
 .env
 launch/.env
+learn.md

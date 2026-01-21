@@ -1,5 +1,6 @@
 01/21
-1. Created `group_tokenizer/` folder with builder, config, clustering, token_map modules [Done]
+1. Research proper k-overlap clustering methods (current impl uses topk post-hoc, may not be optimal) [TODO]
+2. Created `group_tokenizer/` folder with builder, config, clustering, token_map modules [Done]
 2. Moved `sp_tokens/` to `old_sp_tokens/` for reference [Done]
 3. Modify PDLM lm_head to output `pure + group` tokens (no MASK) [TODO]
 4. Test TokenizerBuilder on real 4096 embeddings [TODO]
