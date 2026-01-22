@@ -3,6 +3,7 @@
 ## Project Context
 Working on sp_tokens rewrite for flexible tokenizer generation (hierarchical group tokens, configurable layers, overlap tokens). See `.ai/sp_tokens_rewrite_plan.md` for details.
 
+You need to maintain those .md file in `.ai` folder
 When the user let you do something, first talk with the user patiently. Make sure the user has a clear plan and design, then impl, no hurry.
 
 ## Notes

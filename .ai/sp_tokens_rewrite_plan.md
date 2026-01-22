@@ -19,6 +19,33 @@ nanochat/sp_tokens/
     └── dump.sh                # Shell wrapper
 ```
 
+### Tokenizer File Structure
+
+A tokenizer directory contains two files:
+
+| File | Contents | Purpose |
+|------|----------|---------|
+| `tokenizer.pkl` | Pickled `tiktoken.Encoding` | The actual tokenizer: `mergeable_ranks` (BPE merges), `special_tokens` dict, regex `pat_str` |
+| `token_bytes.pt` | Tensor `(vocab_size,)` int32 | Maps `token_id → num_utf8_bytes`. Used for bits-per-byte (bpb) metric. Special tokens = 0 |
+
+**Why token_bytes.pt?**
+
+Bits-per-byte (bpb) is a vocab-size-invariant evaluation metric. Instead of averaging loss per token, we weight by byte length:
+
+```python
+# From scripts/tok_train.py
+for token_id in range(vocab_size):
+    token_str = tokenizer.decode([token_id])
+    if token_str in special_set:
+        token_bytes.append(0)  # special tokens not counted in bpb
+    else:
+        token_bytes.append(len(token_str.encode("utf-8")))
+```
+
+Example: "hello" → 5 bytes, "你好" → 6 bytes (3 per CJK char), `<|MASK|>` → 0 bytes
+
+**When extending tokenizer**: New group tokens and MASK should have `token_bytes = 0` (they're special tokens, not real text).
+
 ---
 
 ## Current Features
@@ -282,3 +309,128 @@ Same pattern applies to 8192 base (2048, 512, 128, 32, 8 groups).
 - **Information theory**: H = log₂(tokens/group) bits uncertainty; overlap_k ≤ √(tokens/group) as heuristic
 - **Diffusion analogy**: higher noise needs more redundancy, similar to variance-dependent sampling in score matching
 - **Clustering**: overlap helps boundary tokens; less useful when clusters are small/tight
+
+### Overlap via Sub-groups (see `.ai/overlap_design.md`)
+
+Instead of topk post-hoc overlap, use **combinatorial sub-group design**:
+- Create `num_sub` sub-groups via clustering
+- Final groups = combinations of `sub_per_final` sub-groups
+- Complete design: num_final = C(num_sub, sub_per_final), overlap_k = C(num_sub-1, sub_per_final-1)
+
+Practical configs for noise level 1024 (vocab 4096):
+| Config | num_final | overlap_k |
+|--------|-----------|-----------|
+| (4,1) | 4 | 1 (baseline) |
+| (8,2) | 28 | 7 |
+| (12,3) | 220 | 55 |
+
+Tool: `uv run -m scripts.overlap_calc --target_noise 1024`
+
+---
+
+## Training Design: Two-Stage Loss with Overlap
+
+### Overview
+
+When `overlap_k > 1`, each pure token maps to **k valid group tokens**. Training involves two stages in the same batch:
+
+| Stage | Input Token | Target | Output Space |
+|-------|-------------|--------|--------------|
+| 1 | MASK | One of k valid groups | `num_groups` |
+| 2 | GROUP | Single pure token | `pure_vocab_size` |
+
+### Mixed Batch Design (Recommended)
+
+Within one B×2L batch, positions are mixed:
+- Some positions: MASK → Group (Stage 1)
+- Other positions: GROUP → Pure (Stage 2)
+
+```python
+# Training data contains:
+# - noisy_ids: (B, L) - mix of MASK and GROUP tokens
+# - stage_mask: (B, L) - True where input is MASK (Stage 1)
+# - valid_groups: (B, L, k) - k valid group targets for Stage 1 positions
+# - pure_targets: (B, L) - pure token targets for Stage 2 positions
+```
+
+### Logit Masking by Input Type
+
+**Key design**: Mask out invalid output logits based on input token type.
+
+Modify `pdlm.py` so that:
+- When input is **MASK** → logits for pure tokens = -inf (only group logits active)
+- When input is **GROUP** → logits for group tokens = -inf (only pure logits active)
+
+```python
+# lm_head outputs: (B, L, pure_vocab_size + num_groups)
+logits = self.lm_head(x)
+
+# Mask invalid outputs based on input type
+# is_mask_input: (B, L) - True where input token is MASK
+logits_pure = logits[:, :, :pure_vocab_size]
+logits_group = logits[:, :, pure_vocab_size:]
+
+# Zero out (or -inf) invalid parts
+logits_pure = logits_pure.masked_fill(is_mask_input.unsqueeze(-1), float('-inf'))
+logits_group = logits_group.masked_fill(~is_mask_input.unsqueeze(-1), float('-inf'))
+
+logits = torch.cat([logits_pure, logits_group], dim=-1)
+```
+
+This ensures:
+- Stage 1: softmax only over group tokens
+- Stage 2: softmax only over pure tokens
+
+### Loss Computation
+
+**Stage 1 (MASK → Group) with overlap_k > 1:**
+
+Use marginalized likelihood - probability of predicting ANY valid group:
+
+```python
+# valid_groups: (B, L, k) - indices of k valid groups for each position
+log_probs = F.log_softmax(logits_group, dim=-1)  # (B, L, num_groups)
+valid_log_probs = log_probs.gather(-1, valid_groups)  # (B, L, k)
+log_p_any_valid = torch.logsumexp(valid_log_probs, dim=-1)  # (B, L)
+stage1_loss = -log_p_any_valid  # NLL
+```
+
+Semantics: if model gives P=0.3 to group A and P=0.2 to group B (both valid), then P(correct) = 0.5, loss = -log(0.5).
+
+**Stage 2 (Group → Pure):**
+
+Standard single-target cross-entropy:
+
+```python
+stage2_loss = F.cross_entropy(logits_pure, pure_targets, reduction='none')
+```
+
+**Combined loss:**
+
+```python
+loss = torch.where(stage_mask, stage1_loss, stage2_loss).mean()
+```
+
+### Loss Scale Difference
+
+**Natural imbalance:**
+- Stage 1: picking 1-of-28 groups (with k=7 valid) → random baseline ≈ log(4) ≈ 1.4
+- Stage 2: picking 1-of-4096 pure tokens → random baseline ≈ log(4096) ≈ 8.3
+
+Stage 1 loss is naturally ~6x smaller.
+
+**Approach:**
+1. **First**: No adjustment - train with natural loss scales, observe behavior
+2. **Later**: If needed, add explicit scaling:
+   ```python
+   scale = math.log(pure_vocab_size) / math.log(num_groups)
+   loss = torch.where(stage_mask, stage1_loss * scale, stage2_loss).mean()
+   ```
+
+### Computation Overhead
+
+The multi-target loss adds negligible overhead:
+- `gather` over k indices: O(B × L × k)
+- `logsumexp` over k: O(B × L × k)
+
+With k=7, this is ~0.1% of total training cost (dominated by transformer forward pass).

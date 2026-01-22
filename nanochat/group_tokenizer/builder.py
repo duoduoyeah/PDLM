@@ -125,38 +125,52 @@ class TokenizerBuilder:
         import tiktoken
 
         config = self.config
-        base = self.base_tokenizer
+        enc = self.base_tokenizer.enc  # tiktoken.Encoding
 
-        # Get existing special tokens and mergeable ranks
-        # Note: This depends on how the base tokenizer is structured
-        # For now, we'll store the token names and IDs
+        # Extract components from base encoding
+        mergeable_ranks = enc._mergeable_ranks
+        pat_str = enc._pat_str
 
-        # Generate group token names
-        group_tokens = {}
+        # Get existing special tokens
+        if hasattr(enc, "_special_tokens"):
+            special_tokens = dict(enc._special_tokens)
+        else:
+            special_tokens = {tok: enc.encode_single_token(tok) for tok in enc.special_tokens_set}
+
+        # Add group tokens: <|G_0|>, <|G_1|>, ..., <|G_{num_groups-1}|>
+        self.group_tokens = {}
         for g in range(config.num_groups):
             token_name = f"<|G_{g}|>"
             token_id = self.pure_vocab_size + g
-            group_tokens[token_name] = token_id
+            special_tokens[token_name] = token_id
+            self.group_tokens[token_name] = token_id
 
         # Add MASK token at the end
         if config.include_mask:
             mask_id = self.pure_vocab_size + config.num_groups
-            group_tokens["<|MASK|>"] = mask_id
+            special_tokens["<|MASK|>"] = mask_id
+            self.group_tokens["<|MASK|>"] = mask_id
 
-        self.group_tokens = group_tokens
-        self.all_vocab_size = self.pure_vocab_size + config.num_groups + (1 if config.include_mask else 0)
+        # Create new tiktoken.Encoding with extended special tokens
+        self.extended_encoding = tiktoken.Encoding(
+            name="rustbpe_with_groups",
+            pat_str=pat_str,
+            mergeable_ranks=mergeable_ranks,
+            special_tokens=special_tokens,
+        )
 
-        # TODO: Actually extend the tiktoken tokenizer
-        # For now, just store the mapping
-        self.tokenizer = {
-            "base": base,
-            "group_tokens": group_tokens,
-            "all_vocab_size": self.all_vocab_size,
-        }
+        self.all_vocab_size = self.extended_encoding.n_vocab
 
     def save(self, output_dir: str):
         """Save tokenizer and token maps to directory."""
+        import pickle
+
         os.makedirs(output_dir, exist_ok=True)
+
+        # Save extended tokenizer as tokenizer.pkl
+        tokenizer_path = os.path.join(output_dir, "tokenizer.pkl")
+        with open(tokenizer_path, "wb") as f:
+            pickle.dump(self.extended_encoding, f)
 
         # Save token maps
         map_path = os.path.join(output_dir, "token_maps.pt")
@@ -190,7 +204,10 @@ class TokenizerBuilder:
             f.write(f"  mean: {group_sizes.float().mean().item():.1f}\n")
             f.write(f"  std: {group_sizes.float().std().item():.1f}\n")
 
-        print(f"Saved to {output_dir}")
+        print(f"Saved to {output_dir}:")
+        print(f"  - tokenizer.pkl (vocab_size={self.all_vocab_size})")
+        print(f"  - token_maps.pt")
+        print(f"  - config.txt, group_tokens.txt, group_stats.txt")
 
     def get_stats(self) -> Dict[str, Any]:
         """Return stats about the built tokenizer."""

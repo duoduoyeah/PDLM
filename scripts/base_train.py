@@ -16,7 +16,7 @@ from nanochat.bd3lm import BDLM, BDLMConfig
 from nanochat.dataloader import tokenizing_distributed_data_loader_with_state
 from nanochat.bd3lm_eval import eval_bd3lm
 from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, print_banner, get_base_dir, autodetect_device_type
-from nanochat.tokenizer import get_tokenizer, get_token_bytes
+from nanochat.tokenizer import get_tokenizer
 from nanochat.sp_tokens.token_map import get_token_map
 from nanochat.checkpoint_manager import save_checkpoint, load_checkpoint
 from nanochat.attn_masks import gen_mask
@@ -90,7 +90,6 @@ wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat", 
 
 # Tokenizer will be useful for evaluation, also we need the vocab size
 tokenizer = get_tokenizer()
-token_bytes = get_token_bytes(device=device)
 all_vocab_size = tokenizer.get_vocab_size()
 if model_type == "next_token_ar":
     pure_vocab_size = all_vocab_size

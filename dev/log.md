@@ -1,5 +1,7 @@
 01/21
-1. Research proper k-overlap clustering methods (current impl uses topk post-hoc, may not be optimal) [TODO]
+1. let the nanochat claude read the bd3lm side .md to continue talk on the loss stuff [Done]
+0. BD3LM paper, those KL stuff, those eq that related to loss, read it and get a feeling from it[Done]
+1. Research proper k-overlap clustering methods (current impl uses topk post-hoc, may not be optimal) [Done]
 2. Created `group_tokenizer/` folder with builder, config, clustering, token_map modules [Done]
 2. Moved `sp_tokens/` to `old_sp_tokens/` for reference [Done]
 3. Modify PDLM lm_head to output `pure + group` tokens (no MASK) [TODO]
@@ -55,6 +57,7 @@
 7. answer the question that why bd3lm target_shift has larger loss? could be eval method difference [TODO]
 
 01/15
+1. _
 2. loss = model(x, y, attn_mask=block_diff_mask) #TODO: different model different branch here i guess [Done]
 3. make sure the bd3lm forward okay [Checked]
 4. make sure the loss chain(target_shift stuff) [Checked] (verified with scripts/dump/dump_bd3lm_loss.py)
