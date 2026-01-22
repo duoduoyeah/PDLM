@@ -1,16 +1,17 @@
-01/21
-1. let the nanochat claude read the bd3lm side .md to continue talk on the loss stuff [Done]
-0. BD3LM paper, those KL stuff, those eq that related to loss, read it and get a feeling from it[Done]
-1. Research proper k-overlap clustering methods (current impl uses topk post-hoc, may not be optimal) [Done]
-2. Created `group_tokenizer/` folder with builder, config, clustering, token_map modules [Done]
-2. Moved `sp_tokens/` to `old_sp_tokens/` for reference [Done]
-3. Modify PDLM lm_head to output `pure + group` tokens (no MASK) [TODO]
-4. Test TokenizerBuilder on real 4096 embeddings [TODO]
-5. Implement two-stage training loss (MASK→Group, Group→Pure) [TODO]
-6. Per-group accuracy evaluation script [TODO]
-7. Logit leakage analysis (check prob mass outside group) [TODO]
-8. Integrated `group_tokenizer` into `pdlm.py`, `base_train.py`, and `dataloader.py`, replacing the old `sp_tokens` implementation. [Done]
-9. Updated project dependencies and scripts to align with the new tokenizer architecture. [Done]
+01/21 ~ present
+[Done]
+- Research proper k-overlap clustering methods (current impl uses topk post-hoc, may not be optimal).
+- Created `group_tokenizer/` folder with builder, config, clustering, token_map modules.
+- Integrated `group_tokenizer` into `pdlm.py`, `base_train.py`, and `dataloader.py`, replacing the old `sp_tokens` implementation.
+- Updated project dependencies and scripts to align with the new tokenizer architecture.
+- Studied BD3LM paper equations and KL divergence related to loss.
+
+[TODO]
+- Modify PDLM lm_head to output `pure + group` tokens (no MASK).
+- Test TokenizerBuilder on real 4096 embeddings.
+- Implement two-stage training loss (MASK→Group, Group→Pure).
+- Per-group accuracy evaluation script.
+- Logit leakage analysis (check prob mass outside group).
 
 01/19~01/20
 1. Fixed `prefix_sliding_tokens` synchronization bug between attention mask and data masking. [Done]
