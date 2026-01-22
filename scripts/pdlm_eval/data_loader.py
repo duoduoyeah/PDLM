@@ -1,5 +1,4 @@
 
-import torch
 from datasets import load_dataset
 from nanochat.tokenizer import get_tokenizer
 

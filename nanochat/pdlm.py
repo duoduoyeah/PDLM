@@ -14,7 +14,7 @@ import torch.nn.functional as F
 from nanochat.common import get_dist_info
 from nanochat.muon import Muon, DistMuon
 from nanochat.adamw import DistAdamW
-from nanochat.sp_tokens.token_map import get_token_map
+from nanochat.group_tokenizer.token_map import get_token_map
 
 @dataclass
 class PDLMConfig:

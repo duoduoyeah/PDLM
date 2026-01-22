@@ -7,7 +7,7 @@ import pyarrow.parquet as pq
 from nanochat.common import get_dist_info
 from nanochat.dataset import list_parquet_files
 from nanochat.tokenizer import get_tokenizer
-from nanochat.sp_tokens.token_map import get_token_map, TokenMap
+from nanochat.group_tokenizer.token_map import get_token_map, TokenMap
 from nanochat.bd3lm_utils.bd3lm_mask import sample_t, q_xt, get_loss_scale, expand_block_to_seq
 
 def tokenizing_distributed_data_loader_with_state(

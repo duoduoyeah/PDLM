@@ -3,7 +3,7 @@ import os
 
 import torch
 
-from nanochat.sp_tokens.token_map import get_token_map
+from nanochat.group_tokenizer.token_map import get_token_map
 
 
 def main():

@@ -2,7 +2,6 @@
 Clustering methods for grouping pure tokens.
 """
 import torch
-from typing import Tuple
 
 
 def kmeans_clustering(

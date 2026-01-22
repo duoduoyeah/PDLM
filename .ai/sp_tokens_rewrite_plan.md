@@ -131,7 +131,7 @@ The hierarchy is built via **bottom-up k-means clustering** (k=4) on lm_head emb
 
 ### Loading
 ```python
-from nanochat.sp_tokens.token_map import get_token_map
+from nanochat.group_tokenizer.token_map import get_token_map
 token_map = get_token_map(tokenizer_dir, device="cuda")
 ```
 

@@ -6,10 +6,7 @@ This script simulates the dataloader's epoch tracking and verifies that:
 1. Epoch counter increments when restarting from first shard
 2. Mask selection cycles correctly: block_diff_masks[epoch % block_size]
 """
-import os
-import sys
 
-import torch
 
 from nanochat.attn_masks import gen_mask
 

@@ -9,7 +9,8 @@
 5. Implement two-stage training loss (MASK→Group, Group→Pure) [TODO]
 6. Per-group accuracy evaluation script [TODO]
 7. Logit leakage analysis (check prob mass outside group) [TODO]
-8. 
+8. Integrated `group_tokenizer` into `pdlm.py`, `base_train.py`, and `dataloader.py`, replacing the old `sp_tokens` implementation. [Done]
+9. Updated project dependencies and scripts to align with the new tokenizer architecture. [Done]
 
 01/19~01/20
 1. Fixed `prefix_sliding_tokens` synchronization bug between attention mask and data masking. [Done]

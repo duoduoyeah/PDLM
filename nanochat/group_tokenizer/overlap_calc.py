@@ -7,7 +7,7 @@ Usage:
     uv run -m nanochat.group_tokenizer.overlap_calc--num_sub 16 --sub_per_final 4 --vocab_size 4096
 """
 import argparse
-from math import comb, factorial
+from math import comb
 
 
 def calc_overlap_design(num_sub: int, sub_per_final: int, vocab_size: int = 4096):

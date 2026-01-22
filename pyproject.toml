@@ -33,6 +33,20 @@ manifest-path = "rustbpe/Cargo.toml"
 dev = [
     "maturin>=1.9.4",
     "pytest>=8.0.0",
+    "ruff>=0.14.13",
+]
+
+[tool.ruff]
+# Ignore style-only rules that don't affect functionality
+lint.ignore = [
+    "E402",  # module level import not at top of file
+    "E731",  # do not assign a lambda expression, use a def
+    "E741",  # ambiguous variable name (e.g., `l` for layer)
+    "F541",  # f-string without any placeholders
+    "E701",  # multiple statements on one line (colon)
+    "E702",  # multiple statements on one line (semicolon)
+    "E722",  # do not use bare `except`
+    "E713",  # test for membership should be `not in`
 ]
 
 [tool.pytest.ini_options]

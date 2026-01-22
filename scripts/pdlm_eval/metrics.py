@@ -1,4 +1,3 @@
-import torch
 import numpy as np
 
 def parse_debug_into_blocks(block_debug):

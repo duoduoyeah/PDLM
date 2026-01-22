@@ -17,7 +17,7 @@ from nanochat.dataloader import tokenizing_distributed_data_loader_with_state
 from nanochat.bd3lm_eval import eval_bd3lm
 from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, print_banner, get_base_dir, autodetect_device_type
 from nanochat.tokenizer import get_tokenizer
-from nanochat.sp_tokens.token_map import get_token_map
+from nanochat.group_tokenizer.token_map import get_token_map
 from nanochat.checkpoint_manager import save_checkpoint, load_checkpoint
 from nanochat.attn_masks import gen_mask
 print_banner()

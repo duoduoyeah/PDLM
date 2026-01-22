@@ -8,10 +8,8 @@ Usage:
         --num-groups 64 \
         --overlap-k 1
 """
-import os
 import argparse
 
-import torch
 
 from nanochat.checkpoint_manager import load_model_from_dir
 from nanochat.group_tokenizer import TokenizerBuilder, GroupTokenizerConfig

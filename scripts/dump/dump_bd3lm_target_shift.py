@@ -74,8 +74,7 @@ def format_sequence(targets, inputs, mask, block_size, mask_token_id):
 
         # Format each position
         pos_strs = []
-        for i, (tgt, inp, m) in enumerate(zip(block_targets, block_inputs, block_mask)):
-            pos = start + i
+        for tgt, inp, m in zip(block_targets, block_inputs, block_mask):
             if inp == mask_token_id:
                 pos_strs.append(f"[M]")  # Masked
             else:

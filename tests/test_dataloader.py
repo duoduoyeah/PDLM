@@ -6,7 +6,7 @@ python -m pytest tests/test_dataloader.py -v
 
 import os
 import pytest
-from nanochat.dataset import list_parquet_files, DATA_DIR, MAX_SHARD, MAX_VAL_SHARD
+from nanochat.dataset import list_parquet_files, MAX_SHARD, MAX_VAL_SHARD
 
 
 class TestListParquetFiles:

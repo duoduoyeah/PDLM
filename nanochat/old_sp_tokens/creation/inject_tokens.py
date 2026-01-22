@@ -1,7 +1,6 @@
 import os
 import math
 import torch
-import logging
 import pickle
 import tiktoken
 from datetime import datetime
