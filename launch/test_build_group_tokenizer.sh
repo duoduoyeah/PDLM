@@ -28,15 +28,15 @@ echo "============================================"
 
 # Setup: copy from Drive to local with correct structure for NANOCHAT_BASE_DIR
 # Structure: LOCAL_BASE/
-#            ├── base_checkpoints/d8/...
+#            ├── d8/model_*.pt, meta_*.json  (checkpoint)
 #            └── tokenizer/...
 echo "Setting up local directories..."
-mkdir -p "$LOCAL_BASE/base_checkpoints"
+mkdir -p "$LOCAL_BASE"
 mkdir -p "$LOCAL_BASE/tokenizer"
 mkdir -p "$LOCAL_OUTPUT"
 
 echo "Copying checkpoint from Drive to local..."
-cp -r "$DRIVE_CHECKPOINT"/* "$LOCAL_BASE/base_checkpoints/"
+cp -r "$DRIVE_CHECKPOINT"/* "$LOCAL_BASE/"
 
 echo "Copying base tokenizer from Drive to local..."
 cp -r "$DRIVE_TOKENIZER"/* "$LOCAL_BASE/tokenizer/"
@@ -59,8 +59,8 @@ for config in "${CONFIGS[@]}"; do
     echo "Output: $output_dir"
     echo "--------------------------------------------"
 
-    uv run -m scripts.build_group_tokenizer \
-        --checkpoint-dir "$LOCAL_BASE/base_checkpoints" \
+    python -m scripts.build_group_tokenizer \
+        --checkpoint-dir "$LOCAL_BASE" \
         --output-dir "$output_dir" \
         --num-groups "$num_groups" \
         --overlap-k "$overlap_k"
