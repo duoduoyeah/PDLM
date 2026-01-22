@@ -69,7 +69,9 @@ def main():
 
     # Load model and tokenizer
     print(f"Loading model from {args.checkpoint_dir}...")
-    device = "cpu"  # We only need embeddings, no GPU required
+    import torch
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
     model, base_tokenizer, meta_data = load_model_from_dir(
         args.checkpoint_dir,
         device=device,

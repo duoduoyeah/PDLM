@@ -7,8 +7,9 @@
 - Studied BD3LM paper equations and KL divergence related to loss.
 
 [TODO]
-- Modify PDLM lm_head to output `pure + group` tokens (no MASK).
 - Test TokenizerBuilder on real 4096 embeddings.
+- Modify PDLM lm_head to output `pure + group` tokens (no MASK).
+
 - Implement two-stage training loss (MASK→Group, Group→Pure).
 - Per-group accuracy evaluation script.
 - Logit leakage analysis (check prob mass outside group).
