@@ -35,11 +35,21 @@ mkdir -p "$LOCAL_BASE"
 mkdir -p "$LOCAL_BASE/tokenizer"
 mkdir -p "$LOCAL_OUTPUT"
 
-echo "Copying checkpoint from Drive to local..."
-cp -r "$DRIVE_CHECKPOINT"/* "$LOCAL_BASE/"
+# Copy checkpoint if not exists
+if [ -d "$LOCAL_BASE/d8" ] && [ -n "$(ls -A $LOCAL_BASE/d8/*.pt 2>/dev/null)" ]; then
+    echo "Checkpoint already exists, skipping copy..."
+else
+    echo "Copying checkpoint from Drive to local..."
+    cp -r "$DRIVE_CHECKPOINT"/* "$LOCAL_BASE/"
+fi
 
-echo "Copying base tokenizer from Drive to local..."
-cp -r "$DRIVE_TOKENIZER"/* "$LOCAL_BASE/tokenizer/"
+# Copy tokenizer if not exists
+if [ -f "$LOCAL_BASE/tokenizer/tokenizer.pkl" ]; then
+    echo "Tokenizer already exists, skipping copy..."
+else
+    echo "Copying base tokenizer from Drive to local..."
+    cp -r "$DRIVE_TOKENIZER"/* "$LOCAL_BASE/tokenizer/"
+fi
 
 # Set NANOCHAT_BASE_DIR so get_tokenizer() finds the tokenizer
 export NANOCHAT_BASE_DIR="$LOCAL_BASE"

@@ -204,10 +204,19 @@ class TokenizerBuilder:
             f.write(f"  mean: {group_sizes.float().mean().item():.1f}\n")
             f.write(f"  std: {group_sizes.float().std().item():.1f}\n")
 
+        # Save all tokens dump (id + text representation)
+        all_tokens_path = os.path.join(output_dir, "all_tokens.txt")
+        enc = self.extended_encoding
+        with open(all_tokens_path, "w", encoding="utf-8") as f:
+            for tid in range(enc.n_vocab):
+                token_str = enc.decode([tid])
+                escaped = token_str.encode("unicode_escape").decode("ascii")
+                f.write(f"{tid}\t{escaped}\n")
+
         print(f"Saved to {output_dir}:")
         print(f"  - tokenizer.pkl (vocab_size={self.all_vocab_size})")
         print(f"  - token_maps.pt")
-        print(f"  - config.txt, group_tokens.txt, group_stats.txt")
+        print(f"  - config.txt, group_tokens.txt, group_stats.txt, all_tokens.txt")
 
     def get_stats(self) -> Dict[str, Any]:
         """Return stats about the built tokenizer."""
