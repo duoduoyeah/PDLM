@@ -9,10 +9,10 @@
 [TODO]
 - Test TokenizerBuilder on real 4096 embeddings.
 - Modify PDLM lm_head to output `pure + group` tokens (no MASK).
-
 - Implement two-stage training loss (MASK→Group, Group→Pure).
 - Per-group accuracy evaluation script.
 - Logit leakage analysis (check prob mass outside group).
+- go read the multi-head paper and we will use the next-token for first level group token(https://github.com/Xiaohao-Liu/Awesome-Multi-Token-Prediction)
 
 01/19~01/20
 1. Fixed `prefix_sliding_tokens` synchronization bug between attention mask and data masking. [Done]

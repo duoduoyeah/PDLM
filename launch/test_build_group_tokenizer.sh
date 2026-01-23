@@ -9,7 +9,7 @@ DRIVE_CHECKPOINT="/content/drive/MyDrive/nanochat/gpt_d8_next1_r40_v4096_implici
 DRIVE_TOKENIZER="/content/drive/MyDrive/nanochat/tokenizer/simplestory_tokenizer/4096/tokenizer"
 
 # Local paths (VM) - structured for NANOCHAT_BASE_DIR
-LOCAL_BASE="${LOCAL_BASE:-$HOME/temp/group_tokenizer_test}"
+LOCAL_BASE="${LOCAL_BASE:-/content/temp/group_tokenizer_test}"
 LOCAL_OUTPUT="${LOCAL_BASE}/output"
 
 # Test configurations: num_groups overlap_k

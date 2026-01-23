@@ -31,7 +31,8 @@ class GPTConfig:
     n_head: int = 6 # number of query heads
     n_kv_head: int = 6 # number of key/value heads (GQA)
     n_embd: int = 768
-
+    target_shift: int = 1 # 1 means normal next token predictor
+    n_future_tokens: int = 1 #this is the multiple token predictor sutff
 
 def norm(x):
     # Purely functional rmsnorm with no learnable params
