@@ -72,18 +72,23 @@ for config in "${CONFIGS[@]}"; do
     echo "Output: $output_dir"
     echo "--------------------------------------------"
 
-    cmd="python -m scripts.build_group_tokenizer \
-        --checkpoint-dir \"$LOCAL_BASE\" \
-        --output-dir \"$output_dir\" \
-        --num-groups \"$num_groups\" \
-        --overlap-k \"$overlap_k\" \
-        --no-mask"
+    # Check if tokenizer already exists
+    if [ -f "${output_dir}/token_maps.pt" ]; then
+        echo "Tokenizer already exists, skipping build..."
+    else
+        cmd="python -m scripts.build_group_tokenizer \
+            --checkpoint-dir \"$LOCAL_BASE\" \
+            --output-dir \"$output_dir\" \
+            --num-groups \"$num_groups\" \
+            --overlap-k \"$overlap_k\" \
+            --no-mask"
 
-    if [ -n "$MODEL_TAG" ]; then
-        cmd="$cmd --model-tag \"$MODEL_TAG\""
+        if [ -n "$MODEL_TAG" ]; then
+            cmd="$cmd --model-tag \"$MODEL_TAG\""
+        fi
+
+        eval $cmd
     fi
-
-    eval $cmd
 
     # Dump token map info for inspection
     echo "Dumping token map info..."

@@ -128,10 +128,11 @@ def dump_token(maps: dict, token_id: int, tokenizer=None):
     print()
 
 
-def dump_all_groups(maps: dict, tokenizer=None):
+def dump_all_groups(maps: dict, tokenizer=None, mask_rows: int = 5):
     """Dump summary of all groups."""
     num_groups = maps["num_groups"]
     pure_vocab_size = maps["pure_vocab_size"]
+    overlap_k = maps["overlap_k"]
     group_sizes = maps["group_to_pure_mask"].sum(dim=1)
 
     print("=" * 60)
@@ -144,6 +145,33 @@ def dump_all_groups(maps: dict, tokenizer=None):
         token_id = pure_vocab_size + g
         size = group_sizes[g].item()
         print(f"{g:>6} {token_id:>8} {size:>6}")
+    print()
+
+    # Dump pure_to_group: (pure_vocab_size, overlap_k)
+    print("=" * 60)
+    print(f"PURE_TO_GROUP ({pure_vocab_size}, {overlap_k})")
+    print("=" * 60)
+    print(f"{'Token':>6} {'Groups':>20}")
+    print("-" * 30)
+    pure_to_group = maps["pure_to_group"]
+    for tid in range(pure_vocab_size):
+        groups = pure_to_group[tid].tolist()
+        groups_str = ", ".join(str(g) for g in groups)
+        print(f"{tid:>6} [{groups_str:>16}]")
+    print()
+
+    # Dump group_to_pure_mask: (num_groups, pure_vocab_size) - first N rows
+    rows_to_show = min(mask_rows, num_groups)
+    print("=" * 60)
+    print(f"GROUP_TO_PURE_MASK (first {rows_to_show} of {num_groups} rows)")
+    print("=" * 60)
+    group_to_pure_mask = maps["group_to_pure_mask"]
+    for g in range(rows_to_show):
+        mask = group_to_pure_mask[g]
+        member_ids = torch.where(mask)[0].tolist()
+        print(f"Group {g:>3}: {member_ids}")
+    if rows_to_show < num_groups:
+        print(f"... ({num_groups - rows_to_show} more groups)")
     print()
 
 
@@ -177,6 +205,12 @@ def main():
         default=50,
         help="Max tokens to show per group (default: 50)",
     )
+    parser.add_argument(
+        "--mask-rows",
+        type=int,
+        default=5,
+        help="Number of group_to_pure_mask rows to show (default: 5, use -1 for all)",
+    )
     args = parser.parse_args()
 
     # Load
@@ -193,7 +227,8 @@ def main():
     elif args.token is not None:
         dump_token(maps, args.token, tokenizer)
     elif args.all_groups:
-        dump_all_groups(maps, tokenizer)
+        mask_rows = args.mask_rows if args.mask_rows >= 0 else maps["num_groups"]
+        dump_all_groups(maps, tokenizer, mask_rows=mask_rows)
     else:
         dump_overview(maps)
 
