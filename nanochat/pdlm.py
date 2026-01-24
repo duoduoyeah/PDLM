@@ -19,7 +19,8 @@ from nanochat.group_tokenizer.token_map import get_token_map
 @dataclass
 class PDLMConfig:
     sequence_len: int = 1024
-    pure_vocab_size: int = 50304
+    pure_vocab_size: int = -1
+    all_vocab_size: int = -1
     n_layer: int = 12
     n_head: int = 6 # number of query heads
     n_kv_head: int = 6 # number of key/value heads (GQA)
@@ -30,7 +31,6 @@ class PDLMConfig:
     # need for training
     model_name: str = "pdlm"
     prefix_pure_tokens: int = 0 
-    all_vocab_size: int = -1
     mask_token_id: int = -1
 
 def norm(x):
