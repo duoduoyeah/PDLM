@@ -40,6 +40,7 @@ prefix_pure_tokens = 1 # pure prefix tokens (0 = disabled)
 is_causal = True # the model' attn direction
 
 noise_total_steps = 16 # Noisy for pdlm
+pdlm_stage = "stage2" # pdlm stage: stage1_mtp, stage1_mask, stage2, both_mtp, both_mask
 bd3lm_effective_ratio = None # For bd3lm: auto-computed if None, or override with explicit value
 bd3lm_compute_matched = True # If True, don't adjust iterations for BD3LM (compute-matched). If False, adjust to match loss tokens (supervision-matched).
 # Debug
@@ -99,7 +100,8 @@ elif model_type == "bd3lm":
     token_map = None
 elif model_type == "pdlm":
     token_map = get_token_map(device="cpu")
-    pure_vocab_size = token_map.pure_to_noisy_map.shape[0]
+    pure_vocab_size = token_map.pure_vocab_size
+    num_groups = token_map.num_groups
 else:
     raise ValueError(f"Unknown model_type: {model_type}")
 assert pure_vocab_size <= all_vocab_size, "pure_vocab_size should not exceed all_vocab_size"
@@ -112,6 +114,8 @@ except KeyError:
     pass
 print0(f"Vocab size: {all_vocab_size:,}")
 print0(f"Pure vocab size: {pure_vocab_size:,}")
+if model_type == "pdlm":
+    print0(f"Num groups: {num_groups:,}")
 if mask_token_id != -1:
     print0(f"Mask token id: {mask_token_id}")
 
@@ -173,7 +177,8 @@ elif model_type == "pdlm":
     model_config_kwargs = dict(
         sequence_len=max_seq_len,
         pure_vocab_size=pure_vocab_size,
-        all_vocab_size=all_vocab_size,
+        num_groups=num_groups,
+        stage=pdlm_stage,
         n_layer=num_layers,
         n_head=num_heads,
         n_kv_head=num_kv_heads,

@@ -6,6 +6,7 @@ Parallel Denosing Language Model
 import math
 from functools import partial
 from dataclasses import dataclass
+from typing import Literal
 
 import torch
 import torch.nn as nn
@@ -16,22 +17,55 @@ from nanochat.muon import Muon, DistMuon
 from nanochat.adamw import DistAdamW
 from nanochat.group_tokenizer.token_map import get_token_map
 
+# Stage types for PDLM
+PDLMStage = Literal["stage1_mtp", "stage1_mask", "stage2", "both_mtp", "both_mask"]
+
 @dataclass
 class PDLMConfig:
     sequence_len: int = 1024
     pure_vocab_size: int = -1
-    all_vocab_size: int = -1
+    num_groups: int = 0
+    # Stage types: see PDLMStage
+    stage: PDLMStage = "stage2"
     n_layer: int = 12
     n_head: int = 6 # number of query heads
     n_kv_head: int = 6 # number of key/value heads (GQA)
     n_embd: int = 768
-    
+
     bucket_size: int = -1
     is_causal: bool = True
     # need for training
     model_name: str = "pdlm"
-    prefix_pure_tokens: int = 0 
-    mask_token_id: int = -1
+    prefix_pure_tokens: int = 0
+    mask_token_id: int = -1  # only needed for stage1_mask and both_mask
+
+    def __post_init__(self):
+        valid_stages = {"stage1_mtp", "stage1_mask", "stage2", "both_mtp", "both_mask"}
+        if self.stage not in valid_stages:
+            raise ValueError(f"Invalid stage: {self.stage}. Must be one of {valid_stages}")
+
+    def get_vocab_sizes(self):
+        """Compute wte and lm_head sizes based on stage."""
+        if self.stage == "stage1_mtp":
+            wte_size = self.pure_vocab_size
+            lm_head_size = self.num_groups
+        elif self.stage == "stage1_mask":
+            assert self.mask_token_id != -1, "stage1_mask requires mask_token_id"
+            wte_size = self.pure_vocab_size + 1  # pure + MASK
+            lm_head_size = self.num_groups
+        elif self.stage == "stage2":
+            wte_size = self.pure_vocab_size + self.num_groups
+            lm_head_size = self.pure_vocab_size
+        elif self.stage == "both_mtp":
+            wte_size = self.pure_vocab_size + self.num_groups
+            lm_head_size = self.pure_vocab_size + self.num_groups
+        elif self.stage == "both_mask":
+            assert self.mask_token_id != -1, "both_mask requires mask_token_id"
+            wte_size = self.pure_vocab_size + self.num_groups + 1
+            lm_head_size = self.pure_vocab_size + self.num_groups
+        else:
+            raise ValueError(f"Unknown stage: {self.stage}")
+        return wte_size, lm_head_size
 
 def norm(x):
     # Purely functional rmsnorm with no learnable params
@@ -140,11 +174,12 @@ class PDLM(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
+        wte_size, lm_head_size = config.get_vocab_sizes()
         self.transformer = nn.ModuleDict({
-            "wte": nn.Embedding(config.all_vocab_size, config.n_embd), # wte changed by all_vocab_size
+            "wte": nn.Embedding(wte_size, config.n_embd),
             "h": nn.ModuleList([Block(config, layer_idx) for layer_idx in range(config.n_layer)]),
         })
-        self.lm_head = nn.Linear(config.n_embd, config.pure_vocab_size, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, lm_head_size, bias=False)
         self.rotary_seq_len = max(config.sequence_len, 1024) * 10
         head_dim = config.n_embd // config.n_head
         cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim)

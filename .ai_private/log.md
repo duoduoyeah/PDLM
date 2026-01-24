@@ -1,4 +1,6 @@
-01/21 ~ present
+01/25
+
+01/21 ~ 01/24
 [Done]
 - Research proper k-overlap clustering methods (current impl uses topk post-hoc, may not be optimal).
 - Created `group_tokenizer/` folder with builder, config, clustering, token_map modules.
@@ -7,16 +9,17 @@
 - Studied BD3LM paper equations and KL divergence related to loss.
 - Created `group_tokenizer/dump.py` for inspecting token maps.
 - Created `experiment_c.md` design doc.
+- go read the multi-head paper and we will use the next-token for first level group token(https://github.com/Xiaohao-Liu/Awesome-Multi-Token-Prediction) [Done]
+- Test TokenizerBuilder on real 4096 embeddings. [Done]
+- Modify PDLM lm_head to output `pure + group` tokens (no MASK).[Done] 
+- Modify PDLM wte to include group tokens (lm_head stays pure_vocab).[Done]
 
 [TODO]
-- Test TokenizerBuilder on real 4096 embeddings. [Done]
-- Modify PDLM lm_head to output `pure + group` tokens (no MASK). 
+
 - Implement two-stage training loss (MASK→Group, Group→Pure). [Later]
-- Per-group accuracy evaluation script.
-- Logit leakage analysis (check prob mass outside group).
-- go read the multi-head paper and we will use the next-token for first level group token(https://github.com/Xiaohao-Liu/Awesome-Multi-Token-Prediction) [Done]
-- Generate tokenizer g64_k1 with real embeddings.
-- Modify PDLM wte to include group tokens (lm_head stays pure_vocab).
+- Per-group accuracy evaluation script.[TODO]
+- Logit leakage analysis (check prob mass outside group). [Later]
+- Generate tokenizer g64_k1 with real embeddings. [TODO]
 - Update dataloader: pure→group noising for block positions.
 - Create `launch/run_expc.sh`.
 - Train first Exp C model: `expc_g64_k1_b4`.
