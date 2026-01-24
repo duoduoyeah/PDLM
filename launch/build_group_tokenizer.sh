@@ -85,6 +85,13 @@ for config in "${CONFIGS[@]}"; do
 
     eval $cmd
 
+    # Dump token map info for inspection
+    echo "Dumping token map info..."
+    python -m nanochat.group_tokenizer.dump "$output_dir" > "${output_dir}/dump_overview.txt"
+    python -m nanochat.group_tokenizer.dump "$output_dir" --all-groups > "${output_dir}/dump_all_groups.txt"
+    echo "  -> dump_overview.txt"
+    echo "  -> dump_all_groups.txt"
+
     echo ""
 done
 
