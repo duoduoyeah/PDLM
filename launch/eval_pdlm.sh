@@ -18,7 +18,7 @@ NUM_BATCHES="20"
 LOCAL_DIR="/tmp/pdlm_eval"
 HF_REPO=""  # Empty = use default pattern (duoduoyeah/pdlm_d${DEPTH})
 CKPT_DIR=""  # Direct checkpoint path (overrides HF download)
-RUN_COMPATIBILITY="false"
+RUN_COMPATIBILITY="true"
 
 # Parse named arguments
 for arg in "$@"; do
