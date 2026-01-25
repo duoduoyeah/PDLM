@@ -11,6 +11,8 @@ Key docs in `.ai_private/`:
 
 ## Maintaining log.md
 
+**Keep updates brief** - usually just one line per session summarizing key work done.
+
 **DO add to log.md:**
 - Completed tasks (mark as [Done])
 - New planned work the user mentions

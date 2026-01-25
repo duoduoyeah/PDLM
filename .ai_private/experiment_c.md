@@ -189,13 +189,28 @@ class PDLMConfig:
 - [x] Modify PDLM wte to include group tokens, lm_head outputs pure_vocab (stage-based in `pdlm.py`)
 - [x] Generate tokenizer variants: g16_k1, g64_k1, g256_k1
 - [x] `launch/build_group_tokenizer.sh` - Build script with dump
+- [x] Modularized dataloader (`dataloader_pdlm.py` with Stage 2 support)
+- [x] `launch/run_expc.sh` - Training script for Experiment C
 
 ### To Build
-- [ ] Update dataloader for pure→group noising (2L structure, with overlap_k support)
 - [ ] Implement compatibility evaluation
-- [ ] Create training script for Experiment C (`launch/run_expc.sh`)
 - [ ] Create evaluation/analysis scripts
 - [ ] Overlap ablation: compare k=1 vs k=2 vs k=4
+
+### Group Tokenizer Structure (IMPORTANT)
+
+Each group tokenizer folder on Drive is **self-contained**:
+```
+/content/drive/MyDrive/nanochat/group_tokenizers/g64_k1/
+├── tokenizer.pkl      # BPE tokenizer (encoding/decoding)
+├── token_maps.pt      # Group token mappings
+├── config.txt         # Build config
+├── group_stats.txt    # Group statistics
+└── dump_*.txt         # Inspection dumps
+```
+
+**Note**: `token_bytes.pt` is NOT needed - it was only used by old eval methods we no longer use.
+Training only requires `tokenizer.pkl` and `token_maps.pt`.
 
 ---
 
@@ -203,9 +218,9 @@ class PDLMConfig:
 
 1. ~~Generate tokenizer variants with overlap_k=1 (g16, g64, g256)~~ ✓
 2. ~~Modify PDLM: wte includes group tokens, lm_head outputs pure_vocab~~ ✓
-3. **Update dataloader for pure→group noising (2L structure)** ← CURRENT
-4. Create `launch/run_expc.sh` training script
-5. Train first model: `expc_g64_k1_b4` (baseline)
+3. ~~Update dataloader for pure→group noising (2L structure)~~ ✓
+4. ~~Create `launch/run_expc.sh` training script~~ ✓
+5. **Train first model: `expc_g64_k1_b4` (baseline)** ← CURRENT
 6. Implement compatibility evaluation
 7. Analyze baseline results
 8. Generate tokenizer variants with overlap_k > 1 (g64_k2, g64_k4, etc.)

@@ -15,6 +15,7 @@ from nanochat.pdlm import PDLM, PDLMConfig
 from nanochat.bd3lm import BDLM, BDLMConfig
 from nanochat.dataloader import get_data_loader
 from nanochat.bd3lm_eval import eval_bd3lm
+from nanochat.pdlm_eval import eval_pdlm
 from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, print_banner, get_base_dir, autodetect_device_type
 from nanochat.tokenizer import get_tokenizer
 from nanochat.group_tokenizer.token_map import get_token_map
@@ -314,7 +315,17 @@ if eval_every > 0:
         eval_attn_mask = gen_mask(max_seq_len, block_size, attn_backend="sdpa", is_causal=is_causal, prefix_sliding_tokens=0).to(device=device)
         print0(f"Initialized validation dataloader and eval attention mask for BD3LM evaluation")
     elif model_type == "pdlm":
-        pass  # TODO: PDLM validation setup
+        val_loader = get_data_loader(
+            device_batch_size,
+            max_seq_len,
+            split="val",
+            device=device,
+            model_config=model_config,
+            resume_state_dict=None,  # always start fresh for validation
+        )
+        # Eval uses prefix_sliding_tokens=0 (no sliding prefix for eval)
+        eval_attn_mask = gen_mask(max_seq_len, block_size, attn_backend="sdpa", is_causal=is_causal, prefix_sliding_tokens=0).to(device=device)
+        print0(f"Initialized validation dataloader and eval attention mask for PDLM evaluation")
     elif model_type == "next_token_ar":
         pass  # TODO: AR validation setup
 
@@ -437,7 +448,34 @@ while True:
                     log_data[f"eval/suffix_{s}_overall_ppl"] = suffix_data["overall_ppl"]
                 wandb_run.log(log_data)
         elif model_type == "pdlm":
-            pass  # TODO: PDLM evaluation
+            print0(f"Running PDLM Stage 2 evaluation at step {step} ({current_eval_batches} batches)...")
+            eval_result = eval_pdlm(
+                model=orig_model,  # use uncompiled model
+                val_loader=val_loader,
+                block_size=block_size,
+                num_batches=current_eval_batches,
+                attn_mask=eval_attn_mask,
+                device=device,
+                autocast_ctx=autocast_ctx,
+                prefix_pure_tokens=prefix_pure_tokens,
+            )
+            # Log eval results
+            print0(f"  [pdlm stage2] overall_loss: {eval_result['overall_loss']:.4f}, overall_ppl: {eval_result['overall_ppl']:.2f}")
+            # Per-position metrics
+            for pos in range(block_size):
+                pos_data = eval_result["positions"][pos]
+                print0(f"    pos {pos}: loss={pos_data['loss']:.4f}, ppl={pos_data['ppl']:.2f}")
+            # Build log data for wandb
+            log_data = {
+                "step": step,
+                "eval/overall_loss": eval_result["overall_loss"],
+                "eval/overall_ppl": eval_result["overall_ppl"],
+            }
+            for pos in range(block_size):
+                pos_data = eval_result["positions"][pos]
+                log_data[f"eval/pos_{pos}_loss"] = pos_data["loss"]
+                log_data[f"eval/pos_{pos}_ppl"] = pos_data["ppl"]
+            wandb_run.log(log_data)
         elif model_type == "next_token_ar":
             pass  # TODO: AR evaluation
 

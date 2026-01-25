@@ -348,6 +348,45 @@ class PDLM(nn.Module):
             # inference: just return the logits directly
             return logits
 
+    def forward_for_eval(self, idx, targets, attn_mask):
+        """
+        Forward pass for evaluation that returns logits instead of loss.
+
+        Args:
+            idx: (B, L) input tokens (group tokens at block positions for stage2)
+            targets: (B, L) clean target tokens (pure tokens)
+            attn_mask: attention mask for block diffusion
+
+        Returns:
+            logits: (B, L, pure_vocab_size) logits for the xt (input) positions
+        """
+        B, T = idx.size()
+        assert targets.size(1) == T, "Targets should match input length"
+
+        # Concatenate [xt | x0] = [idx | targets]
+        idx = torch.cat((idx, targets), dim=1)  # (B, 2L)
+
+        # Get rotary embeddings for 2L sequence
+        cos = self.cos[:, :T]
+        sin = self.sin[:, :T]
+        cos_sin = (torch.cat((cos, cos), dim=1), torch.cat((sin, sin), dim=1))
+
+        # Forward through transformer
+        x = self.transformer.wte(idx)
+        x = norm(x)
+        for block in self.transformer.h:
+            x = block(x, cos_sin, kv_cache=None, attn_mask=attn_mask)
+        x = norm(x)
+
+        # Compute logits
+        softcap = 15
+        logits = self.lm_head(x)
+        logits = logits.float()
+        logits = softcap * torch.tanh(logits / softcap)
+
+        # Return logits for xt part (first L positions)
+        return logits[:, :T, :]
+
     @torch.inference_mode()
     def generate_with_blocks(self, tokens, max_new_tokens, 
                              attn_mask=None, 
