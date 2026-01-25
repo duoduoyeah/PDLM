@@ -368,3 +368,97 @@ def eval_pdlm_full(
         model.train()
 
     return result
+
+
+def dump_batch_to_file(
+    model,
+    val_loader,
+    block_size,
+    attn_mask,
+    device,
+    autocast_ctx,
+    output_path,
+    tokenizer_dir=None,
+):
+    """
+    Dump 1 batch showing input group tokens and model predictions.
+
+    Args:
+        model: PDLM model
+        val_loader: validation data loader
+        block_size: block size
+        attn_mask: attention mask
+        device: device
+        autocast_ctx: autocast context
+        output_path: path to write txt file
+        tokenizer_dir: path to tokenizer dir (default: uses get_base_dir())
+
+    Output file format (per sequence):
+        === Sequence 0 ===
+        Input (noised):  [<|G_12|>, <|G_45|>, ...]
+        Output (preds):  ['hello', ' world', ...]
+        Target (truth):  ['hello', ' world', ...]
+    """
+    from nanochat.group_tokenizer.dump import load_tokenizer
+
+    was_training = model.training
+    model.eval()
+
+    # Load tokenizer for decoding
+    if tokenizer_dir is None:
+        from nanochat.common import get_base_dir
+        import os
+        tokenizer_dir = os.path.join(get_base_dir(), "tokenizer")
+
+    tokenizer = load_tokenizer(tokenizer_dir)
+    token_map = get_token_map(tokenizer_dir, device=device)
+
+    with torch.no_grad():
+        inputs, targets, loss_extras, _ = next(val_loader)
+        # inputs: (B, T) - group tokens at block positions
+        # targets: (B, T) - pure tokens
+
+        B, T = inputs.shape
+
+        with autocast_ctx:
+            logits = model.forward_for_eval(inputs, targets, attn_mask=attn_mask)
+            preds = logits.argmax(dim=-1)  # (B, T)
+
+    if was_training:
+        model.train()
+
+    # Helper to format group token
+    def fmt_group(tid):
+        if token_map.is_group(torch.tensor(tid)):
+            gid = tid - token_map.group_start_id
+            return f"<|G_{gid}|>"
+        elif tokenizer:
+            return repr(tokenizer.decode([tid]))
+        return f"[{tid}]"
+
+    # Helper to format pure token
+    def fmt_pure(tid):
+        if tokenizer:
+            return repr(tokenizer.decode([tid]))
+        return f"[{tid}]"
+
+    # Write output
+    with open(output_path, "w") as f:
+        for b in range(B):
+            f.write(f"=== Sequence {b} ===\n")
+
+            # Input tokens (group or pure)
+            input_strs = [fmt_group(inputs[b, t].item()) for t in range(T)]
+            f.write(f"Input (noised):  [{', '.join(input_strs)}]\n")
+
+            # Predicted tokens (argmax)
+            pred_strs = [fmt_pure(preds[b, t].item()) for t in range(T)]
+            f.write(f"Output (preds):  [{', '.join(pred_strs)}]\n")
+
+            # Target tokens (ground truth)
+            tgt_strs = [fmt_pure(targets[b, t].item()) for t in range(T)]
+            f.write(f"Target (truth):  [{', '.join(tgt_strs)}]\n")
+
+            f.write("\n")
+
+    print(f"Dumped {B} sequences to {output_path}")
