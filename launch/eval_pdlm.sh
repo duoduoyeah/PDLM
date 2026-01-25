@@ -156,6 +156,10 @@ if [ -n "${CKPT_DIR}" ]; then
 
     # If dump_batch is specified, just run that and exit
     if [ -n "${DUMP_BATCH}" ]; then
+        # Create output directory if it doesn't exist
+        DUMP_DIR=$(dirname "${DUMP_BATCH}")
+        mkdir -p "${DUMP_DIR}"
+
         python -m scripts.pdlm_eval \
             --ckpt_dir="${ACTUAL_CKPT_DIR}" \
             ${DUMP_FLAG}
