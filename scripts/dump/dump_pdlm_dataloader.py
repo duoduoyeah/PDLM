@@ -1,10 +1,13 @@
 """
 Dump PDLM dataloader output to verify the data structure.
 
-Usage:
+Usage (on Colab, after run_expc.sh setup):
+    export NANOCHAT_BASE_DIR=/content/pdlm_temp_train/expc_d4_b4_g64_k1_r10_test
     python -m scripts.dump.dump_pdlm_dataloader
 """
 
+import os
+import argparse
 import torch
 from nanochat.pdlm import PDLMConfig
 from nanochat.dataloader import get_data_loader
@@ -13,10 +16,23 @@ from nanochat.tokenizer import get_tokenizer
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--base_dir", type=str, default=None,
+                        help="Base dir containing tokenizer/ (default: use NANOCHAT_BASE_DIR env)")
+    parser.add_argument("--block_size", type=int, default=4)
+    parser.add_argument("--prefix_pure_tokens", type=int, default=1)
+    parser.add_argument("--max_seq_len", type=int, default=512)
+    args = parser.parse_args()
+
+    # Set NANOCHAT_BASE_DIR if provided
+    if args.base_dir:
+        os.environ["NANOCHAT_BASE_DIR"] = args.base_dir
+        print(f"Set NANOCHAT_BASE_DIR={args.base_dir}")
+
     # Config matching run_expc.sh defaults
-    block_size = 4
-    prefix_pure_tokens = 1
-    max_seq_len = 512
+    block_size = args.block_size
+    prefix_pure_tokens = args.prefix_pure_tokens
+    max_seq_len = args.max_seq_len
     batch_size = 2
 
     # Get token map info
