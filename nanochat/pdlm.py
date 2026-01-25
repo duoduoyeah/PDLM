@@ -279,7 +279,7 @@ class PDLM(nn.Module):
                 group["initial_lr"] = group["lr"]
         return optimizers
 
-    def forward(self, idx, targets=None, kv_cache=None, loss_reduction='mean', attn_mask=None):
+    def forward(self, idx, targets=None, kv_cache=None, attn_mask=None, loss_extras=None):
         """Training: idx/targets are length L; we concat to 2L inside this and apply block mask."""
         if targets is not None:
             B, T = idx.size()
@@ -319,19 +319,30 @@ class PDLM(nn.Module):
 
         if targets is not None:
             # training: given the targets, compute and return the loss
-            # TODO experiment with chunked cross-entropy?
-            logits = logits[:, :T, :]
-            loss_targets = targets
-            prefix_pure_tokens = self.config.prefix_pure_tokens
-            if prefix_pure_tokens > 0:
-                loss_targets = loss_targets.clone()
-                loss_targets[:, :prefix_pure_tokens] = -1
-            loss = F.cross_entropy(
-                logits.reshape(-1, logits.size(-1)),
-                loss_targets.reshape(-1),
-                ignore_index=-1,
-                reduction=loss_reduction,
-            )
+            logits = logits[:, :T, :]  # first T positions (xt half)
+
+            if loss_extras is not None and "loss_mask" in loss_extras:
+                # Stage2: use loss_mask to compute loss only on block positions
+                loss_mask = loss_extras["loss_mask"]
+                # Compute per-token cross-entropy
+                log_probs = F.log_softmax(logits, dim=-1)
+                target_log_probs = torch.gather(log_probs, dim=-1, index=targets.unsqueeze(-1))
+                nll = -target_log_probs.squeeze(-1)  # (B, T)
+                # Apply mask and compute mean
+                loss = (nll * loss_mask).sum() / loss_mask.sum()
+            else:
+                # Legacy mode: use ignore_index for prefix_pure_tokens
+                loss_targets = targets
+                prefix_pure_tokens = self.config.prefix_pure_tokens
+                if prefix_pure_tokens > 0:
+                    loss_targets = loss_targets.clone()
+                    loss_targets[:, :prefix_pure_tokens] = -1
+                loss = F.cross_entropy(
+                    logits.reshape(-1, logits.size(-1)),
+                    loss_targets.reshape(-1),
+                    ignore_index=-1,
+                    reduction='mean',
+                )
             return loss
         else:
             # inference: just return the logits directly

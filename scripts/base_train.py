@@ -13,7 +13,7 @@ import torch
 from nanochat.gpt import GPT, GPTConfig
 from nanochat.pdlm import PDLM, PDLMConfig
 from nanochat.bd3lm import BDLM, BDLMConfig
-from nanochat.dataloader import tokenizing_distributed_data_loader_with_state
+from nanochat.dataloader import get_data_loader
 from nanochat.bd3lm_eval import eval_bd3lm
 from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, print_banner, get_base_dir, autodetect_device_type
 from nanochat.tokenizer import get_tokenizer
@@ -186,6 +186,7 @@ elif model_type == "pdlm":
         prefix_pure_tokens=prefix_pure_tokens,
         mask_token_id=mask_token_id,
         is_causal=is_causal,
+        bucket_size=block_size,
         model_name=run,
     )
 else:
@@ -286,18 +287,13 @@ if resuming:
 tokens_dir = os.path.join(base_dir, "tokenized_data")
 dataloader_resume_state_dict = None if not resuming else meta_data["dataloader_state_dict"]
 
-train_loader = tokenizing_distributed_data_loader_with_state(
+train_loader = get_data_loader(
     device_batch_size,
     max_seq_len,
     split="train",
     device=device,
+    model_config=model_config,
     resume_state_dict=dataloader_resume_state_dict,
-    noise_total_steps=noise_total_steps,
-    prefix_pure_tokens=max(prefix_pure_tokens, 0),
-    model_type=model_type,
-    target_shift=target_shift,
-    bd3lm_block_size=block_size,
-    bd3lm_mask_token_id=mask_token_id,
 )
 x, y, loss_extras, dataloader_state_dict = next(train_loader) # kick off load of the very first batch of data
 
@@ -306,18 +302,13 @@ val_loader = None
 eval_attn_mask = None
 if eval_every > 0:
     if model_type == "bd3lm":
-        val_loader = tokenizing_distributed_data_loader_with_state(
+        val_loader = get_data_loader(
             device_batch_size,
             max_seq_len,
             split="val",
             device=device,
+            model_config=model_config,
             resume_state_dict=None,  # always start fresh for validation
-            noise_total_steps=noise_total_steps,
-            prefix_pure_tokens=max(prefix_pure_tokens, 0),
-            model_type=model_type,
-            target_shift=target_shift,
-            bd3lm_block_size=block_size,
-            bd3lm_mask_token_id=mask_token_id,
         )
         # Eval uses prefix_sliding_tokens=0 (no sliding prefix for eval)
         eval_attn_mask = gen_mask(max_seq_len, block_size, attn_backend="sdpa", is_causal=is_causal, prefix_sliding_tokens=0).to(device=device)
@@ -504,8 +495,13 @@ while True:
                 step_effective_tokens += batch_effective_tokens
                 total_effective_tokens += batch_effective_tokens
             elif model_type == "pdlm":
-                loss = model(x, y, attn_mask=block_diff_masks[0])
-                total_effective_tokens += x.numel() * ddp_world_size
+                loss = model(x, y, attn_mask=block_diff_masks[0], loss_extras=loss_extras)
+                # Count effective tokens (positions that contribute to loss)
+                if loss_extras is not None and "loss_mask" in loss_extras:
+                    batch_effective_tokens = loss_extras["loss_mask"].sum().item() * ddp_world_size
+                else:
+                    batch_effective_tokens = x.numel() * ddp_world_size
+                total_effective_tokens += batch_effective_tokens
             else:
                 # next_token_ar: GPT forward doesn't take attn_mask
                 loss = model(x, y)
