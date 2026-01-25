@@ -19,6 +19,7 @@ LOCAL_DIR="/tmp/pdlm_eval"
 HF_REPO=""  # Empty = use default pattern (duoduoyeah/pdlm_d${DEPTH})
 CKPT_DIR=""  # Direct checkpoint path (overrides HF download)
 RUN_COMPATIBILITY="true"
+DUMP_BATCH=""  # Path to dump batch output file
 
 # Parse named arguments
 for arg in "$@"; do
@@ -47,12 +48,15 @@ for arg in "$@"; do
         --run_compatibility)
             RUN_COMPATIBILITY="true"
             ;;
+        --dump_batch=*)
+            DUMP_BATCH="${arg#*=}"
+            ;;
         *)
             echo "Unknown argument: $arg"
             echo "Usage: bash launch/eval_pdlm.sh --depth=8 [--data_ratio=20]"
             echo "       [--block_size=4] [--num_batches=20] [--local_dir=/tmp/pdlm_eval]"
             echo "       [--repo=duoduoyeah/pdlm_d8] [--ckpt_dir=/path/to/ckpt]"
-            echo "       [--run_compatibility]"
+            echo "       [--run_compatibility] [--dump_batch=/path/to/output.txt]"
             exit 1
             ;;
     esac
@@ -143,6 +147,19 @@ if [ -n "${CKPT_DIR}" ]; then
     COMPAT_FLAG=""
     if [ "${RUN_COMPATIBILITY}" = "true" ]; then
         COMPAT_FLAG="--run_compatibility"
+    fi
+
+    DUMP_FLAG=""
+    if [ -n "${DUMP_BATCH}" ]; then
+        DUMP_FLAG="--dump_batch=${DUMP_BATCH}"
+    fi
+
+    # If dump_batch is specified, just run that and exit
+    if [ -n "${DUMP_BATCH}" ]; then
+        python -m scripts.pdlm_eval \
+            --ckpt_dir="${ACTUAL_CKPT_DIR}" \
+            ${DUMP_FLAG}
+        exit 0
     fi
 
     python -m scripts.pdlm_eval \
