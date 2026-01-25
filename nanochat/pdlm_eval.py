@@ -81,17 +81,26 @@ def eval_pdlm(
 
 def _eval_loss_per_position(
     model, val_loader, block_size, num_batches,
-    attn_mask, device, autocast_ctx, prefix_pure_tokens
+    attn_mask, device, autocast_ctx, prefix_pure_tokens,
+    cache_batches=False,
 ):
     """
     Evaluate loss broken down by position within block.
     Skip block 0 (no context), compute from blocks 1 onwards.
+
+    Args:
+        cache_batches: If True, return (result, cached_batches) where cached_batches
+                       is a list of (inputs, targets, loss_extras, state) tuples.
     """
     # Accumulators: nll_by_pos[pos] = (total_nll, total_tokens)
     nll_by_pos = {p: {"nll": 0.0, "tokens": 0} for p in range(block_size)}
+    cached_batches = [] if cache_batches else None
 
     for batch_idx in range(num_batches):
-        inputs, targets, loss_extras, _ = next(val_loader)
+        inputs, targets, loss_extras, state = next(val_loader)
+
+        if cache_batches:
+            cached_batches.append((inputs, targets, loss_extras, state))
         # inputs: (B, T) - group tokens at block positions, pure at prefix
         # targets: (B, T) - pure tokens everywhere
         # loss_extras: {"loss_mask": (B, T)} - True at block positions
@@ -163,6 +172,8 @@ def _eval_loss_per_position(
             "tokens": pos_tokens,
         }
 
+    if cache_batches:
+        return result, cached_batches
     return result
 
 
@@ -175,6 +186,7 @@ def eval_pdlm_compatibility(
     device,
     autocast_ctx,
     token_map=None,
+    cached_batches=None,
 ):
     """
     Evaluate compatibility of parallel predictions.
@@ -187,13 +199,15 @@ def eval_pdlm_compatibility(
 
     Args:
         model: PDLM model (stage2)
-        val_loader: validation data loader
+        val_loader: validation data loader (can be None if cached_batches provided)
         block_size: block size for PDLM
-        num_batches: number of batches to evaluate
+        num_batches: number of batches to evaluate (ignored if cached_batches provided)
         attn_mask: attention mask for the model
         device: device to run on
         autocast_ctx: autocast context for mixed precision
         token_map: TokenMap for pure<->group conversion (loaded if None)
+        cached_batches: pre-cached list of (inputs, targets, loss_extras, state) tuples.
+                        If provided, uses these instead of consuming from val_loader.
 
     Returns:
         dict with compatibility results:
@@ -214,9 +228,18 @@ def eval_pdlm_compatibility(
     # Accumulators
     compat_by_pos = {p: {"matched": 0, "total": 0} for p in range(block_size)}
 
+    # Use cached batches if provided, otherwise consume from loader
+    def get_batch(idx):
+        if cached_batches is not None:
+            return cached_batches[idx]
+        return next(val_loader)
+
+    # Determine actual number of batches
+    actual_batches = len(cached_batches) if cached_batches is not None else num_batches
+
     with torch.no_grad():
-        for batch_idx in range(num_batches):
-            inputs, targets, loss_extras, _ = next(val_loader)
+        for batch_idx in range(actual_batches):
+            inputs, targets, loss_extras, _ = get_batch(batch_idx)
             # inputs: (B, T) - group tokens at block positions
             # targets: (B, T) - pure tokens
 
@@ -313,24 +336,35 @@ def eval_pdlm_full(
     Returns:
         dict with all metrics
     """
-    # Run loss evaluation
-    result = eval_pdlm(
-        model, val_loader, block_size, num_batches,
-        attn_mask, device, autocast_ctx, prefix_pure_tokens
-    )
+    # Run loss evaluation with batch caching for consistency
+    was_training = model.training
+    model.eval()
 
-    # Run compatibility evaluation
+    with torch.no_grad():
+        loss_result, cached_batches = _eval_loss_per_position(
+            model, val_loader, block_size, num_batches,
+            attn_mask, device, autocast_ctx, prefix_pure_tokens,
+            cache_batches=True,
+        )
+
+    result = loss_result
+
+    # Run compatibility evaluation on the same cached batches
     if run_compatibility:
         if compatibility_batches is None:
             compatibility_batches = max(1, num_batches // 4)
 
-        # Need a fresh loader for compatibility eval
-        # The caller should provide a way to reset or create new loader
-        # For now, we continue with the same loader (will use next batches)
+        # Use first compatibility_batches from cache (same data as loss eval)
+        compat_batches = cached_batches[:compatibility_batches]
+
         compat_result = eval_pdlm_compatibility(
-            model, val_loader, block_size, compatibility_batches,
-            attn_mask, device, autocast_ctx
+            model, None, block_size, len(compat_batches),
+            attn_mask, device, autocast_ctx,
+            cached_batches=compat_batches,
         )
         result["compatibility"] = compat_result
+
+    if was_training:
+        model.train()
 
     return result

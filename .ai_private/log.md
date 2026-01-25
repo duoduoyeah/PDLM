@@ -17,6 +17,7 @@
 - Modify PDLM wte to include group tokens (lm_head stays pure_vocab).[Done]
 
 [TODO]
+- 
 - Implement two-stage training loss (MASK→Group, Group→Pure). [Later]
 - Per-group accuracy evaluation script.[TODO]
 - Logit leakage analysis (check prob mass outside group). [Later]
