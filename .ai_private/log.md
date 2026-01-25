@@ -1,6 +1,7 @@
 01/25
 - Created `launch/run_expc.sh`; group tokenizer is self-contained (no `token_bytes.pt` needed)
 - Created PDLM Stage 2 eval: `nanochat/pdlm_eval.py`, `scripts/pdlm_eval.py`, `launch/eval_pdlm.sh`, integrated into `base_train.py`
+- Refined PDLM eval logic and scripts (fixes and updates).
 
 01/21 ~ 01/24
 [Done]
