@@ -123,13 +123,30 @@ if [ -n "${CKPT_DIR}" ]; then
     export NANOCHAT_BASE_DIR="${BASE_DIR}"
     echo "NANOCHAT_BASE_DIR set to: ${BASE_DIR}"
 
+    # Find the directory containing model_*.pt files (handles nested structures)
+    ACTUAL_CKPT_DIRS=$(find "${CKPT_DIR}/base_checkpoints" -name "model_*.pt" -printf '%h\n' 2>/dev/null | sort -u)
+    CKPT_COUNT=$(echo "$ACTUAL_CKPT_DIRS" | grep -c . 2>/dev/null || echo 0)
+
+    if [ "$CKPT_COUNT" -eq 0 ]; then
+        echo "Error: No checkpoints found in ${CKPT_DIR}/base_checkpoints"
+        exit 1
+    elif [ "$CKPT_COUNT" -gt 1 ]; then
+        echo "Warning: Multiple checkpoint directories found:"
+        echo "$ACTUAL_CKPT_DIRS"
+        echo "Please specify a more specific --ckpt_dir path."
+        exit 1
+    fi
+
+    ACTUAL_CKPT_DIR="$ACTUAL_CKPT_DIRS"
+    echo "Checkpoint dir: ${ACTUAL_CKPT_DIR}"
+
     COMPAT_FLAG=""
     if [ "${RUN_COMPATIBILITY}" = "true" ]; then
         COMPAT_FLAG="--run_compatibility"
     fi
 
     python -m scripts.pdlm_eval \
-        --ckpt_dir="${CKPT_DIR}" \
+        --ckpt_dir="${ACTUAL_CKPT_DIR}" \
         --num_batches=${NUM_BATCHES} \
         --output_json="${CKPT_DIR}/eval_result.json" \
         ${COMPAT_FLAG}
