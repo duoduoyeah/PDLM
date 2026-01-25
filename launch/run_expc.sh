@@ -231,6 +231,17 @@ rm -rf "${NANOCHAT_BASE_DIR}/tokenized_data"
 
 # Copy results to Drive for persistence
 DRIVE_OUTPUT_DIR="${DRIVE_BASE}/${MODEL_NAME}"
+if [ -d "${DRIVE_OUTPUT_DIR}" ]; then
+    if [ "${TEST_MODE}" = "true" ]; then
+        echo "Test mode: Removing old Drive output dir ${DRIVE_OUTPUT_DIR}"
+        rm -rf "${DRIVE_OUTPUT_DIR}"
+    else
+        TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+        BACKUP_DIR="${DRIVE_OUTPUT_DIR}_backup_${TIMESTAMP}"
+        echo "Production mode: Backing up ${DRIVE_OUTPUT_DIR} to ${BACKUP_DIR}"
+        mv "${DRIVE_OUTPUT_DIR}" "${BACKUP_DIR}"
+    fi
+fi
 echo "Copying results to Drive: ${DRIVE_OUTPUT_DIR}"
 mkdir -p "${DRIVE_OUTPUT_DIR}"
 cp -r "${NANOCHAT_BASE_DIR}"/* "${DRIVE_OUTPUT_DIR}/"

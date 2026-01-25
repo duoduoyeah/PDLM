@@ -124,10 +124,6 @@ def _eval_loss_per_position(
             num_blocks = T // block_size
 
             for pos in range(block_size):
-                # Skip positions in prefix_pure_tokens
-                if pos < prefix_pure_tokens:
-                    continue
-
                 # For each block (starting from block 1 to skip block 0)
                 for block_idx in range(1, num_blocks):
                     pos_in_seq = block_idx * block_size + pos
