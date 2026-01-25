@@ -104,6 +104,25 @@ if [ -n "${CKPT_DIR}" ]; then
     echo ""
     echo "Using direct checkpoint path: ${CKPT_DIR}"
 
+    # Create symlink in base dir pointing to tokenizer in ckpt folder
+    BASE_DIR=$(dirname "${DATA_DIR}")
+    TOKENIZER_LINK="${BASE_DIR}/tokenizer"
+    MODEL_TOKENIZER="${CKPT_DIR}/tokenizer"
+
+    if [ -d "${MODEL_TOKENIZER}" ]; then
+        # Remove existing symlink if it points elsewhere
+        if [ -L "${TOKENIZER_LINK}" ]; then
+            rm "${TOKENIZER_LINK}"
+        fi
+        ln -s "${MODEL_TOKENIZER}" "${TOKENIZER_LINK}"
+        echo "Created symlink: ${TOKENIZER_LINK} -> ${MODEL_TOKENIZER}"
+    else
+        echo "Warning: No tokenizer found at ${MODEL_TOKENIZER}"
+    fi
+
+    export NANOCHAT_BASE_DIR="${BASE_DIR}"
+    echo "NANOCHAT_BASE_DIR set to: ${BASE_DIR}"
+
     COMPAT_FLAG=""
     if [ "${RUN_COMPATIBILITY}" = "true" ]; then
         COMPAT_FLAG="--run_compatibility"
