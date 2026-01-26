@@ -22,6 +22,32 @@ Stage 2: Group → Pure        (predict exact token given group hint)
 
 **Start with**: MTP-based (simpler architecture, no new vocab tokens needed).
 
+## Loss Weighting
+
+Exponential decay: `weight[k] = β^k / Σβ^k` (β=0.8, or β=1.0 for uniform)
+
+**Why?** Distant tokens (t+3, t+4) have higher loss than near tokens (t+1). Without weighting, high-loss distant tokens dominate gradients. Exponential decay balances contribution across positions.
+
+Note: This differs from FastMTP's motivation (speculative decoding acceptance). Here all positions matter equally for end-to-end decoding - weighting is purely for training stability.
+
+## Overlap Support (overlap_k > 1)
+
+When `overlap_k > 1`, each pure token belongs to **multiple** valid groups.
+
+**Any-correct loss:**
+```python
+# valid_targets: (*, overlap_k) - all valid group indices
+log_probs = F.log_softmax(logits, dim=-1)
+valid_log_probs = torch.gather(log_probs, dim=-1, index=valid_targets)
+loss = -logsumexp(valid_log_probs, dim=-1).mean()
+```
+
+**Key properties:**
+- `loss = -log(Σ P(g) for g in valid_groups)`
+- If model puts 100% prob on valid groups → loss = 0
+- Penalizes probability "leaked" to invalid groups
+- Degenerates to standard CE when overlap_k = 1
+
 ## Success Metric: Transition Accuracy
 
 A transition is **successful** if the predicted group contains the target token.
@@ -35,6 +61,6 @@ transition_accuracy = mean(target_token in group_members[predicted_group])
 
 ## TODO
 
-- [ ] Implement Stage 1 MTP training (predict group tokens from pure prefix)
+- [x] Implement Stage 1 MTP training (predict group tokens from pure prefix)
 - [ ] Evaluate transition accuracy per position (does i+1 differ from i+4?)
 - [ ] End-to-end decoding: Stage 1 + Stage 2 combined

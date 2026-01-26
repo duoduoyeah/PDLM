@@ -330,6 +330,62 @@ class GPTMTP(nn.Module):
 
         return loss
 
+    def forward_for_eval(self, idx, targets=None, attn_mask=None):
+        """
+        Forward pass for evaluation that returns logits without computing loss.
+
+        Args:
+            idx: (B, T) pure token ids
+            targets: (B, T, K) target group token ids for K future positions
+                     Required for teacher forcing in MTP head
+            attn_mask: ignored (MTP uses standard causal attention)
+
+        Returns:
+            main_logits: (B, T, num_groups) logits for k=0 (1st group token)
+            mtp_logits: (B, T, K-1, num_groups) logits for k=1..K-1
+        """
+        B, T = idx.size()
+        K = self.config.n_future_tokens
+
+        # Check rotary cache
+        assert T <= self.cos.size(1), f"Sequence length exceeds rotary cache: {T} > {self.cos.size(1)}"
+        assert idx.device == self.cos.device
+
+        cos_sin = self.cos[:, :T], self.sin[:, :T]
+
+        # Forward through main transformer
+        x = self.transformer.wte(idx)
+        x = norm(x)
+        for block in self.transformer.h:
+            x = block(x, cos_sin, kv_cache=None)
+        h = norm(x)  # hidden states for MTP head
+
+        # Compute logits for 1st group token
+        softcap = 15
+        main_logits = self.lm_head(h)  # (B, T, num_groups)
+        main_logits = main_logits.float()
+        main_logits = softcap * torch.tanh(main_logits / softcap)
+
+        # Get 1st group token for MTP head input (teacher forcing from targets)
+        assert targets is not None, "targets required for forward_for_eval (teacher forcing)"
+        assert targets.shape == (B, T, K), f"Expected targets shape ({B}, {T}, {K}), got {targets.shape}"
+
+        first_group_tok = targets[:, :, 0]  # (B, T)
+
+        # Get cos/sin for MTP head
+        mtp_cos = self.cos[:, :T]
+        mtp_sin = self.sin[:, :T]
+
+        # MTP targets are 2nd..Kth group tokens
+        mtp_targets = targets[:, :, 1:]  # (B, T, K-1)
+
+        # Forward MTP head
+        mtp_logits = self.mtp_head(h, mtp_cos, mtp_sin, first_group_tok, targets=mtp_targets)
+        mtp_logits = mtp_logits.float()
+        mtp_logits = softcap * torch.tanh(mtp_logits / softcap)
+
+        return main_logits, mtp_logits
+
     @torch.inference_mode()
     def generate(self, tokens, max_tokens, temperature=1.0, top_k=None, seed=42):
         """

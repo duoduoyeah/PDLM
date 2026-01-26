@@ -1,4 +1,5 @@
 01/25
+- TODO: Add transition_accuracy metric to `nanochat/pdlm_eval.py` and `scripts/pdlm_eval.py` (per-position + per-group breakdown)
 - Created `launch/run_expc.sh`; group tokenizer is self-contained (no `token_bytes.pt` needed)
 - Created PDLM Stage 2 eval: `nanochat/pdlm_eval.py`, `scripts/pdlm_eval.py`, `launch/eval_pdlm.sh`, integrated into `base_train.py`
 - Refined PDLM eval logic and scripts (fixes and updates).

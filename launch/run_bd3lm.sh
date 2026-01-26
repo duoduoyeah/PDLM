@@ -287,38 +287,39 @@ echo "=== Training complete for ${MODEL_NAME} ==="
 # Remove dataset symlink (not needed in model repo, actual data stays in shared local dir)
 rm -f "${NANOCHAT_BASE_DIR}/simple_story_data"
 
-# Skip upload in test mode
-if [ "${TEST_MODE}" = "true" ]; then
-    echo "Test mode: Skipping HuggingFace upload"
-else
+# Skip HuggingFace upload (keeping results on Google Drive only)
+echo "Skipping HuggingFace upload (disabled for now, results saved to Drive)"
 
-
-    # Prepare upload folder
-    mkdir -p /content/upload_to_huggingface
-    cp -r "${NANOCHAT_BASE_DIR}" /content/upload_to_huggingface/
-
-    # Upload to HuggingFace
-    python -c "
-import os
-from huggingface_hub import HfApi
-
-token = os.environ.get('HF_TOKEN', '')
-if not token:
-    print('Warning: HF_TOKEN not set, skipping upload')
-else:
-    api = HfApi(token=token)
-    model_repo = os.environ['MODEL_REPO']
-    print(f'Uploading to {model_repo}...')
-    api.upload_large_folder(
-        folder_path='/content/upload_to_huggingface',
-        repo_id=model_repo,
-        repo_type='model',
-    )
-    print('Upload complete!')
-"
-
-    # Cleanup upload folder for next model
-    rm -rf /content/upload_to_huggingface
-fi
+# TODO: Re-enable HuggingFace upload when ready
+# if [ "${TEST_MODE}" = "true" ]; then
+#     echo "Test mode: Skipping HuggingFace upload"
+# else
+#     # Prepare upload folder
+#     mkdir -p /content/upload_to_huggingface
+#     cp -r "${NANOCHAT_BASE_DIR}" /content/upload_to_huggingface/
+#
+#     # Upload to HuggingFace
+#     python -c "
+# import os
+# from huggingface_hub import HfApi
+#
+# token = os.environ.get('HF_TOKEN', '')
+# if not token:
+#     print('Warning: HF_TOKEN not set, skipping upload')
+# else:
+#     api = HfApi(token=token)
+#     model_repo = os.environ['MODEL_REPO']
+#     print(f'Uploading to {model_repo}...')
+#     api.upload_large_folder(
+#         folder_path='/content/upload_to_huggingface',
+#         repo_id=model_repo,
+#         repo_type='model',
+#     )
+#     print('Upload complete!')
+# "
+#
+#     # Cleanup upload folder for next model
+#     rm -rf /content/upload_to_huggingface
+# fi
 
 echo "=== Done with ${MODEL_NAME} ==="

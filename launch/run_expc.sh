@@ -247,31 +247,34 @@ mkdir -p "${DRIVE_OUTPUT_DIR}"
 cp -r "${NANOCHAT_BASE_DIR}"/* "${DRIVE_OUTPUT_DIR}/"
 echo "Results saved to Drive."
 
-# Skip HF upload in test mode
-if [ "${TEST_MODE}" = "true" ]; then
-    echo "Test mode: Skipping HuggingFace upload"
-else
-    # Upload to HuggingFace
-    python -c "
-import os
-from huggingface_hub import HfApi
+# Skip HuggingFace upload (keeping results on Google Drive only)
+echo "Skipping HuggingFace upload (disabled for now, results saved to Drive)"
 
-token = os.environ.get('HF_TOKEN', '')
-if not token:
-    print('Warning: HF_TOKEN not set, skipping upload')
-else:
-    api = HfApi(token=token)
-    model_repo = os.environ['MODEL_REPO']
-    drive_output = '${DRIVE_OUTPUT_DIR}'
-    print(f'Uploading {drive_output} to {model_repo}...')
-    api.upload_large_folder(
-        folder_path=drive_output,
-        repo_id=model_repo,
-        repo_type='model',
-    )
-    print('Upload complete!')
-"
-fi
+# TODO: Re-enable HuggingFace upload when ready
+# if [ "${TEST_MODE}" = "true" ]; then
+#     echo "Test mode: Skipping HuggingFace upload"
+# else
+#     # Upload to HuggingFace
+#     python -c "
+# import os
+# from huggingface_hub import HfApi
+#
+# token = os.environ.get('HF_TOKEN', '')
+# if not token:
+#     print('Warning: HF_TOKEN not set, skipping upload')
+# else:
+#     api = HfApi(token=token)
+#     model_repo = os.environ['MODEL_REPO']
+#     drive_output = '${DRIVE_OUTPUT_DIR}'
+#     print(f'Uploading {drive_output} to {model_repo}...')
+#     api.upload_large_folder(
+#         folder_path=drive_output,
+#         repo_id=model_repo,
+#         repo_type='model',
+#     )
+#     print('Upload complete!')
+# "
+# fi
 
 # Cleanup local training dir
 echo "Cleaning up local training dir..."
