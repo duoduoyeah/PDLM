@@ -13,6 +13,7 @@ import torch
 from nanochat.gpt import GPT, GPTConfig
 from nanochat.pdlm import PDLM, PDLMConfig
 from nanochat.bd3lm import BDLM, BDLMConfig
+from nanochat.gpt_mtp import GPTMTP, GPTMTPConfig
 from nanochat.dataloader import get_data_loader
 from nanochat.bd3lm_eval import eval_bd3lm
 from nanochat.pdlm_eval import eval_pdlm
@@ -75,7 +76,7 @@ exec(open(os.path.join('nanochat', 'configurator.py')).read()) # overrides from 
 user_config = {k: globals()[k] for k in config_keys} # will be useful for logging
 # -----------------------------------------------------------------------------
 assert 0 <= prefix_pure_tokens <= block_size <= max_seq_len, "Expected prefix_pure_tokens <= block_size <= max_seq_len"
-assert model_type in {"next_token_ar", "bd3lm", "pdlm"}, f"Invalid model_type: {model_type}"
+assert model_type in {"next_token_ar", "bd3lm", "pdlm", "mtp"}, f"Invalid model_type: {model_type}"
 
 
 # Compute init
@@ -103,6 +104,10 @@ elif model_type == "pdlm":
     token_map = get_token_map(device="cpu")
     pure_vocab_size = token_map.pure_vocab_size
     num_groups = token_map.num_groups
+elif model_type == "mtp":
+    token_map = get_token_map(device="cpu")
+    pure_vocab_size = token_map.pure_vocab_size
+    num_groups = token_map.num_groups
 else:
     raise ValueError(f"Unknown model_type: {model_type}")
 assert pure_vocab_size <= all_vocab_size, "pure_vocab_size should not exceed all_vocab_size"
@@ -115,7 +120,7 @@ except KeyError:
     pass
 print0(f"Vocab size: {all_vocab_size:,}")
 print0(f"Pure vocab size: {pure_vocab_size:,}")
-if model_type == "pdlm":
+if model_type in {"pdlm", "mtp"}:
     print0(f"Num groups: {num_groups:,}")
 if mask_token_id != -1:
     print0(f"Mask token id: {mask_token_id}")
@@ -189,6 +194,19 @@ elif model_type == "pdlm":
         is_causal=is_causal,
         bucket_size=block_size,
         model_name=run,
+    )
+elif model_type == "mtp":
+    ModelConfig, Model = GPTMTPConfig, GPTMTP
+    model_config_kwargs = dict(
+        sequence_len=max_seq_len,
+        pure_vocab_size=pure_vocab_size,
+        num_groups=num_groups,
+        n_future_tokens=block_size,  # predict block_size group tokens
+        mtp_loss_beta=0.8,
+        n_layer=num_layers,
+        n_head=num_heads,
+        n_kv_head=num_kv_heads,
+        n_embd=model_dim,
     )
 else:
     raise ValueError(f"Unknown model_type: {model_type}")
@@ -328,6 +346,8 @@ if eval_every > 0:
         print0(f"Initialized validation dataloader and eval attention mask for PDLM evaluation")
     elif model_type == "next_token_ar":
         pass  # TODO: AR validation setup
+    elif model_type == "mtp":
+        pass  # TODO: MTP validation setup
 
 debug_dump_path = None
 if debug:
@@ -478,6 +498,8 @@ while True:
             wandb_run.log(log_data)
         elif model_type == "next_token_ar":
             pass  # TODO: AR evaluation
+        elif model_type == "mtp":
+            pass  # TODO: MTP evaluation
 
     # save checkpoint: at the end of the run, or every save_every steps, except at the first step or the resume step
     if last_step or (step > 0 and step != resume_from_step and save_every > 0 and step % save_every == 0):
@@ -540,6 +562,10 @@ while True:
                 else:
                     batch_effective_tokens = x.numel() * ddp_world_size
                 total_effective_tokens += batch_effective_tokens
+            elif model_type == "mtp":
+                # MTP: x is (B, T) pure tokens, y is (B, T, K) group token targets
+                loss = model(x, y)
+                total_effective_tokens += x.numel() * ddp_world_size
             else:
                 # next_token_ar: GPT forward doesn't take attn_mask
                 loss = model(x, y)
