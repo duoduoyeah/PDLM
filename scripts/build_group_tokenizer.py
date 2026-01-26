@@ -2,14 +2,22 @@
 Build a group tokenizer from a base tokenizer and model embeddings.
 
 Usage:
+    # All combos mode:
     uv run -m scripts.build_group_tokenizer \
         --checkpoint-dir /path/to/base_checkpoints \
         --output-dir /path/to/output \
-        --num-groups 64 \
-        --overlap-k 1
+        --mode all_combos --num-sub 8 --sub-per-final 2
+
+    # Flexible mode:
+    uv run -m scripts.build_group_tokenizer \
+        --checkpoint-dir /path/to/base_checkpoints \
+        --output-dir /path/to/output \
+        --mode flexible --num-sub 128 --sub-per-final 2 --overlap-k 4
+
+    # With mask (default: no mask):
+    uv run -m scripts.build_group_tokenizer ... --mask
 """
 import argparse
-
 
 from nanochat.checkpoint_manager import load_model_from_dir
 from nanochat.group_tokenizer import TokenizerBuilder, GroupTokenizerConfig
@@ -35,22 +43,38 @@ def main():
         required=True,
         help="Output directory for the new tokenizer",
     )
+
+    # New sub-group combination parameters
     parser.add_argument(
-        "--num-groups",
+        "--mode",
+        type=str,
+        choices=["all_combos", "flexible"],
+        default="all_combos",
+        help="Overlap mode: 'all_combos' for C(num_sub, sub_per_final), 'flexible' for custom overlap_k",
+    )
+    parser.add_argument(
+        "--num-sub",
         type=int,
         required=True,
-        help="Number of group tokens to create",
+        help="Number of sub-groups from clustering",
+    )
+    parser.add_argument(
+        "--sub-per-final",
+        type=int,
+        default=1,
+        help="Number of sub-groups per final group (default: 1)",
     )
     parser.add_argument(
         "--overlap-k",
         type=int,
-        default=1,
-        help="Number of groups each pure token belongs to (default: 1)",
+        default=None,
+        help="Number of groups per token (only for flexible mode)",
     )
+
     parser.add_argument(
-        "--no-mask",
+        "--mask",
         action="store_true",
-        help="Don't include MASK token",
+        help="Include MASK token (default: no mask)",
     )
     parser.add_argument(
         "--clustering-method",
@@ -66,6 +90,10 @@ def main():
         help="Random seed for clustering (default: 42)",
     )
     args = parser.parse_args()
+
+    # Validate args
+    if args.mode == "flexible" and args.overlap_k is None:
+        parser.error("--overlap-k is required for flexible mode")
 
     # Load model and tokenizer
     print(f"Loading model from {args.checkpoint_dir}...")
@@ -95,13 +123,22 @@ def main():
 
     # Create config
     config = GroupTokenizerConfig(
-        num_groups=args.num_groups,
+        num_sub=args.num_sub,
+        sub_per_final=args.sub_per_final,
+        overlap_mode=args.mode,
         overlap_k=args.overlap_k,
-        include_mask=not args.no_mask,
+        include_mask=args.mask,
         clustering_method=args.clustering_method,
         random_seed=args.seed,
     )
-    print(f"\nConfig: {config}")
+    print(f"\nConfig:")
+    print(f"  num_sub: {config.num_sub}")
+    print(f"  sub_per_final: {config.sub_per_final}")
+    print(f"  overlap_mode: {config.overlap_mode}")
+    print(f"  num_groups: {config.num_groups}")
+    print(f"  effective_overlap_k: {config.effective_overlap_k}")
+    print(f"  include_mask: {config.include_mask}")
+    print(f"  output_name: {config.get_output_name_with_vocab(emb_vocab_size)}")
 
     # Build tokenizer
     print(f"\nBuilding group tokenizer...")
@@ -113,6 +150,22 @@ def main():
     print(f"\nTokenizer stats:")
     for k, v in stats.items():
         print(f"  {k}: {v}")
+
+    # Verify tensor shapes
+    token_maps = builder.token_maps
+    print(f"\nTensor shapes:")
+    print(f"  pure_to_group: {token_maps['pure_to_group'].shape}")
+    print(f"  group_to_pure_mask: {token_maps['group_to_pure_mask'].shape}")
+
+    # Verify each token appears in exactly k groups
+    k = config.effective_overlap_k
+    pure_to_group = token_maps['pure_to_group']
+    group_to_pure_mask = token_maps['group_to_pure_mask']
+
+    # Count how many groups each token is in via mask
+    tokens_per_group = group_to_pure_mask.sum(dim=0)
+    assert (tokens_per_group == k).all(), f"Token membership mismatch: expected {k}, got {tokens_per_group.unique()}"
+    print(f"  Verified: each token in exactly {k} groups")
 
     # Save
     print(f"\nSaving to {args.output_dir}...")

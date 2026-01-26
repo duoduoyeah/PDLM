@@ -6,7 +6,13 @@ import torch
 from typing import Optional, Dict, Any
 
 from .config import GroupTokenizerConfig
-from .clustering import kmeans_clustering, random_clustering, compute_overlap_assignments
+from .clustering import (
+    kmeans_clustering,
+    random_clustering,
+    build_all_combos_assignment,
+    build_flexible_assignment,
+    derive_pure_to_group,
+)
 
 
 class TokenizerBuilder:
@@ -35,76 +41,78 @@ class TokenizerBuilder:
 
         # Built artifacts (populated by build())
         self.config: Optional[GroupTokenizerConfig] = None
-        self.group_assignments: Optional[torch.Tensor] = None  # (pure_vocab, overlap_k)
+        self.sub_assignments: Optional[torch.Tensor] = None  # (vocab_size,) sub-group assignments
+        self.sub_to_final: Optional[torch.Tensor] = None  # (num_final, num_sub) assignment matrix
         self.tokenizer = None
         self.token_maps: Optional[Dict[str, Any]] = None
 
     def build(self, config: GroupTokenizerConfig) -> "TokenizerBuilder":
         """
-        Build the group tokenizer variant.
+        Build the group tokenizer variant using sub-group combination approach.
 
         Args:
-            config: GroupTokenizerConfig specifying num_groups, overlap_k, etc.
+            config: GroupTokenizerConfig specifying num_sub, sub_per_final, overlap_mode, etc.
 
         Returns:
             self for chaining
         """
         self.config = config
 
-        # Validate lower-triangle constraint
-        tokens_per_group = self.pure_vocab_size / config.num_groups
-        max_reasonable_k = int(tokens_per_group ** 0.5)
-        if config.overlap_k > max_reasonable_k:
-            print(f"Warning: overlap_k={config.overlap_k} may be too high for "
-                  f"{tokens_per_group:.0f} tokens/group (sqrt={max_reasonable_k})")
-
-        # Step 1: Cluster pure tokens into groups
+        # Step 1: Cluster pure tokens into SUB-GROUPS
+        print(f"Step 1: Clustering into {config.num_sub} sub-groups...")
         if config.clustering_method == "kmeans":
-            base_assignments = kmeans_clustering(
+            self.sub_assignments = kmeans_clustering(
                 self.embeddings,
-                config.num_groups,
+                config.num_sub,
                 seed=config.random_seed,
             )
         elif config.clustering_method == "random":
-            base_assignments = random_clustering(
+            self.sub_assignments = random_clustering(
                 self.pure_vocab_size,
-                config.num_groups,
+                config.num_sub,
                 seed=config.random_seed,
             )
         else:
             raise ValueError(f"Unknown clustering method: {config.clustering_method}")
 
-        # Step 2: Compute overlap assignments if overlap_k > 1
-        self.group_assignments = compute_overlap_assignments(
-            self.embeddings,
-            base_assignments,
-            config.num_groups,
-            config.overlap_k,
+        # Step 2: Build assignment matrix based on mode
+        print(f"Step 2: Building assignment matrix (mode={config.overlap_mode})...")
+        if config.overlap_mode == "all_combos":
+            self.sub_to_final = build_all_combos_assignment(
+                config.num_sub,
+                config.sub_per_final,
+            )
+        else:  # flexible
+            self.sub_to_final = build_flexible_assignment(
+                config.num_sub,
+                config.sub_per_final,
+                config.overlap_k,
+                seed=config.random_seed,
+            )
+
+        # Step 3: Derive final tensors
+        print(f"Step 3: Deriving final tensors...")
+        pure_to_group, group_to_pure_mask = derive_pure_to_group(
+            self.sub_assignments,
+            self.sub_to_final,
         )
 
-        # Step 3: Build token maps
-        self._build_token_maps()
+        # Step 4: Build token maps
+        print(f"Step 4: Building token maps...")
+        self._build_token_maps(pure_to_group, group_to_pure_mask)
 
-        # Step 4: Build extended tokenizer
+        # Step 5: Build extended tokenizer
+        print(f"Step 5: Building extended tokenizer...")
         self._build_tokenizer()
 
         return self
 
-    def _build_token_maps(self):
+    def _build_token_maps(self, pure_to_group: torch.Tensor, group_to_pure_mask: torch.Tensor):
         """Build the runtime token maps."""
         config = self.config
         pure_vocab = self.pure_vocab_size
         num_groups = config.num_groups
-
-        # pure_to_group: (pure_vocab, overlap_k)
-        pure_to_group = self.group_assignments.clone()
-
-        # group_to_pure_mask: (num_groups, pure_vocab) bool
-        group_to_pure_mask = torch.zeros(num_groups, pure_vocab, dtype=torch.bool)
-        for g in range(num_groups):
-            # A token belongs to group g if g is in any of its overlap_k assignments
-            members = (pure_to_group == g).any(dim=1)
-            group_to_pure_mask[g] = members
+        overlap_k = config.effective_overlap_k
 
         # MASK token id
         mask_token_id = -1
@@ -116,7 +124,7 @@ class TokenizerBuilder:
             "group_to_pure_mask": group_to_pure_mask,
             "pure_vocab_size": pure_vocab,
             "num_groups": num_groups,
-            "overlap_k": config.overlap_k,
+            "overlap_k": overlap_k,
             "mask_token_id": mask_token_id,
         }
 
@@ -125,6 +133,7 @@ class TokenizerBuilder:
         import tiktoken
 
         config = self.config
+        num_groups = config.num_groups
         enc = self.base_tokenizer.enc  # tiktoken.Encoding
 
         # Extract components from base encoding
@@ -139,7 +148,7 @@ class TokenizerBuilder:
 
         # Add group tokens: <|G_0|>, <|G_1|>, ..., <|G_{num_groups-1}|>
         self.group_tokens = {}
-        for g in range(config.num_groups):
+        for g in range(num_groups):
             token_name = f"<|G_{g}|>"
             token_id = self.pure_vocab_size + g
             special_tokens[token_name] = token_id
@@ -147,7 +156,7 @@ class TokenizerBuilder:
 
         # Add MASK token at the end
         if config.include_mask:
-            mask_id = self.pure_vocab_size + config.num_groups
+            mask_id = self.pure_vocab_size + num_groups
             special_tokens["<|MASK|>"] = mask_id
             self.group_tokens["<|MASK|>"] = mask_id
 
@@ -177,15 +186,19 @@ class TokenizerBuilder:
         torch.save(self.token_maps, map_path)
 
         # Save config
+        config = self.config
         config_path = os.path.join(output_dir, "config.txt")
         with open(config_path, "w") as f:
-            f.write(f"num_groups: {self.config.num_groups}\n")
-            f.write(f"overlap_k: {self.config.overlap_k}\n")
-            f.write(f"include_mask: {self.config.include_mask}\n")
-            f.write(f"clustering_method: {self.config.clustering_method}\n")
+            f.write(f"num_sub: {config.num_sub}\n")
+            f.write(f"sub_per_final: {config.sub_per_final}\n")
+            f.write(f"overlap_mode: {config.overlap_mode}\n")
+            f.write(f"num_groups: {config.num_groups}\n")
+            f.write(f"overlap_k: {config.effective_overlap_k}\n")
+            f.write(f"include_mask: {config.include_mask}\n")
+            f.write(f"clustering_method: {config.clustering_method}\n")
             f.write(f"pure_vocab_size: {self.pure_vocab_size}\n")
             f.write(f"all_vocab_size: {self.all_vocab_size}\n")
-            if self.config.include_mask:
+            if config.include_mask:
                 f.write(f"mask_token_id: {self.token_maps['mask_token_id']}\n")
 
         # Save group token mapping
@@ -223,8 +236,11 @@ class TokenizerBuilder:
         group_sizes = self.token_maps["group_to_pure_mask"].sum(dim=1)
         return {
             "pure_vocab_size": self.pure_vocab_size,
+            "num_sub": self.config.num_sub,
+            "sub_per_final": self.config.sub_per_final,
+            "overlap_mode": self.config.overlap_mode,
             "num_groups": self.config.num_groups,
-            "overlap_k": self.config.overlap_k,
+            "overlap_k": self.config.effective_overlap_k,
             "all_vocab_size": self.all_vocab_size,
             "group_size_min": group_sizes.min().item(),
             "group_size_max": group_sizes.max().item(),

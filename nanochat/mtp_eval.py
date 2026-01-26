@@ -11,6 +11,8 @@ Evaluation metrics:
 Note:
 - Uses teacher forcing (matches training behavior)
 - Transition accuracy = argmax(logits) == target_group (not pure token accuracy)
+- Supports overlap tokenizer: targets are (B, T, K, overlap_k) where overlap_k contains
+  all valid token groups for any-correct loss computation
 """
 
 import torch
@@ -31,7 +33,8 @@ def eval_mtp(
         model: GPTMTP model
         val_loader: validation data loader yielding (inputs, targets, loss_extras, state_dict)
                     inputs: (B, T) pure token ids
-                    targets: (B, T, K) K future group tokens per position
+                    targets: (B, T, K, overlap_k) K future group tokens per position,
+                             with overlap_k valid groups for any-correct loss
         num_batches: number of batches to evaluate
         device: device to run on
         autocast_ctx: autocast context for mixed precision
@@ -69,7 +72,7 @@ def eval_mtp(
         for batch_idx in range(num_batches):
             inputs, targets, loss_extras, state = next(val_loader)
             # inputs: (B, T) pure tokens
-            # targets: (B, T, K) group tokens
+            # targets: (B, T, K, overlap_k) group tokens with overlap support
 
             B, T = inputs.shape
 
@@ -80,17 +83,18 @@ def eval_mtp(
                 # mtp_logits: (B, T, K-1, num_groups) for k=1..K-1
 
                 # Compute metrics for k=0 (main model prediction)
+                # targets[:, :, 0, :] gives (B, T, overlap_k) - all valid groups
                 _update_position_stats(
                     stats_by_pos[0],
                     stats_by_group,
                     main_logits,
-                    targets[:, :, 0],
+                    targets[:, :, 0, :],
                 )
 
                 # Compute metrics for k=1..K-1 (MTP head predictions)
                 for k in range(1, K):
                     step_logits = mtp_logits[:, :, k - 1, :]  # (B, T, num_groups)
-                    step_targets = targets[:, :, k]  # (B, T)
+                    step_targets = targets[:, :, k, :]  # (B, T, overlap_k)
                     _update_position_stats(
                         stats_by_pos[k],
                         stats_by_group,
@@ -105,35 +109,55 @@ def eval_mtp(
 
 
 def _update_position_stats(pos_stats, group_stats, logits, targets):
-    """Update per-position and per-group statistics."""
+    """
+    Update per-position and per-group statistics.
+
+    Args:
+        pos_stats: dict to accumulate position-level stats
+        group_stats: dict to accumulate per-group stats
+        logits: (B, T, num_groups) prediction logits
+        targets: (B, T, overlap_k) all valid target groups for any-correct loss
+    """
     B, T, V = logits.shape
 
-    # Compute log probabilities and NLL
-    log_probs = F.log_softmax(logits.float(), dim=-1)
-    target_log_probs = log_probs.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
-    nll = -target_log_probs  # (B, T)
+    # Compute log probabilities
+    log_probs = F.log_softmax(logits.float(), dim=-1)  # (B, T, V)
 
-    # Compute predictions and accuracy
+    # Any-correct loss: -log(Σ P(valid_g)) = -logsumexp(log_probs for valid groups)
+    # targets: (B, T, overlap_k) where invalid entries are -1
+    valid_mask = targets >= 0  # (B, T, overlap_k)
+    safe_targets = targets.clamp(min=0)  # Replace -1 with 0 for gather (will be masked)
+
+    # Gather log probs for all target positions
+    valid_log_probs = log_probs.gather(-1, safe_targets)  # (B, T, overlap_k)
+
+    # Mask out invalid targets with -inf so they don't contribute to logsumexp
+    valid_log_probs = valid_log_probs.masked_fill(~valid_mask, float("-inf"))
+
+    # NLL using any-correct formula: -logsumexp over valid groups
+    nll = -torch.logsumexp(valid_log_probs, dim=-1)  # (B, T)
+
+    # Accuracy: correct if prediction matches ANY valid target
     preds = logits.argmax(dim=-1)  # (B, T)
-    correct = (preds == targets)  # (B, T)
+    correct = (preds.unsqueeze(-1) == targets).any(dim=-1)  # (B, T)
 
-    # Mask out invalid targets (if any are -1)
-    valid_mask = (targets != -1)
-    nll_masked = nll * valid_mask.float()
-    correct_masked = correct * valid_mask
+    # A position is valid if it has at least one valid target (first target is valid)
+    position_valid = valid_mask[:, :, 0]  # (B, T)
+    nll_masked = nll * position_valid.float()
+    correct_masked = correct & position_valid
 
     # Update position stats
     pos_stats["nll"] += nll_masked.sum().item()
     pos_stats["correct"] += correct_masked.sum().item()
-    pos_stats["tokens"] += valid_mask.sum().item()
+    pos_stats["tokens"] += position_valid.sum().item()
 
-    # Update per-group stats
-    # For each group g, count how many times target was g and prediction was correct
-    targets_flat = targets.reshape(-1)
+    # Update per-group stats using first valid target for group tracking
+    first_target = targets[:, :, 0]  # (B, T)
+    targets_flat = first_target.reshape(-1)
     correct_flat = correct_masked.reshape(-1)
-    valid_flat = valid_mask.reshape(-1)
+    valid_flat = position_valid.reshape(-1)
 
-    for g in range(logits.shape[-1]):
+    for g in range(V):
         group_mask = (targets_flat == g) & valid_flat
         group_stats[g]["total"] += group_mask.sum().item()
         group_stats[g]["correct"] += (group_mask & correct_flat).sum().item()

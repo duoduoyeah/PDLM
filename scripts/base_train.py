@@ -17,6 +17,7 @@ from nanochat.gpt_mtp import GPTMTP, GPTMTPConfig
 from nanochat.dataloader import get_data_loader
 from nanochat.bd3lm_eval import eval_bd3lm
 from nanochat.pdlm_eval import eval_pdlm
+from nanochat.mtp_eval import eval_mtp
 from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, print_banner, get_base_dir, autodetect_device_type
 from nanochat.tokenizer import get_tokenizer
 from nanochat.group_tokenizer.token_map import get_token_map
@@ -45,6 +46,7 @@ noise_total_steps = 16 # Noisy for pdlm
 pdlm_stage = "stage2" # pdlm stage: stage1_mtp, stage1_mask, stage2, both_mtp, both_mask
 bd3lm_effective_ratio = None # For bd3lm: auto-computed if None, or override with explicit value
 bd3lm_compute_matched = True # If True, don't adjust iterations for BD3LM (compute-matched). If False, adjust to match loss tokens (supervision-matched).
+mtp_loss_beta = 0.8 # MTP: exponential decay factor for loss weighting (β^k)
 # Debug
 debug = False
 # Training horizon. Only one of these 3 will be used, in this order of precedence.
@@ -202,7 +204,7 @@ elif model_type == "mtp":
         pure_vocab_size=pure_vocab_size,
         num_groups=num_groups,
         n_future_tokens=block_size,  # predict block_size group tokens
-        mtp_loss_beta=0.8,
+        mtp_loss_beta=mtp_loss_beta,
         n_layer=num_layers,
         n_head=num_heads,
         n_kv_head=num_kv_heads,
@@ -347,7 +349,16 @@ if eval_every > 0:
     elif model_type == "next_token_ar":
         pass  # TODO: AR validation setup
     elif model_type == "mtp":
-        pass  # TODO: MTP validation setup
+        val_loader = get_data_loader(
+            device_batch_size,
+            max_seq_len,
+            split="val",
+            device=device,
+            model_config=model_config,
+            resume_state_dict=None,  # always start fresh for validation
+        )
+        # MTP uses standard causal attention, no special eval mask needed
+        print0(f"Initialized validation dataloader for MTP evaluation")
 
 debug_dump_path = None
 if debug:
@@ -499,7 +510,34 @@ while True:
         elif model_type == "next_token_ar":
             pass  # TODO: AR evaluation
         elif model_type == "mtp":
-            pass  # TODO: MTP evaluation
+            print0(f"Running MTP Stage 1 evaluation at step {step} ({current_eval_batches} batches)...")
+            eval_result = eval_mtp(
+                model=orig_model,  # use uncompiled model
+                val_loader=val_loader,
+                num_batches=current_eval_batches,
+                device=device,
+                autocast_ctx=autocast_ctx,
+            )
+            # Log eval results
+            K = block_size  # n_future_tokens = block_size
+            print0(f"  [mtp] overall_loss: {eval_result['overall_loss']:.4f}, overall_ppl: {eval_result['overall_ppl']:.2f}, overall_accuracy: {eval_result['overall_accuracy']:.2%}")
+            # Per-position metrics
+            for k in range(K):
+                pos_data = eval_result["positions"][k]
+                print0(f"    k={k}: loss={pos_data['loss']:.4f}, ppl={pos_data['ppl']:.2f}, accuracy={pos_data['accuracy']:.2%}")
+            # Build log data for wandb
+            log_data = {
+                "step": step,
+                "eval/overall_loss": eval_result["overall_loss"],
+                "eval/overall_ppl": eval_result["overall_ppl"],
+                "eval/overall_accuracy": eval_result["overall_accuracy"],
+            }
+            for k in range(K):
+                pos_data = eval_result["positions"][k]
+                log_data[f"eval/k{k}_loss"] = pos_data["loss"]
+                log_data[f"eval/k{k}_ppl"] = pos_data["ppl"]
+                log_data[f"eval/k{k}_accuracy"] = pos_data["accuracy"]
+            wandb_run.log(log_data)
 
     # save checkpoint: at the end of the run, or every save_every steps, except at the first step or the resume step
     if last_step or (step > 0 and step != resume_from_step and save_every > 0 and step % save_every == 0):
