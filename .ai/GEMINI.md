@@ -6,4 +6,4 @@
   - `git status`, `git diff`, `git add`, `git commit`, `git push`.
   - Modify other `.md` files if necessary.
 - **Restricted Actions**:
-  - Do NOT modify `.ai_private/log.md`.
+  - (None currently)

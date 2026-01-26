@@ -18,7 +18,8 @@ NUM_BATCHES="20"
 LOCAL_DIR="/tmp/pdlm_eval"
 HF_REPO=""  # Empty = use default pattern (duoduoyeah/pdlm_d${DEPTH})
 CKPT_DIR=""  # Direct checkpoint path (overrides HF download)
-RUN_COMPATIBILITY="false"
+RUN_COMPATIBILITY="true"
+DUMP_BATCH=""  # Path to dump batch output file
 
 # Parse named arguments
 for arg in "$@"; do
@@ -47,12 +48,15 @@ for arg in "$@"; do
         --run_compatibility)
             RUN_COMPATIBILITY="true"
             ;;
+        --dump_batch=*)
+            DUMP_BATCH="${arg#*=}"
+            ;;
         *)
             echo "Unknown argument: $arg"
             echo "Usage: bash launch/eval_pdlm.sh --depth=8 [--data_ratio=20]"
             echo "       [--block_size=4] [--num_batches=20] [--local_dir=/tmp/pdlm_eval]"
             echo "       [--repo=duoduoyeah/pdlm_d8] [--ckpt_dir=/path/to/ckpt]"
-            echo "       [--run_compatibility]"
+            echo "       [--run_compatibility] [--dump_batch=/path/to/output.txt]"
             exit 1
             ;;
     esac
@@ -104,13 +108,66 @@ if [ -n "${CKPT_DIR}" ]; then
     echo ""
     echo "Using direct checkpoint path: ${CKPT_DIR}"
 
+    # Create symlink in base dir pointing to tokenizer in ckpt folder
+    BASE_DIR=$(dirname "${DATA_DIR}")
+    TOKENIZER_LINK="${BASE_DIR}/tokenizer"
+    MODEL_TOKENIZER="${CKPT_DIR}/tokenizer"
+
+    if [ -d "${MODEL_TOKENIZER}" ]; then
+        # Remove existing symlink if it points elsewhere
+        if [ -L "${TOKENIZER_LINK}" ]; then
+            rm "${TOKENIZER_LINK}"
+        fi
+        ln -s "${MODEL_TOKENIZER}" "${TOKENIZER_LINK}"
+        echo "Created symlink: ${TOKENIZER_LINK} -> ${MODEL_TOKENIZER}"
+    else
+        echo "Warning: No tokenizer found at ${MODEL_TOKENIZER}"
+    fi
+
+    export NANOCHAT_BASE_DIR="${BASE_DIR}"
+    echo "NANOCHAT_BASE_DIR set to: ${BASE_DIR}"
+
+    # Find the directory containing model_*.pt files (handles nested structures)
+    ACTUAL_CKPT_DIRS=$(find "${CKPT_DIR}/base_checkpoints" -name "model_*.pt" -printf '%h\n' 2>/dev/null | sort -u)
+    CKPT_COUNT=$(echo "$ACTUAL_CKPT_DIRS" | grep -c . 2>/dev/null || echo 0)
+
+    if [ "$CKPT_COUNT" -eq 0 ]; then
+        echo "Error: No checkpoints found in ${CKPT_DIR}/base_checkpoints"
+        exit 1
+    elif [ "$CKPT_COUNT" -gt 1 ]; then
+        echo "Warning: Multiple checkpoint directories found:"
+        echo "$ACTUAL_CKPT_DIRS"
+        echo "Please specify a more specific --ckpt_dir path."
+        exit 1
+    fi
+
+    ACTUAL_CKPT_DIR="$ACTUAL_CKPT_DIRS"
+    echo "Checkpoint dir: ${ACTUAL_CKPT_DIR}"
+
     COMPAT_FLAG=""
     if [ "${RUN_COMPATIBILITY}" = "true" ]; then
         COMPAT_FLAG="--run_compatibility"
     fi
 
+    DUMP_FLAG=""
+    if [ -n "${DUMP_BATCH}" ]; then
+        DUMP_FLAG="--dump_batch=${DUMP_BATCH}"
+    fi
+
+    # If dump_batch is specified, just run that and exit
+    if [ -n "${DUMP_BATCH}" ]; then
+        # Create output directory if it doesn't exist
+        DUMP_DIR=$(dirname "${DUMP_BATCH}")
+        mkdir -p "${DUMP_DIR}"
+
+        python -m scripts.pdlm_eval \
+            --ckpt_dir="${ACTUAL_CKPT_DIR}" \
+            ${DUMP_FLAG}
+        exit 0
+    fi
+
     python -m scripts.pdlm_eval \
-        --ckpt_dir="${CKPT_DIR}" \
+        --ckpt_dir="${ACTUAL_CKPT_DIR}" \
         --num_batches=${NUM_BATCHES} \
         --output_json="${CKPT_DIR}/eval_result.json" \
         ${COMPAT_FLAG}

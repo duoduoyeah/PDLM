@@ -77,8 +77,8 @@ def pdlm_data_loader(
             # x0 (targets): pure tokens everywhere
             # Loss: only on block positions
 
-            # Compute prefix_sliding_tokens from epoch (same as BD3LM)
-            prefix_sliding_tokens = epoch % block_size
+            # PDLM doesn't use sliding prefix (unlike BD3LM which cycles based on epoch)
+            prefix_sliding_tokens = 0
             num_blocks = (T - prefix_sliding_tokens) // block_size
             block_region_len = num_blocks * block_size
 

@@ -81,17 +81,26 @@ def eval_pdlm(
 
 def _eval_loss_per_position(
     model, val_loader, block_size, num_batches,
-    attn_mask, device, autocast_ctx, prefix_pure_tokens
+    attn_mask, device, autocast_ctx, prefix_pure_tokens,
+    cache_batches=False,
 ):
     """
     Evaluate loss broken down by position within block.
     Skip block 0 (no context), compute from blocks 1 onwards.
+
+    Args:
+        cache_batches: If True, return (result, cached_batches) where cached_batches
+                       is a list of (inputs, targets, loss_extras, state) tuples.
     """
     # Accumulators: nll_by_pos[pos] = (total_nll, total_tokens)
     nll_by_pos = {p: {"nll": 0.0, "tokens": 0} for p in range(block_size)}
+    cached_batches = [] if cache_batches else None
 
     for batch_idx in range(num_batches):
-        inputs, targets, loss_extras, _ = next(val_loader)
+        inputs, targets, loss_extras, state = next(val_loader)
+
+        if cache_batches:
+            cached_batches.append((inputs, targets, loss_extras, state))
         # inputs: (B, T) - group tokens at block positions, pure at prefix
         # targets: (B, T) - pure tokens everywhere
         # loss_extras: {"loss_mask": (B, T)} - True at block positions
@@ -163,6 +172,8 @@ def _eval_loss_per_position(
             "tokens": pos_tokens,
         }
 
+    if cache_batches:
+        return result, cached_batches
     return result
 
 
@@ -175,6 +186,7 @@ def eval_pdlm_compatibility(
     device,
     autocast_ctx,
     token_map=None,
+    cached_batches=None,
 ):
     """
     Evaluate compatibility of parallel predictions.
@@ -187,13 +199,15 @@ def eval_pdlm_compatibility(
 
     Args:
         model: PDLM model (stage2)
-        val_loader: validation data loader
+        val_loader: validation data loader (can be None if cached_batches provided)
         block_size: block size for PDLM
-        num_batches: number of batches to evaluate
+        num_batches: number of batches to evaluate (ignored if cached_batches provided)
         attn_mask: attention mask for the model
         device: device to run on
         autocast_ctx: autocast context for mixed precision
         token_map: TokenMap for pure<->group conversion (loaded if None)
+        cached_batches: pre-cached list of (inputs, targets, loss_extras, state) tuples.
+                        If provided, uses these instead of consuming from val_loader.
 
     Returns:
         dict with compatibility results:
@@ -214,9 +228,18 @@ def eval_pdlm_compatibility(
     # Accumulators
     compat_by_pos = {p: {"matched": 0, "total": 0} for p in range(block_size)}
 
+    # Use cached batches if provided, otherwise consume from loader
+    def get_batch(idx):
+        if cached_batches is not None:
+            return cached_batches[idx]
+        return next(val_loader)
+
+    # Determine actual number of batches
+    actual_batches = len(cached_batches) if cached_batches is not None else num_batches
+
     with torch.no_grad():
-        for batch_idx in range(num_batches):
-            inputs, targets, loss_extras, _ = next(val_loader)
+        for batch_idx in range(actual_batches):
+            inputs, targets, loss_extras, _ = get_batch(batch_idx)
             # inputs: (B, T) - group tokens at block positions
             # targets: (B, T) - pure tokens
 
@@ -313,24 +336,129 @@ def eval_pdlm_full(
     Returns:
         dict with all metrics
     """
-    # Run loss evaluation
-    result = eval_pdlm(
-        model, val_loader, block_size, num_batches,
-        attn_mask, device, autocast_ctx, prefix_pure_tokens
-    )
+    # Run loss evaluation with batch caching for consistency
+    was_training = model.training
+    model.eval()
 
-    # Run compatibility evaluation
+    with torch.no_grad():
+        loss_result, cached_batches = _eval_loss_per_position(
+            model, val_loader, block_size, num_batches,
+            attn_mask, device, autocast_ctx, prefix_pure_tokens,
+            cache_batches=True,
+        )
+
+    result = loss_result
+
+    # Run compatibility evaluation on the same cached batches
     if run_compatibility:
         if compatibility_batches is None:
             compatibility_batches = max(1, num_batches // 4)
 
-        # Need a fresh loader for compatibility eval
-        # The caller should provide a way to reset or create new loader
-        # For now, we continue with the same loader (will use next batches)
+        # Use first compatibility_batches from cache (same data as loss eval)
+        compat_batches = cached_batches[:compatibility_batches]
+
         compat_result = eval_pdlm_compatibility(
-            model, val_loader, block_size, compatibility_batches,
-            attn_mask, device, autocast_ctx
+            model, None, block_size, len(compat_batches),
+            attn_mask, device, autocast_ctx,
+            cached_batches=compat_batches,
         )
         result["compatibility"] = compat_result
 
+    if was_training:
+        model.train()
+
     return result
+
+
+def dump_batch_to_file(
+    model,
+    val_loader,
+    block_size,
+    attn_mask,
+    device,
+    autocast_ctx,
+    output_path,
+    tokenizer_dir=None,
+):
+    """
+    Dump 1 batch showing input group tokens and model predictions.
+
+    Args:
+        model: PDLM model
+        val_loader: validation data loader
+        block_size: block size
+        attn_mask: attention mask
+        device: device
+        autocast_ctx: autocast context
+        output_path: path to write txt file
+        tokenizer_dir: path to tokenizer dir (default: uses get_base_dir())
+
+    Output file format (per sequence):
+        === Sequence 0 ===
+        Input (noised):  [<|G_12|>, <|G_45|>, ...]
+        Output (preds):  ['hello', ' world', ...]
+        Target (truth):  ['hello', ' world', ...]
+    """
+    from nanochat.group_tokenizer.dump import load_tokenizer
+
+    was_training = model.training
+    model.eval()
+
+    # Load tokenizer for decoding
+    if tokenizer_dir is None:
+        from nanochat.common import get_base_dir
+        import os
+        tokenizer_dir = os.path.join(get_base_dir(), "tokenizer")
+
+    tokenizer = load_tokenizer(tokenizer_dir)
+    token_map = get_token_map(tokenizer_dir, device=device)
+
+    with torch.no_grad():
+        inputs, targets, loss_extras, _ = next(val_loader)
+        # inputs: (B, T) - group tokens at block positions
+        # targets: (B, T) - pure tokens
+
+        B, T = inputs.shape
+
+        with autocast_ctx:
+            logits = model.forward_for_eval(inputs, targets, attn_mask=attn_mask)
+            preds = logits.argmax(dim=-1)  # (B, T)
+
+    if was_training:
+        model.train()
+
+    # Helper to format group token
+    def fmt_group(tid):
+        if token_map.is_group(torch.tensor(tid)):
+            gid = tid - token_map.group_start_id
+            return f"<|G_{gid}|>"
+        elif tokenizer:
+            return repr(tokenizer.decode([tid]))
+        return f"[{tid}]"
+
+    # Helper to format pure token
+    def fmt_pure(tid):
+        if tokenizer:
+            return repr(tokenizer.decode([tid]))
+        return f"[{tid}]"
+
+    # Write output
+    with open(output_path, "w") as f:
+        for b in range(B):
+            f.write(f"=== Sequence {b} ===\n")
+
+            # Input tokens (group or pure)
+            input_strs = [fmt_group(inputs[b, t].item()) for t in range(T)]
+            f.write(f"Input (noised):  [{', '.join(input_strs)}]\n")
+
+            # Predicted tokens (argmax)
+            pred_strs = [fmt_pure(preds[b, t].item()) for t in range(T)]
+            f.write(f"Output (preds):  [{', '.join(pred_strs)}]\n")
+
+            # Target tokens (ground truth)
+            tgt_strs = [fmt_pure(targets[b, t].item()) for t in range(T)]
+            f.write(f"Target (truth):  [{', '.join(tgt_strs)}]\n")
+
+            f.write("\n")
+
+    print(f"Dumped {B} sequences to {output_path}")

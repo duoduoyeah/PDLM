@@ -10,3 +10,4 @@ temp*
 .env
 launch/.env
 learn.md
+run_claude_at_0530.sh

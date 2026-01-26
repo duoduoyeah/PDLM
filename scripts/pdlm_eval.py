@@ -20,7 +20,7 @@ import torch
 from nanochat.common import compute_init, autodetect_device_type, get_base_dir, print0
 from nanochat.checkpoint_manager import load_checkpoint, find_last_step, find_largest_model
 from nanochat.pdlm import PDLM, PDLMConfig
-from nanochat.pdlm_eval import eval_pdlm, eval_pdlm_compatibility, eval_pdlm_full
+from nanochat.pdlm_eval import eval_pdlm, eval_pdlm_compatibility, eval_pdlm_full, dump_batch_to_file
 from nanochat.dataloader import get_data_loader
 from nanochat.attn_masks import gen_mask
 from nanochat.group_tokenizer.token_map import get_token_map
@@ -234,7 +234,36 @@ def main():
     parser.add_argument("--output_json", type=str, default=None, help="Optional: save results to JSON file")
     parser.add_argument("--run_compatibility", action="store_true", help="Run compatibility evaluation")
     parser.add_argument("--compatibility_batches", type=int, default=None, help="Number of batches for compatibility (default: num_batches // 4)")
+    parser.add_argument("--dump_batch", type=str, default=None, help="Dump one batch to file for debugging (path to output txt)")
     args = parser.parse_args()
+
+    # Handle dump_batch mode (separate from normal eval)
+    if args.dump_batch:
+        model, meta_data, device, autocast_ctx, model_config = load_pdlm_model(
+            args.model_tag, args.step, args.device, ckpt_dir=args.ckpt_dir
+        )
+        model_config_dict = meta_data["model_config"]
+        user_config = meta_data.get("user_config", {})
+        max_seq_len = model_config_dict["sequence_len"]
+        block_size = model_config_dict.get("bucket_size", user_config.get("block_size", 4))
+        is_causal = model_config_dict.get("is_causal", True)
+        device_batch_size = user_config.get("device_batch_size", 32)
+
+        val_loader = get_data_loader(
+            device_batch_size, max_seq_len, split="val", device=device,
+            model_config=model_config, resume_state_dict=None,
+        )
+        attn_mask = gen_mask(
+            max_seq_len, block_size, attn_backend="sdpa",
+            is_causal=is_causal, prefix_sliding_tokens=0
+        ).to(device=device)
+
+        dump_batch_to_file(
+            model=model, val_loader=val_loader, block_size=block_size,
+            attn_mask=attn_mask, device=device, autocast_ctx=autocast_ctx,
+            output_path=args.dump_batch,
+        )
+        return
 
     # Run evaluation
     eval_result = run_eval(
