@@ -2,7 +2,8 @@
 Dataloader for MTP Stage 1: pure tokens → K future group tokens.
 
 Input: pure tokens (B, T)
-Target: K future group tokens per position (B, T, K)
+Target: K future group tokens per position (B, T, K, overlap_k)
+        When overlap_k > 1, each position has multiple valid groups.
 """
 
 import torch
@@ -35,7 +36,8 @@ def mtp_data_loader(
 
     Yields:
         inputs: (B, T) pure token ids
-        targets: (B, T, K) K future group tokens per position
+        targets: (B, T, K, overlap_k) K future group tokens per position,
+                 with overlap_k valid groups for each position
         loss_extras: None (MTP doesn't need extra loss info)
         state_dict: dict for resuming training
     """
@@ -49,6 +51,7 @@ def mtp_data_loader(
     # Load token map for pure -> group conversion
     token_map = get_token_map(device="cpu")
     pure_to_group = token_map.pure_to_group  # (pure_vocab_size, overlap_k)
+    overlap_k = pure_to_group.shape[1]
 
     # We need B*T input tokens + K extra tokens for the future targets
     needed_tokens = B * T + K
@@ -69,14 +72,16 @@ def mtp_data_loader(
         inputs_cpu = scratch[:B * T].view(B, T)
 
         # Build targets: K future group tokens for each position
-        # targets[b, t, k] = group_token(pure_token[b, t + k + 1])
+        # targets[b, t, k, :] = all valid group_tokens for pure_token[b, t + k + 1]
         #
         # For position t, we predict:
         #   k=0: group of token at t+1
         #   k=1: group of token at t+2
         #   ...
         #   k=K-1: group of token at t+K
-        group_targets = torch.full((B, T, K), -1, dtype=torch.long)
+        #
+        # When overlap_k > 1, each pure token maps to multiple valid groups.
+        group_targets = torch.full((B, T, K, overlap_k), -1, dtype=torch.long)
 
         for k in range(K):
             shift = k + 1  # predict token at position t+shift
@@ -89,12 +94,9 @@ def mtp_data_loader(
             future_pure = scratch[future_start:future_end].view(B, T)
 
             # Convert pure tokens to group tokens
-            # Use first group assignment (overlap_k index 0)
-            group_ids = pure_to_group[future_pure, 0]
-
-            # For the last (shift) positions, we don't have valid targets
-            # But since we fetched enough tokens, all positions should be valid
-            group_targets[:, :, k] = group_ids
+            # Store ALL valid groups (not just index 0)
+            group_ids = pure_to_group[future_pure]  # (B, T, overlap_k)
+            group_targets[:, :, k, :] = group_ids
 
         # Move to device
         inputs = inputs_cpu.to(device=device, non_blocking=use_cuda)

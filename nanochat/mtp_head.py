@@ -176,17 +176,20 @@ def compute_mtp_loss(main_logits, mtp_logits, targets, loss_weights=None, mtp_lo
     """
     Compute combined MTP loss with exponential decay weights.
 
+    When overlap_k > 1, uses any-correct loss where predicting ANY valid
+    group is considered correct.
+
     Args:
         main_logits: (B, T, num_groups) logits from main model for 1st token
         mtp_logits: (B, T, K-1, num_groups) logits from MTP head for 2nd..Kth tokens
-        targets: (B, T, K) ground truth group token ids
+        targets: (B, T, K, overlap_k) ground truth group token ids with all valid groups
         loss_weights: optional (K,) weights, default exponential decay
         mtp_loss_beta: decay factor for exponential weights
 
     Returns:
         loss: scalar combined loss
     """
-    B, T, K = targets.shape
+    B, T, K, overlap_k = targets.shape
     V = main_logits.shape[-1]
 
     if loss_weights is None:
@@ -195,24 +198,20 @@ def compute_mtp_loss(main_logits, mtp_logits, targets, loss_weights=None, mtp_lo
     total_loss = 0.0
 
     # Loss for 1st token (from main model)
-    step_targets = targets[:, :, 0]  # (B, T)
-    step_loss = F.cross_entropy(
+    step_targets = targets[:, :, 0, :]  # (B, T, overlap_k)
+    step_loss = any_correct_ce_loss(
         main_logits.reshape(-1, V),
-        step_targets.reshape(-1),
-        ignore_index=-1,
-        reduction='mean'
+        step_targets.reshape(-1, overlap_k)
     )
     total_loss = total_loss + loss_weights[0] * step_loss
 
     # Loss for 2nd..Kth tokens (from MTP head)
     for k in range(K - 1):
         step_logits = mtp_logits[:, :, k, :]  # (B, T, V)
-        step_targets = targets[:, :, k + 1]   # (B, T)
-        step_loss = F.cross_entropy(
+        step_targets = targets[:, :, k + 1, :]  # (B, T, overlap_k)
+        step_loss = any_correct_ce_loss(
             step_logits.reshape(-1, V),
-            step_targets.reshape(-1),
-            ignore_index=-1,
-            reduction='mean'
+            step_targets.reshape(-1, overlap_k)
         )
         total_loss = total_loss + loss_weights[k + 1] * step_loss
 
@@ -233,3 +232,42 @@ def exponential_decay_weights(K, beta=0.8, device=None):
     """
     weights = torch.tensor([beta ** k for k in range(K)], device=device)
     return weights / weights.sum()
+
+
+def any_correct_ce_loss(logits, valid_targets):
+    """
+    Cross-entropy loss where ANY of the valid targets is considered correct.
+
+    Loss = -log(Σ P(g) for g in valid_groups)
+
+    This allows the model to predict any of the valid group assignments
+    when overlap_k > 1.
+
+    Args:
+        logits: (*, num_groups) - logits over group vocabulary
+        valid_targets: (*, overlap_k) - ALL valid group indices for each position
+                       Use -1 for padding (will be masked out)
+
+    Returns:
+        loss: scalar mean loss
+    """
+    # Compute log probabilities
+    log_probs = F.log_softmax(logits, dim=-1)
+
+    # Mask invalid targets (where valid_targets == -1)
+    valid_mask = valid_targets >= 0  # (*, overlap_k)
+
+    # Clamp to valid indices for gather (masked positions will be ignored)
+    safe_targets = valid_targets.clamp(min=0)
+
+    # Gather log probs for valid targets
+    valid_log_probs = torch.gather(log_probs, dim=-1, index=safe_targets)  # (*, overlap_k)
+
+    # Mask out invalid positions with -inf before logsumexp
+    valid_log_probs = valid_log_probs.masked_fill(~valid_mask, float('-inf'))
+
+    # Log-sum-exp over valid groups: log(Σ P(valid_g))
+    log_valid_prob = torch.logsumexp(valid_log_probs, dim=-1)  # (*)
+
+    # Loss = -log(P(any valid))
+    return -log_valid_prob.mean()

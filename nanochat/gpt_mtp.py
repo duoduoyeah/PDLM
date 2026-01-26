@@ -266,7 +266,8 @@ class GPTMTP(nn.Module):
 
         Args:
             idx: (B, T) pure token ids
-            targets: (B, T, K) target group token ids for K future positions, or None for inference
+            targets: (B, T, K, overlap_k) target group token ids for K future positions,
+                     with overlap_k valid groups per position, or None for inference
             kv_cache: optional KV cache for inference
             loss_reduction: 'mean' or 'none'
 
@@ -303,17 +304,19 @@ class GPTMTP(nn.Module):
 
         # Training: compute MTP loss
         K = self.config.n_future_tokens
-        assert targets.shape == (B, T, K), f"Expected targets shape (B, T, K)=({B}, {T}, {K}), got {targets.shape}"
+        assert targets.ndim == 4 and targets.shape[:3] == (B, T, K), \
+            f"Expected targets shape (B, T, K, overlap_k)=({B}, {T}, {K}, *), got {targets.shape}"
 
         # Get 1st group token for MTP head input (teacher forcing)
-        first_group_tok = targets[:, :, 0]  # (B, T)
+        # Use first valid group (index 0) for simplicity
+        first_group_tok = targets[:, :, 0, 0]  # (B, T)
 
         # Get cos/sin for MTP head (same positions, MTP doesn't extend sequence)
         mtp_cos = self.cos[:, T0:T0+T]
         mtp_sin = self.sin[:, T0:T0+T]
 
-        # MTP targets are 2nd..Kth group tokens
-        mtp_targets = targets[:, :, 1:]  # (B, T, K-1)
+        # MTP targets for teacher forcing: use first valid group (index 0)
+        mtp_targets = targets[:, :, 1:, 0]  # (B, T, K-1)
 
         # Forward MTP head
         mtp_logits = self.mtp_head(h, mtp_cos, mtp_sin, first_group_tok, targets=mtp_targets)
@@ -336,8 +339,9 @@ class GPTMTP(nn.Module):
 
         Args:
             idx: (B, T) pure token ids
-            targets: (B, T, K) target group token ids for K future positions
-                     Required for teacher forcing in MTP head
+            targets: (B, T, K, overlap_k) target group token ids for K future positions
+                     with overlap_k valid groups per position.
+                     Required for teacher forcing in MTP head.
             attn_mask: ignored (MTP uses standard causal attention)
 
         Returns:
@@ -368,16 +372,18 @@ class GPTMTP(nn.Module):
 
         # Get 1st group token for MTP head input (teacher forcing from targets)
         assert targets is not None, "targets required for forward_for_eval (teacher forcing)"
-        assert targets.shape == (B, T, K), f"Expected targets shape ({B}, {T}, {K}), got {targets.shape}"
+        assert targets.ndim == 4 and targets.shape[:3] == (B, T, K), \
+            f"Expected targets shape ({B}, {T}, {K}, overlap_k), got {targets.shape}"
 
-        first_group_tok = targets[:, :, 0]  # (B, T)
+        # Use first valid group (index 0) for teacher forcing
+        first_group_tok = targets[:, :, 0, 0]  # (B, T)
 
         # Get cos/sin for MTP head
         mtp_cos = self.cos[:, :T]
         mtp_sin = self.sin[:, :T]
 
-        # MTP targets are 2nd..Kth group tokens
-        mtp_targets = targets[:, :, 1:]  # (B, T, K-1)
+        # MTP targets for teacher forcing: use first valid group (index 0)
+        mtp_targets = targets[:, :, 1:, 0]  # (B, T, K-1)
 
         # Forward MTP head
         mtp_logits = self.mtp_head(h, mtp_cos, mtp_sin, first_group_tok, targets=mtp_targets)
