@@ -82,8 +82,10 @@ fi
 echo "Dumping token map info..."
 python -m nanochat.group_tokenizer.dump "$LOCAL_OUTPUT" > "${LOCAL_OUTPUT}/dump_overview.txt"
 python -m nanochat.group_tokenizer.dump "$LOCAL_OUTPUT" --all-groups > "${LOCAL_OUTPUT}/dump_all_groups.txt"
+python -m nanochat.group_tokenizer.dump "$LOCAL_OUTPUT" --overlap-quality --sample-tokens 10 > "${LOCAL_OUTPUT}/dump_overlap_quality.txt"
 echo "  -> dump_overview.txt"
 echo "  -> dump_all_groups.txt"
+echo "  -> dump_overlap_quality.txt"
 
 echo ""
 echo "============================================"
