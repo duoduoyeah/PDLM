@@ -1,3 +1,8 @@
+01/27
+1. new tokenizers
+2. start training gpt-mtp
+3. preparing for combined-pdlm 
+
 01/25
 - Add transition_accuracy metric to `nanochat/pdlm_eval.py` and `scripts/pdlm_eval.py` (per-position + per-group breakdown)
 - Created `launch/run_expc.sh`; group tokenizer is self-contained (no `token_bytes.pt` needed)
