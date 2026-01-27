@@ -1,6 +1,8 @@
 #!/bin/bash
 # Build group tokenizer(s) from base tokenizer + model embeddings
 # For Experiment C: stage2 (Group -> Pure), no MASK token needed
+#
+# Usage: LOCAL_OUTPUT=/path/to/output ./launch/build_group_tokenizer.sh --mode all_combos --num-sub 8 --sub-per-final 2
 
 set -e
 
@@ -15,16 +17,8 @@ LOCAL_OUTPUT="${LOCAL_OUTPUT:-/content/drive/MyDrive/nanochat/group_tokenizers}"
 # Model tag (optional, uses largest if not specified)
 MODEL_TAG="${MODEL_TAG:-}"
 
-# Configurations for Experiment C
-# Format: num_groups overlap_k
-CONFIGS=(
-    "64 1"    # g64_k1 - main experiment baseline
-    "16 1"    # g16_k1 - high noise
-    "256 1"   # g256_k1 - low noise
-)
-
 echo "============================================"
-echo "Building Group Tokenizers for Experiment C"
+echo "Building Group Tokenizer (Sub-group Combination)"
 echo "============================================"
 
 # Setup: copy from Drive to local with correct structure for NANOCHAT_BASE_DIR
@@ -60,50 +54,39 @@ echo "NANOCHAT_BASE_DIR: $NANOCHAT_BASE_DIR"
 echo "Local base: $LOCAL_BASE"
 echo "Output dir: $LOCAL_OUTPUT"
 echo "Model tag: ${MODEL_TAG:-auto}"
+echo "Extra args: $@"
 echo ""
 
-for config in "${CONFIGS[@]}"; do
-    read -r num_groups overlap_k <<< "$config"
+echo "--------------------------------------------"
+echo "Building with args: $@"
+echo "Output: $LOCAL_OUTPUT"
+echo "--------------------------------------------"
 
-    output_dir="${LOCAL_OUTPUT}/g${num_groups}_k${overlap_k}"
+# Check if tokenizer already exists
+if [ -f "${LOCAL_OUTPUT}/token_maps.pt" ]; then
+    echo "Tokenizer already exists, skipping build..."
+else
+    cmd="python -m scripts.build_group_tokenizer \
+        --checkpoint-dir \"$LOCAL_BASE\" \
+        --output-dir \"$LOCAL_OUTPUT\" \
+        $@"
 
-    echo "--------------------------------------------"
-    echo "Building: num-groups=$num_groups, overlap-k=$overlap_k"
-    echo "Output: $output_dir"
-    echo "--------------------------------------------"
-
-    # Check if tokenizer already exists
-    if [ -f "${output_dir}/token_maps.pt" ]; then
-        echo "Tokenizer already exists, skipping build..."
-    else
-        cmd="python -m scripts.build_group_tokenizer \
-            --checkpoint-dir \"$LOCAL_BASE\" \
-            --output-dir \"$output_dir\" \
-            --num-groups \"$num_groups\" \
-            --overlap-k \"$overlap_k\" \
-            --no-mask"
-
-        if [ -n "$MODEL_TAG" ]; then
-            cmd="$cmd --model-tag \"$MODEL_TAG\""
-        fi
-
-        eval $cmd
+    if [ -n "$MODEL_TAG" ]; then
+        cmd="$cmd --model-tag \"$MODEL_TAG\""
     fi
 
-    # Dump token map info for inspection
-    echo "Dumping token map info..."
-    python -m nanochat.group_tokenizer.dump "$output_dir" > "${output_dir}/dump_overview.txt"
-    python -m nanochat.group_tokenizer.dump "$output_dir" --all-groups > "${output_dir}/dump_all_groups.txt"
-    echo "  -> dump_overview.txt"
-    echo "  -> dump_all_groups.txt"
+    eval $cmd
+fi
 
-    echo ""
-done
+# Dump token map info for inspection
+echo "Dumping token map info..."
+python -m nanochat.group_tokenizer.dump "$LOCAL_OUTPUT" > "${LOCAL_OUTPUT}/dump_overview.txt"
+python -m nanochat.group_tokenizer.dump "$LOCAL_OUTPUT" --all-groups > "${LOCAL_OUTPUT}/dump_all_groups.txt"
+echo "  -> dump_overview.txt"
+echo "  -> dump_all_groups.txt"
 
-echo "============================================"
-echo "All builds completed!"
-echo "Outputs saved to: $LOCAL_OUTPUT"
 echo ""
-echo "Created tokenizers:"
-ls -la "$LOCAL_OUTPUT"
+echo "============================================"
+echo "Build completed!"
+echo "Output saved to: $LOCAL_OUTPUT"
 echo "============================================"
