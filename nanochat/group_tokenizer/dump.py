@@ -5,6 +5,8 @@ Usage:
     python -m nanochat.group_tokenizer.dump /path/to/tokenizer_dir
     python -m nanochat.group_tokenizer.dump /path/to/tokenizer_dir --group 5
     python -m nanochat.group_tokenizer.dump /path/to/tokenizer_dir --token 123
+    python -m nanochat.group_tokenizer.dump /path/to/tokenizer_dir --overlap-quality
+    python -m nanochat.group_tokenizer.dump /path/to/tokenizer_dir --overlap-quality --sample-tokens 10
 """
 import argparse
 import os
@@ -128,6 +130,119 @@ def dump_token(maps: dict, token_id: int, tokenizer=None):
     print()
 
 
+def dump_overlap_quality(maps: dict, tokenizer=None, sample_tokens: int = 5):
+    """Analyze overlap quality - are groupmates diverse across k groups?"""
+    pure_vocab_size = maps["pure_vocab_size"]
+    num_groups = maps["num_groups"]
+    overlap_k = maps["overlap_k"]
+    pure_to_group = maps["pure_to_group"]  # (vocab, k)
+    group_to_pure_mask = maps["group_to_pure_mask"]  # (groups, vocab)
+
+    print("=" * 60)
+    print("OVERLAP QUALITY ANALYSIS")
+    print("=" * 60)
+    print(f"Vocab size: {pure_vocab_size}, Groups: {num_groups}, Overlap k: {overlap_k}")
+    print()
+
+    if overlap_k == 1:
+        print("Overlap k=1, no overlap analysis needed.")
+        return
+
+    # Compute metrics across all tokens
+    total_unique_groupmates = 0
+    total_shared_groupmates = 0
+    total_pairwise_jaccard = 0.0
+    num_pairs = 0
+
+    for tid in range(pure_vocab_size):
+        groups = pure_to_group[tid].tolist()
+
+        # Get member sets for each group (excluding self)
+        member_sets = []
+        for g in groups:
+            members = set(torch.where(group_to_pure_mask[g])[0].tolist())
+            members.discard(tid)  # Exclude self
+            member_sets.append(members)
+
+        # Unique groupmates = union of all member sets
+        all_groupmates = set().union(*member_sets)
+        total_unique_groupmates += len(all_groupmates)
+
+        # Shared groupmates = intersection of all member sets
+        shared_groupmates = member_sets[0].intersection(*member_sets[1:])
+        total_shared_groupmates += len(shared_groupmates)
+
+        # Pairwise Jaccard similarity
+        for i in range(len(member_sets)):
+            for j in range(i + 1, len(member_sets)):
+                intersection = len(member_sets[i] & member_sets[j])
+                union = len(member_sets[i] | member_sets[j])
+                if union > 0:
+                    total_pairwise_jaccard += intersection / union
+                    num_pairs += 1
+
+    avg_unique = total_unique_groupmates / pure_vocab_size
+    avg_shared = total_shared_groupmates / pure_vocab_size
+    avg_jaccard = total_pairwise_jaccard / num_pairs if num_pairs > 0 else 0
+
+    # Theoretical values for all_combos mode with sub_per_final=2
+    # Each token's k groups share only the same sub-group members
+    # Jaccard = (sub_size) / (2*sub_size - sub_size) = 1/(2-1) = for perfect case
+    # With num_sub=8, sub_per_final=2: shared = 1/8 of group
+
+    print("Aggregate Statistics:")
+    print(f"  Avg pairwise Jaccard similarity: {avg_jaccard:.4f}  (lower = more diverse)")
+    print(f"  Avg unique groupmates per token: {avg_unique:.1f} / {pure_vocab_size}")
+    print(f"  Avg shared groupmates (in ALL k groups): {avg_shared:.1f}")
+    print(f"  Shared ratio: {avg_shared / avg_unique * 100:.1f}%  (lower = more diverse)")
+    print()
+
+    # Diversity score: what fraction of possible tokens does each token see?
+    diversity_score = avg_unique / (pure_vocab_size - 1) * 100
+    print(f"  Diversity score: {diversity_score:.1f}%  (higher = better coverage)")
+    print()
+
+    # Sample token analysis
+    print("-" * 60)
+    print(f"Sample Token Analysis (first {sample_tokens} tokens):")
+    print("-" * 60)
+
+    for tid in range(min(sample_tokens, pure_vocab_size)):
+        groups = pure_to_group[tid].tolist()
+
+        # Token name
+        if tokenizer:
+            try:
+                token_str = repr(tokenizer.decode([tid]))
+            except Exception:
+                token_str = f"token_{tid}"
+        else:
+            token_str = f"token_{tid}"
+
+        print(f"\nToken {tid} {token_str}:")
+        print(f"  Groups: {groups}")
+
+        # Member sets
+        member_sets = []
+        for g in groups:
+            members = set(torch.where(group_to_pure_mask[g])[0].tolist())
+            members.discard(tid)
+            member_sets.append(members)
+
+        all_groupmates = set().union(*member_sets)
+        shared_groupmates = member_sets[0].intersection(*member_sets[1:])
+
+        print(f"  Total unique groupmates: {len(all_groupmates)}")
+        print(f"  Shared across ALL {overlap_k} groups: {len(shared_groupmates)}")
+
+        # Per-group breakdown
+        for i, g in enumerate(groups):
+            unique_to_this = member_sets[i] - set().union(*[member_sets[j] for j in range(len(member_sets)) if j != i])
+            print(f"    Group {g}: {len(member_sets[i])} members, {len(unique_to_this)} unique to this group only")
+
+    print()
+
+
 def dump_all_groups(maps: dict, tokenizer=None, mask_rows: int = 5):
     """Dump summary of all groups."""
     num_groups = maps["num_groups"]
@@ -200,6 +315,17 @@ def main():
         help="Dump summary of all groups",
     )
     parser.add_argument(
+        "--overlap-quality",
+        action="store_true",
+        help="Analyze overlap quality (groupmate diversity)",
+    )
+    parser.add_argument(
+        "--sample-tokens",
+        type=int,
+        default=5,
+        help="Number of sample tokens for overlap quality analysis (default: 5)",
+    )
+    parser.add_argument(
         "--max-tokens",
         type=int,
         default=50,
@@ -229,6 +355,8 @@ def main():
     elif args.all_groups:
         mask_rows = args.mask_rows if args.mask_rows >= 0 else maps["num_groups"]
         dump_all_groups(maps, tokenizer, mask_rows=mask_rows)
+    elif args.overlap_quality:
+        dump_overlap_quality(maps, tokenizer, args.sample_tokens)
     else:
         dump_overview(maps)
 
