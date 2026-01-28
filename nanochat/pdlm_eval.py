@@ -1,9 +1,15 @@
 """
-PDLM Stage 2 Evaluation Module.
+PDLM Evaluation Module.
 
-Computes loss, perplexity, and compatibility metrics for PDLM models on validation data.
+Supports both Stage 1 MASK and Stage 2 evaluation.
 
-Evaluation setup for Stage 2 (Group → Pure):
+Stage 1 MASK (Pure/MASK → Group):
+- Input: [prefix, MASK, MASK, ...] at xt positions
+- Output: predict group tokens for each MASK position
+- Loss: any-correct over overlap_k valid groups
+- Metrics: loss, PPL, accuracy per position
+
+Stage 2 (Group → Pure):
 - Input is [xt | x0] of length 2L (concatenated inside model.forward)
 - xt (first L): group tokens at block positions, pure tokens at prefix
 - x0 (second L): pure tokens everywhere (clean reference)
@@ -11,20 +17,188 @@ Evaluation setup for Stage 2 (Group → Pure):
 - Compute loss from blocks 1, 2, ... (they have clean context via cross-attention)
 
 Metrics:
-1. Loss/PPL: Cross-entropy loss on pure token prediction at block positions
+1. Loss/PPL: Cross-entropy loss on token prediction at block positions
 2. Per-position breakdown: loss_pos_0, loss_pos_1, ... within each block
-3. Compatibility: Check if parallel predictions are mutually consistent
+3. Accuracy: for Stage 1, any-correct accuracy (any valid group counts)
+4. Compatibility: Check if parallel predictions are mutually consistent (Stage 2 only)
 
 Perplexity note:
 - PPL = exp(avg_cross_entropy_loss)
-- The output vocab is pure_vocab_size (not pure + groups)
-- Loss is computed only on block positions (where model predicts pure from group)
+- Stage 1: output vocab is num_groups
+- Stage 2: output vocab is pure_vocab_size
+- Loss is computed only on block positions
 """
 
 import torch
 import torch.nn.functional as F
 
 from nanochat.group_tokenizer.token_map import get_token_map
+
+
+def eval_pdlm_stage1_mask(
+    model,
+    val_loader,
+    block_size,
+    num_batches,
+    attn_mask,
+    device,
+    autocast_ctx,
+    prefix_pure_tokens=0,
+):
+    """
+    Evaluate PDLM Stage 1 MASK model on validation set.
+
+    Stage 1 MASK: [prefix, MASK, MASK, ...] → group tokens
+    Uses any-correct loss where predicting ANY valid group is correct.
+
+    Args:
+        model: PDLM model (stage1_mask)
+        val_loader: validation data loader (yields inputs, targets, loss_extras, state_dict)
+                    inputs: [prefix, MASK, MASK, ...]
+                    targets: pure tokens everywhere
+                    loss_extras: {"loss_mask", "group_targets"}
+        block_size: block size for PDLM
+        num_batches: number of batches to evaluate
+        attn_mask: attention mask for the model
+        device: device to run on
+        autocast_ctx: autocast context for mixed precision
+        prefix_pure_tokens: number of pure prefix tokens (no loss on these)
+
+    Returns:
+        dict with evaluation results:
+        {
+            "overall_loss": float,
+            "overall_ppl": float,
+            "overall_accuracy": float,  # any-correct accuracy
+            "positions": {
+                0: {"loss": X, "ppl": Y, "accuracy": Z, "tokens": N},
+                1: {"loss": X, "ppl": Y, "accuracy": Z, "tokens": N},
+                ...
+            },
+            "num_tokens_evaluated": int,
+        }
+    """
+    was_training = model.training
+    model.eval()
+
+    with torch.no_grad():
+        result = _eval_stage1_mask_per_position(
+            model, val_loader, block_size, num_batches,
+            attn_mask, device, autocast_ctx, prefix_pure_tokens
+        )
+
+    if was_training:
+        model.train()
+    return result
+
+
+def _eval_stage1_mask_per_position(
+    model, val_loader, block_size, num_batches,
+    attn_mask, device, autocast_ctx, prefix_pure_tokens,
+):
+    """
+    Evaluate Stage 1 MASK loss and accuracy broken down by position within block.
+    Skip block 0 (no context), compute from blocks 1 onwards.
+    """
+    # Accumulators: metrics_by_pos[pos] = {nll, correct, tokens}
+    metrics_by_pos = {p: {"nll": 0.0, "correct": 0, "tokens": 0} for p in range(block_size)}
+
+    for batch_idx in range(num_batches):
+        inputs, targets, loss_extras, state = next(val_loader)
+        # inputs: (B, T) - [prefix, MASK, MASK, ...]
+        # targets: (B, T) - pure tokens everywhere
+        # loss_extras: {"loss_mask": (B, T), "group_targets": (B, T, overlap_k)}
+
+        B, T = inputs.shape
+        loss_mask = loss_extras.get("loss_mask", None)
+        group_targets = loss_extras.get("group_targets", None)
+
+        if group_targets is None:
+            raise ValueError("Stage 1 MASK eval requires group_targets in loss_extras")
+
+        overlap_k = group_targets.size(-1)
+
+        with autocast_ctx:
+            # Forward pass: model concatenates [inputs | targets] internally
+            # Returns logits for first T positions (xt half)
+            logits = model.forward_for_eval(inputs, targets, attn_mask=attn_mask)
+            # logits: (B, T, num_groups)
+
+            # Compute log probabilities
+            log_probs = F.log_softmax(logits.float(), dim=-1)
+
+            # Get predictions
+            preds = logits.argmax(dim=-1)  # (B, T)
+
+            # Compute metrics for each position within blocks
+            num_blocks = T // block_size
+
+            for pos in range(block_size):
+                # For each block (starting from block 1 to skip block 0)
+                for block_idx in range(1, num_blocks):
+                    pos_in_seq = block_idx * block_size + pos
+
+                    # Check if this position should have loss (within loss_mask)
+                    if loss_mask is not None:
+                        mask_at_pos = loss_mask[:, pos_in_seq]  # (B,)
+                    else:
+                        mask_at_pos = torch.ones(B, dtype=torch.bool, device=device)
+
+                    # Get valid group targets for this position
+                    valid_groups = group_targets[:, pos_in_seq, :]  # (B, overlap_k)
+
+                    # Compute any-correct NLL
+                    # Gather log probs for valid targets
+                    valid_mask = valid_groups >= 0  # (B, overlap_k)
+                    safe_targets = valid_groups.clamp(min=0)
+                    valid_log_probs = torch.gather(
+                        log_probs[:, pos_in_seq, :], dim=-1, index=safe_targets
+                    )  # (B, overlap_k)
+                    valid_log_probs = valid_log_probs.masked_fill(~valid_mask, float('-inf'))
+                    log_valid_prob = torch.logsumexp(valid_log_probs, dim=-1)  # (B,)
+                    nll = -log_valid_prob
+
+                    # Apply mask and accumulate
+                    nll_masked = nll * mask_at_pos.float()
+                    metrics_by_pos[pos]["nll"] += nll_masked.sum().item()
+                    metrics_by_pos[pos]["tokens"] += mask_at_pos.sum().item()
+
+                    # Compute any-correct accuracy
+                    # Prediction is correct if it matches ANY valid group
+                    pred_at_pos = preds[:, pos_in_seq]  # (B,)
+                    # Check if pred matches any valid target
+                    pred_expanded = pred_at_pos.unsqueeze(-1)  # (B, 1)
+                    any_correct = ((valid_groups == pred_expanded) & valid_mask).any(dim=-1)  # (B,)
+                    correct_masked = any_correct & mask_at_pos
+                    metrics_by_pos[pos]["correct"] += correct_masked.sum().item()
+
+    # Build result dict
+    result = {}
+
+    # Overall metrics (sum across all positions)
+    total_nll = sum(metrics_by_pos[p]["nll"] for p in range(block_size))
+    total_correct = sum(metrics_by_pos[p]["correct"] for p in range(block_size))
+    total_tokens = sum(metrics_by_pos[p]["tokens"] for p in range(block_size))
+    result["overall_loss"] = total_nll / total_tokens if total_tokens > 0 else 0.0
+    result["overall_ppl"] = torch.exp(torch.tensor(result["overall_loss"])).item()
+    result["overall_accuracy"] = total_correct / total_tokens if total_tokens > 0 else 0.0
+    result["num_tokens_evaluated"] = total_tokens
+
+    # Per-position metrics
+    result["positions"] = {}
+    for pos in range(block_size):
+        pos_nll = metrics_by_pos[pos]["nll"]
+        pos_correct = metrics_by_pos[pos]["correct"]
+        pos_tokens = metrics_by_pos[pos]["tokens"]
+        pos_loss = pos_nll / pos_tokens if pos_tokens > 0 else 0.0
+        result["positions"][pos] = {
+            "loss": pos_loss,
+            "ppl": torch.exp(torch.tensor(pos_loss)).item(),
+            "accuracy": pos_correct / pos_tokens if pos_tokens > 0 else 0.0,
+            "tokens": pos_tokens,
+        }
+
+    return result
 
 
 def eval_pdlm(

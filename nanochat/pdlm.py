@@ -17,6 +17,53 @@ from nanochat.muon import Muon, DistMuon
 from nanochat.adamw import DistAdamW
 from nanochat.group_tokenizer.token_map import get_token_map
 
+
+def any_correct_ce_loss(logits, valid_targets, loss_mask=None):
+    """
+    Cross-entropy loss where ANY of the valid targets is considered correct.
+
+    Loss = -log(Σ P(g) for g in valid_groups)
+
+    This allows the model to predict any of the valid group assignments
+    when overlap_k > 1.
+
+    Args:
+        logits: (N, num_groups) - logits over group vocabulary (flattened)
+        valid_targets: (N, overlap_k) - ALL valid group indices for each position
+                       Use -1 for padding (will be masked out)
+        loss_mask: optional (N,) bool - True for positions to include in loss
+
+    Returns:
+        loss: scalar mean loss
+    """
+    # Compute log probabilities
+    log_probs = F.log_softmax(logits, dim=-1)
+
+    # Mask invalid targets (where valid_targets == -1)
+    valid_mask = valid_targets >= 0  # (N, overlap_k)
+
+    # Clamp to valid indices for gather (masked positions will be ignored)
+    safe_targets = valid_targets.clamp(min=0)
+
+    # Gather log probs for valid targets
+    valid_log_probs = torch.gather(log_probs, dim=-1, index=safe_targets)  # (N, overlap_k)
+
+    # Mask out invalid positions with -inf before logsumexp
+    valid_log_probs = valid_log_probs.masked_fill(~valid_mask, float('-inf'))
+
+    # Log-sum-exp over valid groups: log(Σ P(valid_g))
+    log_valid_prob = torch.logsumexp(valid_log_probs, dim=-1)  # (N,)
+
+    # Negative log likelihood
+    nll = -log_valid_prob
+
+    # Apply loss_mask if provided
+    if loss_mask is not None:
+        nll = nll * loss_mask.float()
+        return nll.sum() / loss_mask.sum().clamp(min=1)
+    else:
+        return nll.mean()
+
 # Stage types for PDLM
 PDLMStage = Literal["stage1_mtp", "stage1_mask", "stage2", "both_mtp", "both_mask"]
 
@@ -320,8 +367,25 @@ class PDLM(nn.Module):
         if targets is not None:
             # training: given the targets, compute and return the loss
             logits = logits[:, :T, :]  # first T positions (xt half)
+            V = logits.size(-1)
 
-            if loss_extras is not None and "loss_mask" in loss_extras:
+            if self.config.stage == "stage1_mask":
+                # Stage 1 MASK: predict group tokens from MASK positions
+                # logits: (B, T, num_groups)
+                # group_targets: (B, T, overlap_k) from loss_extras
+                # loss_mask: (B, T) from loss_extras
+                assert loss_extras is not None and "group_targets" in loss_extras
+                group_targets = loss_extras["group_targets"]
+                loss_mask = loss_extras["loss_mask"]
+                overlap_k = group_targets.size(-1)
+
+                # Compute any-correct loss at MASK positions
+                loss = any_correct_ce_loss(
+                    logits.reshape(-1, V),
+                    group_targets.reshape(-1, overlap_k),
+                    loss_mask.reshape(-1)
+                )
+            elif loss_extras is not None and "loss_mask" in loss_extras:
                 # Stage2: use loss_mask to compute loss only on block positions
                 loss_mask = loss_extras["loss_mask"]
                 # Compute per-token cross-entropy
