@@ -7,8 +7,9 @@ Usage:
     uv run -m scripts.pdlm_eval --model_tag=d8 --step=1000
     uv run -m scripts.pdlm_eval --model_tag=d8  # uses last step
     uv run -m scripts.pdlm_eval --ckpt_dir=/path/to/ckpt
-    uv run -m scripts.pdlm_eval --ckpt_dir=/path/to/ckpt --run_compatibility
-    uv run -m scripts.pdlm_eval --ckpt_dir=/path/to/ckpt --run_oracle_accuracy
+    uv run -m scripts.pdlm_eval --ckpt_dir=/path/to/ckpt --run_compatibility  # also runs oracle accuracy
+    uv run -m scripts.pdlm_eval --ckpt_dir=/path/to/ckpt --run_compatibility --no_oracle_accuracy
+    uv run -m scripts.pdlm_eval --ckpt_dir=/path/to/ckpt --run_oracle_accuracy  # oracle only
 """
 
 import os
@@ -254,9 +255,10 @@ def main():
     parser.add_argument("--num_batches", type=int, default=20, help="Number of validation batches")
     parser.add_argument("--device", type=str, default="auto", help="Device type (cuda/cpu/mps/auto)")
     parser.add_argument("--output_json", type=str, default=None, help="Optional: save results to JSON file")
-    parser.add_argument("--run_compatibility", action="store_true", help="Run compatibility evaluation")
+    parser.add_argument("--run_compatibility", action="store_true", help="Run compatibility evaluation (also enables oracle accuracy unless --no_oracle_accuracy)")
     parser.add_argument("--compatibility_batches", type=int, default=None, help="Number of batches for compatibility (default: num_batches // 4)")
     parser.add_argument("--run_oracle_accuracy", action="store_true", help="Run oracle accuracy evaluation (given ground truth context)")
+    parser.add_argument("--no_oracle_accuracy", action="store_true", help="Disable oracle accuracy even when running compatibility")
     parser.add_argument("--oracle_accuracy_batches", type=int, default=None, help="Number of batches for oracle accuracy (default: num_batches // 4)")
     parser.add_argument("--dump_batch", type=str, default=None, help="Dump one batch to file for debugging (path to output txt)")
     args = parser.parse_args()
@@ -289,6 +291,13 @@ def main():
         )
         return
 
+    # Determine whether to run oracle accuracy:
+    # - Enabled if --run_oracle_accuracy is passed
+    # - Also enabled if --run_compatibility is passed (unless --no_oracle_accuracy)
+    run_oracle = args.run_oracle_accuracy
+    if args.run_compatibility and not args.no_oracle_accuracy:
+        run_oracle = True
+
     # Run evaluation
     eval_result = run_eval(
         model_tag=args.model_tag,
@@ -298,7 +307,7 @@ def main():
         ckpt_dir=args.ckpt_dir,
         run_compatibility=args.run_compatibility,
         compatibility_batches=args.compatibility_batches,
-        run_oracle_accuracy=args.run_oracle_accuracy,
+        run_oracle_accuracy=run_oracle,
         oracle_accuracy_batches=args.oracle_accuracy_batches,
     )
 
@@ -323,6 +332,14 @@ def main():
 
     # Optionally save to JSON
     if args.output_json:
+        # Backup existing file if it exists
+        if os.path.exists(args.output_json):
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y_%m_%d_%H_%M")
+            backup_path = args.output_json.replace(".json", f"_backup_{timestamp}.json")
+            os.rename(args.output_json, backup_path)
+            print0(f"Backed up existing results to {backup_path}")
+
         with open(args.output_json, "w") as f:
             json.dump(eval_result, f, indent=2)
         print0(f"\nResults saved to {args.output_json}")
