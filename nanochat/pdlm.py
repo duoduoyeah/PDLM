@@ -478,9 +478,9 @@ class PDLM(nn.Module):
         first_group_tok = mtp_targets[:, :, 0, 0]  # (B, T)
 
         # MTP head predicts K-1 additional tokens (2nd through Kth)
-        # Get rotary embeddings for MTP (same as x0 portion)
-        mtp_cos = cos.transpose(1, 2)  # (1, 1, T, D/2) -> for MTPHead
-        mtp_sin = sin.transpose(1, 2)
+        # Rotary embeddings: [1, T, 1, head_dim//2] broadcasts with [B, T, n_head, head_dim]
+        mtp_cos = cos
+        mtp_sin = sin
 
         # Teacher forcing targets for MTP: use ground truth for k=0..K-2 to predict k=1..K-1
         # mtp_targets[:, :, k, 0] gives the k-th future group token (using first overlap option)
