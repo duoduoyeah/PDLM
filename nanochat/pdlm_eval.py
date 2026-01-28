@@ -306,6 +306,123 @@ def eval_pdlm_compatibility(
     return result
 
 
+def eval_pdlm_oracle_accuracy(
+    model,
+    val_loader,
+    block_size,
+    num_batches,
+    attn_mask,
+    device,
+    autocast_ctx,
+    cached_batches=None,
+):
+    """
+    Test accuracy when given ground truth context (oracle test).
+
+    For each position i in a block:
+    - Input: [p1, p2, p3, G_i] (ground truth pure tokens at other positions, group token at i)
+    - Predict: x_i'
+    - Compare: p_i == x_i'?
+
+    This tests the model's capability to predict correctly given perfect context,
+    which helps interpret compatibility results:
+    - High oracle accuracy + low compatibility → model explores valid alternatives
+    - Low oracle accuracy → model fundamentally struggles even with perfect context
+
+    Args:
+        model: PDLM model (stage2)
+        val_loader: validation data loader (can be None if cached_batches provided)
+        block_size: block size for PDLM
+        num_batches: number of batches to evaluate (ignored if cached_batches provided)
+        attn_mask: attention mask for the model
+        device: device to run on
+        autocast_ctx: autocast context for mixed precision
+        cached_batches: pre-cached list of (inputs, targets, loss_extras, state) tuples.
+
+    Returns:
+        dict with oracle accuracy results:
+        {
+            "overall_accuracy": float,  # % positions where prediction matches ground truth
+            "positions": {
+                0: {"accuracy": float, "total": int, "matched": int},
+                ...
+            },
+        }
+    """
+    was_training = model.training
+    model.eval()
+
+    # Accumulators
+    acc_by_pos = {p: {"matched": 0, "total": 0} for p in range(block_size)}
+
+    # Use cached batches if provided, otherwise consume from loader
+    def get_batch(idx):
+        if cached_batches is not None:
+            return cached_batches[idx]
+        return next(val_loader)
+
+    # Determine actual number of batches
+    actual_batches = len(cached_batches) if cached_batches is not None else num_batches
+
+    with torch.no_grad():
+        for batch_idx in range(actual_batches):
+            inputs, targets, loss_extras, _ = get_batch(batch_idx)
+            # inputs: (B, T) - group tokens at block positions
+            # targets: (B, T) - pure tokens (ground truth)
+
+            B, T = inputs.shape
+            num_blocks = T // block_size
+
+            with autocast_ctx:
+                # For each position, create input with ground truth at other positions
+                for block_idx in range(1, num_blocks):  # Skip block 0
+                    block_start = block_idx * block_size
+
+                    for test_pos in range(block_size):
+                        # Create modified input: ground truth everywhere except test_pos
+                        modified_inputs = targets.clone()
+
+                        # Replace test_pos with group token (from original inputs)
+                        abs_pos = block_start + test_pos
+                        modified_inputs[:, abs_pos] = inputs[:, abs_pos]
+
+                        # Run model
+                        modified_logits = model.forward_for_eval(
+                            modified_inputs, targets, attn_mask=attn_mask
+                        )
+                        predictions = modified_logits.argmax(dim=-1)
+
+                        # Compare prediction at test_pos with ground truth
+                        pred_at_pos = predictions[:, abs_pos]
+                        truth_at_pos = targets[:, abs_pos]
+
+                        matched = (pred_at_pos == truth_at_pos).sum().item()
+                        acc_by_pos[test_pos]["matched"] += matched
+                        acc_by_pos[test_pos]["total"] += B
+
+    if was_training:
+        model.train()
+
+    # Build result dict
+    result = {}
+
+    total_matched = sum(acc_by_pos[p]["matched"] for p in range(block_size))
+    total_count = sum(acc_by_pos[p]["total"] for p in range(block_size))
+    result["overall_accuracy"] = total_matched / total_count if total_count > 0 else 0.0
+
+    result["positions"] = {}
+    for pos in range(block_size):
+        matched = acc_by_pos[pos]["matched"]
+        total = acc_by_pos[pos]["total"]
+        result["positions"][pos] = {
+            "accuracy": matched / total if total > 0 else 0.0,
+            "matched": matched,
+            "total": total,
+        }
+
+    return result
+
+
 def eval_pdlm_full(
     model,
     val_loader,
@@ -317,9 +434,11 @@ def eval_pdlm_full(
     prefix_pure_tokens=0,
     run_compatibility=True,
     compatibility_batches=None,
+    run_oracle_accuracy=True,
+    oracle_accuracy_batches=None,
 ):
     """
-    Run full PDLM evaluation: loss + perplexity + optional compatibility.
+    Run full PDLM evaluation: loss + perplexity + optional compatibility + optional oracle accuracy.
 
     Args:
         model: PDLM model
@@ -332,6 +451,8 @@ def eval_pdlm_full(
         prefix_pure_tokens: pure prefix tokens
         run_compatibility: whether to run compatibility eval
         compatibility_batches: batches for compatibility (default: num_batches // 4)
+        run_oracle_accuracy: whether to run oracle accuracy eval
+        oracle_accuracy_batches: batches for oracle accuracy (default: num_batches // 4)
 
     Returns:
         dict with all metrics
@@ -363,6 +484,21 @@ def eval_pdlm_full(
             cached_batches=compat_batches,
         )
         result["compatibility"] = compat_result
+
+    # Run oracle accuracy evaluation on the same cached batches
+    if run_oracle_accuracy:
+        if oracle_accuracy_batches is None:
+            oracle_accuracy_batches = max(1, num_batches // 4)
+
+        # Use first oracle_accuracy_batches from cache (same data as loss eval)
+        oracle_batches = cached_batches[:oracle_accuracy_batches]
+
+        oracle_result = eval_pdlm_oracle_accuracy(
+            model, None, block_size, len(oracle_batches),
+            attn_mask, device, autocast_ctx,
+            cached_batches=oracle_batches,
+        )
+        result["oracle_accuracy"] = oracle_result
 
     if was_training:
         model.train()
