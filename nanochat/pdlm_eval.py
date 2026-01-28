@@ -197,6 +197,10 @@ def eval_pdlm_compatibility(
        e.g., predict x4' given [prefix, x1, x2, x3, G4]
     3. Check if x_i == x_i'
 
+    Optimization: Tests all blocks simultaneously for each position.
+    Instead of (num_blocks × block_size) forward passes per batch,
+    uses only (1 + block_size) passes: 1 for initial predictions + 4 for position tests.
+
     Args:
         model: PDLM model (stage2)
         val_loader: validation data loader (can be None if cached_batches provided)
@@ -245,43 +249,41 @@ def eval_pdlm_compatibility(
 
             B, T = inputs.shape
             num_blocks = T // block_size
-            pure_vocab_size = token_map.pure_vocab_size
 
             with autocast_ctx:
-                # Step 1: Get initial predictions (all group tokens -> pure predictions)
+                # Step 1: Get initial predictions (1 forward pass)
                 logits = model.forward_for_eval(inputs, targets, attn_mask=attn_mask)
                 initial_preds = logits.argmax(dim=-1)  # (B, T)
 
-                # Step 2: For each position, reveal other pure tokens and re-predict
-                for block_idx in range(1, num_blocks):  # Skip block 0
-                    block_start = block_idx * block_size
-                    block_end = block_start + block_size
+                # Step 2: Test each position across ALL blocks (block_size forward passes)
+                for test_pos in range(block_size):
+                    # Create input: reveal predictions at OTHER positions, keep group at test_pos
+                    # This tests all blocks simultaneously
+                    modified = inputs.clone()
 
-                    for reveal_except_pos in range(block_size):
-                        # Create modified input: reveal all positions EXCEPT reveal_except_pos
-                        modified_inputs = inputs.clone()
-
+                    for block_idx in range(1, num_blocks):  # Skip block 0
                         for pos in range(block_size):
-                            abs_pos = block_start + pos
-                            if pos != reveal_except_pos:
-                                # Reveal: use initial prediction (pure token)
-                                modified_inputs[:, abs_pos] = initial_preds[:, abs_pos]
-                            # else: keep as group token
+                            abs_pos = block_idx * block_size + pos
+                            if pos != test_pos:
+                                # Reveal: use initial prediction
+                                modified[:, abs_pos] = initial_preds[:, abs_pos]
+                            # else: keep group token at test_pos
 
-                        # Re-predict
-                        modified_logits = model.forward_for_eval(
-                            modified_inputs, targets, attn_mask=attn_mask
-                        )
-                        modified_preds = modified_logits.argmax(dim=-1)
+                    # Single forward pass for all blocks
+                    modified_logits = model.forward_for_eval(
+                        modified, targets, attn_mask=attn_mask
+                    )
+                    modified_preds = modified_logits.argmax(dim=-1)
 
-                        # Compare at the position that was NOT revealed
-                        target_pos = block_start + reveal_except_pos
-                        original_pred = initial_preds[:, target_pos]
-                        new_pred = modified_preds[:, target_pos]
+                    # Compare at all test positions across all blocks
+                    for block_idx in range(1, num_blocks):
+                        abs_pos = block_idx * block_size + test_pos
+                        original_pred = initial_preds[:, abs_pos]
+                        new_pred = modified_preds[:, abs_pos]
 
                         matched = (original_pred == new_pred).sum().item()
-                        compat_by_pos[reveal_except_pos]["matched"] += matched
-                        compat_by_pos[reveal_except_pos]["total"] += B
+                        compat_by_pos[test_pos]["matched"] += matched
+                        compat_by_pos[test_pos]["total"] += B
 
     if was_training:
         model.train()
@@ -329,6 +331,10 @@ def eval_pdlm_oracle_accuracy(
     - High oracle accuracy + low compatibility → model explores valid alternatives
     - Low oracle accuracy → model fundamentally struggles even with perfect context
 
+    Optimization: Tests all blocks simultaneously for each position.
+    Instead of (num_blocks × block_size) forward passes per batch,
+    uses only block_size passes (4 for block_size=4).
+
     Args:
         model: PDLM model (stage2)
         val_loader: validation data loader (can be None if cached_batches provided)
@@ -374,29 +380,24 @@ def eval_pdlm_oracle_accuracy(
             num_blocks = T // block_size
 
             with autocast_ctx:
-                # For each position, create input with ground truth at other positions
-                for block_idx in range(1, num_blocks):  # Skip block 0
-                    block_start = block_idx * block_size
+                # Test each position across ALL blocks (block_size forward passes total)
+                for test_pos in range(block_size):
+                    # Create input: ground truth everywhere, EXCEPT test_pos in each block
+                    # has group token
+                    modified = targets.clone()
 
-                    for test_pos in range(block_size):
-                        # Create modified input: ground truth everywhere except test_pos
-                        modified_inputs = targets.clone()
+                    for block_idx in range(1, num_blocks):  # Skip block 0
+                        abs_pos = block_idx * block_size + test_pos
+                        modified[:, abs_pos] = inputs[:, abs_pos]  # put group token here
 
-                        # Replace test_pos with group token (from original inputs)
-                        abs_pos = block_start + test_pos
-                        modified_inputs[:, abs_pos] = inputs[:, abs_pos]
+                    # Single forward pass for all blocks
+                    logits = model.forward_for_eval(modified, targets, attn_mask=attn_mask)
+                    preds = logits.argmax(dim=-1)
 
-                        # Run model
-                        modified_logits = model.forward_for_eval(
-                            modified_inputs, targets, attn_mask=attn_mask
-                        )
-                        predictions = modified_logits.argmax(dim=-1)
-
-                        # Compare prediction at test_pos with ground truth
-                        pred_at_pos = predictions[:, abs_pos]
-                        truth_at_pos = targets[:, abs_pos]
-
-                        matched = (pred_at_pos == truth_at_pos).sum().item()
+                    # Compare at all test positions across all blocks
+                    for block_idx in range(1, num_blocks):
+                        abs_pos = block_idx * block_size + test_pos
+                        matched = (preds[:, abs_pos] == targets[:, abs_pos]).sum().item()
                         acc_by_pos[test_pos]["matched"] += matched
                         acc_by_pos[test_pos]["total"] += B
 
