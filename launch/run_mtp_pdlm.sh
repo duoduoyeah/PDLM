@@ -230,7 +230,7 @@ python -m scripts.base_train \
     --run="${MODEL_NAME}" \
     --wandb_group="${WANDB_GROUP}" \
     --model_type=pdlm \
-    --pdlm_stage=mtp_pdlm \
+    --pdlm_stage=both_mtp \
     --depth=${DEPTH} \
     --block_size=${BLOCK_SIZE} \
     --n_future_tokens=${N_FUTURE_TOKENS} \
