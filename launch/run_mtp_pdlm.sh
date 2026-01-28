@@ -1,6 +1,6 @@
 #!/bin/bash
 
-## Combined PDLM (both_mtp) Training Script
+## MTP-PDLM Training Script
 ## Single-pass model that performs:
 ##   - Stage 1 (MTP: Pure → K Group tokens) on the second L positions
 ##   - Stage 2 (Group → Pure denoising) on the first L positions
@@ -13,9 +13,9 @@
 ##   - num_groups: number of final groups
 ##
 ## Usage:
-##   bash launch/run_both_mtp.sh --noise_level=64 --overlap_k=1 --num_groups=64
-##   bash launch/run_both_mtp.sh --noise_level=1024 --overlap_k=7 --num_groups=28 --depth=8
-##   bash launch/run_both_mtp.sh --noise_level=64 --num_groups=64 --test_mode=false --data_ratio=20
+##   bash launch/run_mtp_pdlm.sh --noise_level=64 --overlap_k=1 --num_groups=64
+##   bash launch/run_mtp_pdlm.sh --noise_level=1024 --overlap_k=7 --num_groups=28 --depth=8
+##   bash launch/run_mtp_pdlm.sh --noise_level=64 --num_groups=64 --test_mode=false --data_ratio=20
 
 # ============================================================
 # Default values
@@ -90,7 +90,7 @@ for arg in "$@"; do
             ;;
         *)
             echo "Unknown argument: $arg"
-            echo "Usage: bash launch/run_both_mtp.sh [--noise_level=64] [--overlap_k=1] [--num_groups=64]"
+            echo "Usage: bash launch/run_mtp_pdlm.sh [--noise_level=64] [--overlap_k=1] [--num_groups=64]"
             echo "       [--depth=4] [--block_size=8] [--n_future_tokens=4] [--mtp_loss_beta=0.8]"
             echo "       [--mtp_loss_weight=1.0] [--test_mode=true] [--data_ratio=10]"
             echo "       [--max_seq_len=512] [--device_batch_size=64]"
@@ -115,13 +115,13 @@ done
 TOKENIZER_VARIANT="n${NOISE_LEVEL}_k${OVERLAP_K}_g${NUM_GROUPS}"
 
 # Build model name
-BASE_MODEL_NAME="both_mtp_d${DEPTH}_b${BLOCK_SIZE}_K${N_FUTURE_TOKENS}_${TOKENIZER_VARIANT}"
+BASE_MODEL_NAME="mtp_pdlm_d${DEPTH}_b${BLOCK_SIZE}_K${N_FUTURE_TOKENS}_${TOKENIZER_VARIANT}"
 
-WANDB_GROUP="both_mtp_d${DEPTH}"
+WANDB_GROUP="mtp_pdlm_d${DEPTH}"
 DRIVE_BASE="/content/drive/MyDrive/nanochat"
 
 # Local training base (faster than Drive)
-LOCAL_TRAIN_BASE="/content/both_mtp_temp_train"
+LOCAL_TRAIN_BASE="/content/mtp_pdlm_temp_train"
 
 # Group tokenizer path on Drive (built by build_group_tokenizer.sh)
 # Contains: tokenizer.pkl, token_maps.pt (self-contained, no need for base tokenizer)
@@ -155,7 +155,7 @@ export DEPTH
 export WANDB_GROUP
 export NANOCHAT_BASE_DIR="${LOCAL_TRAIN_BASE}/${MODEL_NAME}"
 
-echo "=== Running Combined PDLM (both_mtp): ${MODEL_NAME} ==="
+echo "=== Running Combined PDLM (mtp_pdlm): ${MODEL_NAME} ==="
 echo "=== Local base dir: ${NANOCHAT_BASE_DIR} ==="
 echo "=== Drive base: ${DRIVE_BASE} ==="
 echo "=== Test mode: ${TEST_MODE} ==="
@@ -222,15 +222,15 @@ python -m nanochat.dataset -n 10 --split both
 echo "Dataset download complete."
 
 # ============================================================
-# Training - Combined PDLM (both_mtp)
+# Training - Combined PDLM (mtp_pdlm)
 # ============================================================
 
-echo "Starting Combined PDLM (both_mtp) training..."
+echo "Starting Combined PDLM (mtp_pdlm) training..."
 python -m scripts.base_train \
     --run="${MODEL_NAME}" \
     --wandb_group="${WANDB_GROUP}" \
     --model_type=pdlm \
-    --pdlm_stage=both_mtp \
+    --pdlm_stage=mtp_pdlm \
     --depth=${DEPTH} \
     --block_size=${BLOCK_SIZE} \
     --n_future_tokens=${N_FUTURE_TOKENS} \
