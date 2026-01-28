@@ -23,7 +23,7 @@ def norm(x):
 
 def apply_rotary_emb(x, cos, sin):
     """Apply rotary embeddings to x"""
-    assert x.ndim == 4  # (B, H, T, D)
+    assert x.ndim == 4  # (B, T, H, D)
     d = x.shape[3] // 2
     x1, x2 = x[..., :d], x[..., d:]
     y1 = x1 * cos + x2 * sin
@@ -52,10 +52,10 @@ class MTPAttention(nn.Module):
         k = self.c_k(x).view(B, T, self.n_head, self.head_dim)
         v = self.c_v(x).view(B, T, self.n_head, self.head_dim)
 
-        # Apply rotary embeddings
-        q, k = apply_rotary_emb(q.transpose(1, 2), cos, sin), apply_rotary_emb(k.transpose(1, 2), cos, sin)
+        # Apply rotary embeddings BEFORE transpose (matches gpt_mtp.py pattern)
+        q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
         q, k = norm(q), norm(k)  # QK norm
-        v = v.transpose(1, 2)
+        q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
 
         # Causal attention
         y = F.scaled_dot_product_attention(q, k, v, is_causal=True)

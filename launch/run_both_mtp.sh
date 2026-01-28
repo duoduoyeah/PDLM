@@ -1,38 +1,33 @@
 #!/bin/bash
 
-## Experiment D - MTP Stage 1 Training Script (Pure → Group)
-## Predict K future group tokens from pure token prefix
+## Combined PDLM (both_mtp) Training Script
+## Single-pass model that performs:
+##   - Stage 1 (MTP: Pure → K Group tokens) on the second L positions
+##   - Stage 2 (Group → Pure denoising) on the first L positions
 ##
-## Test mode: data_ratio=10
-## Production mode: data_ratio=20 (or user specified)
-##
-## Tokenizer naming: n{noise}_k{overlap_k}_g{num_groups}
-##   - noise_level: tokens per final group (e.g., 64, 1024)
-##   - overlap_k: how many groups each token appears in
-##   - num_groups: number of final groups
+## Architecture uses 2L input: [xt | x0] with block diffusion mask
 ##
 ## Usage:
-##   bash launch/run_mtp.sh --noise_level=64 --overlap_k=1 --num_groups=64
-##   bash launch/run_mtp.sh --noise_level=1024 --overlap_k=7 --num_groups=28 --depth=8
-##   bash launch/run_mtp.sh --noise_level=64 --num_groups=64 --test_mode=false --data_ratio=20
+##   bash launch/run_both_mtp.sh --variant=g64
+##   bash launch/run_both_mtp.sh --variant=g64 --overlap_k=2 --depth=8
+##   bash launch/run_both_mtp.sh --variant=g64 --test_mode=false --data_ratio=20
 
 # ============================================================
 # Default values
 # ============================================================
-# Tokenizer naming: n{noise}_k{overlap_k}_g{num_groups}
-# Examples: n64_k1_g64, n1024_k7_g28, n1024_k55_g220
-NOISE_LEVEL="64"        # tokens per final group
-OVERLAP_K="1"           # how many groups each token appears in
-NUM_GROUPS="64"         # number of final groups
+VARIANT="g64"              # g16, g64, g256 (num_groups)
+OVERLAP_K="1"              # overlap_k for group tokenizer
 TEST_MODE="true"
-DATA_RATIO="10"         # default 10 for test mode
-DEPTH="4"               # model depth
-BLOCK_SIZE="4"          # n_future_tokens (K group tokens to predict)
-MTP_LOSS_BETA="0.8"     # exponential decay for loss weighting
+DATA_RATIO="10"            # default 10 for test mode
+DEPTH="4"                  # model depth
+BLOCK_SIZE="8"             # bucket_size for block diffusion (Stage 2)
+N_FUTURE_TOKENS="4"        # K group tokens to predict (Stage 1 MTP)
+MTP_LOSS_BETA="0.8"        # exponential decay for MTP loss weighting
+MTP_LOSS_WEIGHT="1.0"      # Stage 1 loss weight relative to Stage 2
 
 # Common training arguments
 MAX_SEQ_LEN="512"
-DEVICE_BATCH_SIZE="128"
+DEVICE_BATCH_SIZE="64"     # Lower than MTP due to 2L input (doubled sequence)
 EVAL_EVERY="2500"
 EVAL_NUM_BATCHES="20"
 EVAL_NUM_BATCHES_FINAL="100"
@@ -40,14 +35,11 @@ EVAL_NUM_BATCHES_FINAL="100"
 # Parse named arguments
 for arg in "$@"; do
     case $arg in
-        --noise_level=*)
-            NOISE_LEVEL="${arg#*=}"
+        --variant=*)
+            VARIANT="${arg#*=}"
             ;;
         --overlap_k=*)
             OVERLAP_K="${arg#*=}"
-            ;;
-        --num_groups=*)
-            NUM_GROUPS="${arg#*=}"
             ;;
         --test_mode=*)
             TEST_MODE="${arg#*=}"
@@ -61,8 +53,14 @@ for arg in "$@"; do
         --block_size=*)
             BLOCK_SIZE="${arg#*=}"
             ;;
+        --n_future_tokens=*)
+            N_FUTURE_TOKENS="${arg#*=}"
+            ;;
         --mtp_loss_beta=*)
             MTP_LOSS_BETA="${arg#*=}"
+            ;;
+        --mtp_loss_weight=*)
+            MTP_LOSS_WEIGHT="${arg#*=}"
             ;;
         --max_seq_len=*)
             MAX_SEQ_LEN="${arg#*=}"
@@ -81,33 +79,45 @@ for arg in "$@"; do
             ;;
         *)
             echo "Unknown argument: $arg"
-            echo "Usage: bash launch/run_mtp.sh [--noise_level=64] [--overlap_k=1] [--num_groups=64]"
-            echo "       [--depth=4] [--block_size=4] [--test_mode=true] [--data_ratio=10]"
-            echo "       [--mtp_loss_beta=0.8] [--max_seq_len=512] [--device_batch_size=128]"
+            echo "Usage: bash launch/run_both_mtp.sh --variant=g64 [--overlap_k=1] [--depth=4]"
+            echo "       [--block_size=8] [--n_future_tokens=4] [--mtp_loss_beta=0.8] [--mtp_loss_weight=1.0]"
+            echo "       [--test_mode=true] [--data_ratio=10] [--max_seq_len=512] [--device_batch_size=64]"
             echo ""
-            echo "Tokenizer naming: n{noise}_k{overlap_k}_g{num_groups}"
-            echo "Examples: n64_k1_g64, n1024_k7_g28, n1024_k55_g220"
+            echo "Variants: g16, g64, g256 (num_groups for group tokenizer)"
+            echo ""
+            echo "Parameters:"
+            echo "  --block_size        Bucket size for block diffusion (Stage 2)"
+            echo "  --n_future_tokens   K group tokens to predict (Stage 1 MTP)"
+            echo "  --mtp_loss_beta     Exponential decay for MTP loss weights (β^k)"
+            echo "  --mtp_loss_weight   Stage 1 loss weight relative to Stage 2"
             exit 1
             ;;
     esac
 done
 
-# Build tokenizer variant name (matches folder naming convention)
-TOKENIZER_VARIANT="n${NOISE_LEVEL}_k${OVERLAP_K}_g${NUM_GROUPS}"
+# Validate variant
+case "${VARIANT}" in
+    "g16"|"g64"|"g256")
+        ;;
+    *)
+        echo "Unknown variant: ${VARIANT}"
+        echo "Available: g16, g64, g256"
+        exit 1
+        ;;
+esac
 
 # Build model name
-BASE_MODEL_NAME="mtp_d${DEPTH}_b${BLOCK_SIZE}_${TOKENIZER_VARIANT}"
+BASE_MODEL_NAME="both_mtp_d${DEPTH}_b${BLOCK_SIZE}_K${N_FUTURE_TOKENS}_${VARIANT}_k${OVERLAP_K}"
 
-WANDB_GROUP="mtp_d${DEPTH}"
+WANDB_GROUP="both_mtp_d${DEPTH}"
 DRIVE_BASE="/content/drive/MyDrive/nanochat"
 
 # Local training base (faster than Drive)
-LOCAL_TRAIN_BASE="/content/mtp_temp_train"
+LOCAL_TRAIN_BASE="/content/both_mtp_temp_train"
 
 # Group tokenizer path on Drive (built by build_group_tokenizer.sh)
 # Contains: tokenizer.pkl, token_maps.pt (self-contained, no need for base tokenizer)
-# Naming convention: n{noise}_k{overlap_k}_g{num_groups}
-GROUP_TOKENIZER_PATH="${DRIVE_BASE}/group_tokenizers/${TOKENIZER_VARIANT}"
+GROUP_TOKENIZER_PATH="${DRIVE_BASE}/group_tokenizers/${VARIANT}_k${OVERLAP_K}"
 
 # Load secrets from .env file
 if [ -f "launch/.env" ]; then
@@ -136,16 +146,18 @@ export DEPTH
 export WANDB_GROUP
 export NANOCHAT_BASE_DIR="${LOCAL_TRAIN_BASE}/${MODEL_NAME}"
 
-echo "=== Running MTP Stage 1: ${MODEL_NAME} ==="
+echo "=== Running Combined PDLM (both_mtp): ${MODEL_NAME} ==="
 echo "=== Local base dir: ${NANOCHAT_BASE_DIR} ==="
 echo "=== Drive base: ${DRIVE_BASE} ==="
 echo "=== Test mode: ${TEST_MODE} ==="
 echo "=== Data ratio: ${DATA_RATIO} ==="
 echo "=== Depth: ${DEPTH} ==="
-echo "=== Block size (K): ${BLOCK_SIZE} ==="
+echo "=== Block size (bucket): ${BLOCK_SIZE} ==="
+echo "=== N future tokens (K): ${N_FUTURE_TOKENS} ==="
 echo "=== MTP loss beta: ${MTP_LOSS_BETA} ==="
-echo "=== Tokenizer: ${TOKENIZER_VARIANT} (noise=${NOISE_LEVEL}, overlap_k=${OVERLAP_K}, num_groups=${NUM_GROUPS}) ==="
-echo "=== Group tokenizer path: ${GROUP_TOKENIZER_PATH} ==="
+echo "=== MTP loss weight: ${MTP_LOSS_WEIGHT} ==="
+echo "=== Variant: ${VARIANT} (overlap_k=${OVERLAP_K}) ==="
+echo "=== Group tokenizer: ${GROUP_TOKENIZER_PATH} ==="
 
 # ============================================================
 # Setup (run once per model)
@@ -201,17 +213,20 @@ python -m nanochat.dataset -n 10 --split both
 echo "Dataset download complete."
 
 # ============================================================
-# Training - MTP Stage 1 (Pure → Group)
+# Training - Combined PDLM (both_mtp)
 # ============================================================
 
-echo "Starting MTP Stage 1 training..."
+echo "Starting Combined PDLM (both_mtp) training..."
 python -m scripts.base_train \
     --run="${MODEL_NAME}" \
     --wandb_group="${WANDB_GROUP}" \
-    --model_type=mtp \
+    --model_type=pdlm \
+    --pdlm_stage=both_mtp \
     --depth=${DEPTH} \
     --block_size=${BLOCK_SIZE} \
+    --n_future_tokens=${N_FUTURE_TOKENS} \
     --mtp_loss_beta=${MTP_LOSS_BETA} \
+    --mtp_loss_weight=${MTP_LOSS_WEIGHT} \
     --max_seq_len=${MAX_SEQ_LEN} \
     --device_batch_size=${DEVICE_BATCH_SIZE} \
     --target_param_data_ratio=${DATA_RATIO} \
@@ -246,10 +261,6 @@ echo "Copying results to Drive: ${DRIVE_OUTPUT_DIR}"
 mkdir -p "${DRIVE_OUTPUT_DIR}"
 cp -r "${NANOCHAT_BASE_DIR}"/* "${DRIVE_OUTPUT_DIR}/"
 echo "Results saved to Drive."
-
-# TODO: HuggingFace upload (disabled for now)
-# Skip HuggingFace upload - keeping results on Google Drive only
-echo "Skipping HuggingFace upload (disabled for now, results saved to Drive)"
 
 # Cleanup local training dir
 echo "Cleaning up local training dir..."

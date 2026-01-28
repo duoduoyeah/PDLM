@@ -47,6 +47,8 @@ pdlm_stage = "stage2" # pdlm stage: stage1_mtp, stage1_mask, stage2, both_mtp, b
 bd3lm_effective_ratio = None # For bd3lm: auto-computed if None, or override with explicit value
 bd3lm_compute_matched = True # If True, don't adjust iterations for BD3LM (compute-matched). If False, adjust to match loss tokens (supervision-matched).
 mtp_loss_beta = 0.8 # MTP: exponential decay factor for loss weighting (β^k)
+n_future_tokens = 4 # MTP/both_mtp: number of future group tokens to predict (K)
+mtp_loss_weight = 1.0 # both_mtp: Stage 1 MTP loss weight relative to Stage 2
 # Debug
 debug = False
 # Training horizon. Only one of these 3 will be used, in this order of precedence.
@@ -197,6 +199,13 @@ elif model_type == "pdlm":
         bucket_size=block_size,
         model_name=run,
     )
+    # Add MTP-specific params for both_mtp stage
+    if pdlm_stage == "both_mtp":
+        model_config_kwargs.update(
+            n_future_tokens=n_future_tokens,
+            mtp_loss_beta=mtp_loss_beta,
+            mtp_loss_weight=mtp_loss_weight,
+        )
 elif model_type == "mtp":
     ModelConfig, Model = GPTMTPConfig, GPTMTP
     model_config_kwargs = dict(
