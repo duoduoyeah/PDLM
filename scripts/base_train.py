@@ -16,7 +16,7 @@ from nanochat.bd3lm import BDLM, BDLMConfig
 from nanochat.gpt_mtp import GPTMTP, GPTMTPConfig
 from nanochat.dataloader import get_data_loader
 from nanochat.bd3lm_eval import eval_bd3lm
-from nanochat.pdlm_eval import eval_pdlm, eval_pdlm_stage1_mask, eval_pdlm_stage1_block, eval_pdlm_both_block
+from nanochat.pdlm_eval import eval_pdlm, eval_pdlm_stage1_mask, eval_pdlm_stage1_block, eval_pdlm_both_block, eval_pdlm_full
 from nanochat.mtp_eval import eval_mtp
 from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, print_banner, get_base_dir, autodetect_device_type
 from nanochat.tokenizer import get_tokenizer
@@ -603,23 +603,56 @@ while True:
                 wandb_run.log(log_data)
             else:
                 # Stage 2 evaluation
-                print0(f"Running PDLM Stage 2 evaluation at step {step} ({current_eval_batches} batches)...")
-                eval_result = eval_pdlm(
-                    model=orig_model,  # use uncompiled model
-                    val_loader=val_loader,
-                    block_size=block_size,
-                    num_batches=current_eval_batches,
-                    attn_mask=eval_attn_mask,
-                    device=device,
-                    autocast_ctx=autocast_ctx,
-                    prefix_pure_tokens=prefix_pure_tokens,
-                )
+                # Use full eval (with compatibility + oracle accuracy) for final step
+                run_full_eval = last_step
+                if run_full_eval:
+                    print0(f"Running PDLM Stage 2 full evaluation at step {step} ({current_eval_batches} batches)...")
+                    eval_result = eval_pdlm_full(
+                        model=orig_model,
+                        val_loader=val_loader,
+                        block_size=block_size,
+                        num_batches=current_eval_batches,
+                        attn_mask=eval_attn_mask,
+                        device=device,
+                        autocast_ctx=autocast_ctx,
+                        prefix_pure_tokens=prefix_pure_tokens,
+                        run_compatibility=True,
+                        compatibility_batches=max(1, current_eval_batches // 4),
+                        run_oracle_accuracy=True,
+                        oracle_accuracy_batches=max(1, current_eval_batches // 4),
+                    )
+                else:
+                    print0(f"Running PDLM Stage 2 evaluation at step {step} ({current_eval_batches} batches)...")
+                    eval_result = eval_pdlm(
+                        model=orig_model,  # use uncompiled model
+                        val_loader=val_loader,
+                        block_size=block_size,
+                        num_batches=current_eval_batches,
+                        attn_mask=eval_attn_mask,
+                        device=device,
+                        autocast_ctx=autocast_ctx,
+                        prefix_pure_tokens=prefix_pure_tokens,
+                    )
                 # Log eval results
                 print0(f"  [pdlm stage2] overall_loss: {eval_result['overall_loss']:.4f}, overall_ppl: {eval_result['overall_ppl']:.2f}")
                 # Per-position metrics
                 for pos in range(block_size):
                     pos_data = eval_result["positions"][pos]
                     print0(f"    pos {pos}: loss={pos_data['loss']:.4f}, ppl={pos_data['ppl']:.2f}")
+                # Compatibility metrics (final eval only)
+                if "compatibility" in eval_result:
+                    compat = eval_result["compatibility"]
+                    print0(f"  Compatibility: {compat['overall_compatibility']:.2%}")
+                    for pos in range(block_size):
+                        pos_data = compat["positions"][pos]
+                        print0(f"    pos {pos}: {pos_data['compatibility']:.2%} ({pos_data['matched']}/{pos_data['total']})")
+                # Oracle accuracy metrics (final eval only)
+                if "oracle_accuracy" in eval_result:
+                    oracle = eval_result["oracle_accuracy"]
+                    print0(f"  Oracle accuracy: {oracle['overall_accuracy']:.2%}")
+                    for pos in range(block_size):
+                        pos_data = oracle["positions"][pos]
+                        print0(f"    pos {pos}: {pos_data['accuracy']:.2%} ({pos_data['matched']}/{pos_data['total']})")
                 # Build log data for wandb
                 log_data = {
                     "step": step,
@@ -630,6 +663,15 @@ while True:
                     pos_data = eval_result["positions"][pos]
                     log_data[f"eval/pos_{pos}_loss"] = pos_data["loss"]
                     log_data[f"eval/pos_{pos}_ppl"] = pos_data["ppl"]
+                # Log compatibility and oracle accuracy (final eval only)
+                if "compatibility" in eval_result:
+                    log_data["eval/compatibility"] = eval_result["compatibility"]["overall_compatibility"]
+                    for pos in range(block_size):
+                        log_data[f"eval/pos_{pos}_compatibility"] = eval_result["compatibility"]["positions"][pos]["compatibility"]
+                if "oracle_accuracy" in eval_result:
+                    log_data["eval/oracle_accuracy"] = eval_result["oracle_accuracy"]["overall_accuracy"]
+                    for pos in range(block_size):
+                        log_data[f"eval/pos_{pos}_oracle_accuracy"] = eval_result["oracle_accuracy"]["positions"][pos]["accuracy"]
                 wandb_run.log(log_data)
         elif model_type == "next_token_ar":
             pass  # TODO: AR evaluation
