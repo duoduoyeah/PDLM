@@ -7,7 +7,9 @@ Usage:
     uv run -m scripts.pdlm_eval --model_tag=d8 --step=1000
     uv run -m scripts.pdlm_eval --model_tag=d8  # uses last step
     uv run -m scripts.pdlm_eval --ckpt_dir=/path/to/ckpt
-    uv run -m scripts.pdlm_eval --ckpt_dir=/path/to/ckpt --run_compatibility
+    uv run -m scripts.pdlm_eval --ckpt_dir=/path/to/ckpt --run_compatibility  # also runs oracle accuracy
+    uv run -m scripts.pdlm_eval --ckpt_dir=/path/to/ckpt --run_compatibility --no_oracle_accuracy
+    uv run -m scripts.pdlm_eval --ckpt_dir=/path/to/ckpt --run_oracle_accuracy  # oracle only
 """
 
 import os
@@ -105,6 +107,8 @@ def run_eval(
     ckpt_dir=None,
     run_compatibility=False,
     compatibility_batches=None,
+    run_oracle_accuracy=False,
+    oracle_accuracy_batches=None,
 ):
     """
     Run PDLM Stage 2 evaluation.
@@ -117,6 +121,8 @@ def run_eval(
         ckpt_dir: Direct path to checkpoint directory. If provided, overrides model_tag.
         run_compatibility: Whether to run compatibility evaluation
         compatibility_batches: Number of batches for compatibility (default: num_batches // 4)
+        run_oracle_accuracy: Whether to run oracle accuracy evaluation
+        oracle_accuracy_batches: Number of batches for oracle accuracy (default: num_batches // 4)
 
     Returns:
         eval_result: Dict with evaluation metrics
@@ -164,8 +170,13 @@ def run_eval(
     print0(f"Running evaluation: {num_batches} batches × {device_batch_size} seqs = {total_sequences} sequences")
     print0(f"  {blocks_per_seq} blocks/seq, {eval_blocks_per_seq} evaluated (skip block 0) = {total_eval_blocks:,} total blocks")
 
-    if run_compatibility:
-        print0(f"Running full evaluation with compatibility check...")
+    if run_compatibility or run_oracle_accuracy:
+        extras = []
+        if run_compatibility:
+            extras.append("compatibility")
+        if run_oracle_accuracy:
+            extras.append("oracle accuracy")
+        print0(f"Running full evaluation with {' + '.join(extras)}...")
         eval_result = eval_pdlm_full(
             model=model,
             val_loader=val_loader,
@@ -175,8 +186,10 @@ def run_eval(
             device=device,
             autocast_ctx=autocast_ctx,
             prefix_pure_tokens=prefix_pure_tokens,
-            run_compatibility=True,
+            run_compatibility=run_compatibility,
             compatibility_batches=compatibility_batches,
+            run_oracle_accuracy=run_oracle_accuracy,
+            oracle_accuracy_batches=oracle_accuracy_batches,
         )
     else:
         eval_result = eval_pdlm(
@@ -214,12 +227,22 @@ def print_results(eval_result, block_size):
     # Compatibility metrics (if present)
     if "compatibility" in eval_result:
         compat = eval_result["compatibility"]
-        print0(f"\nCompatibility metrics:")
+        print0(f"\nCompatibility metrics (self-consistency):")
         print0(f"  overall compatibility: {compat['overall_compatibility']:.2%}")
         print0(f"  Per-position compatibility:")
         for pos in range(block_size):
             pos_data = compat["positions"][pos]
             print0(f"    pos {pos}: {pos_data['compatibility']:.2%} ({pos_data['matched']}/{pos_data['total']})")
+
+    # Oracle accuracy metrics (if present)
+    if "oracle_accuracy" in eval_result:
+        oracle = eval_result["oracle_accuracy"]
+        print0(f"\nOracle accuracy metrics (given ground truth context):")
+        print0(f"  overall accuracy: {oracle['overall_accuracy']:.2%}")
+        print0(f"  Per-position accuracy:")
+        for pos in range(block_size):
+            pos_data = oracle["positions"][pos]
+            print0(f"    pos {pos}: {pos_data['accuracy']:.2%} ({pos_data['matched']}/{pos_data['total']})")
 
     print0("\n" + "=" * 60)
 
@@ -232,8 +255,11 @@ def main():
     parser.add_argument("--num_batches", type=int, default=20, help="Number of validation batches")
     parser.add_argument("--device", type=str, default="auto", help="Device type (cuda/cpu/mps/auto)")
     parser.add_argument("--output_json", type=str, default=None, help="Optional: save results to JSON file")
-    parser.add_argument("--run_compatibility", action="store_true", help="Run compatibility evaluation")
+    parser.add_argument("--run_compatibility", action="store_true", help="Run compatibility evaluation (also enables oracle accuracy unless --no_oracle_accuracy)")
     parser.add_argument("--compatibility_batches", type=int, default=None, help="Number of batches for compatibility (default: num_batches // 4)")
+    parser.add_argument("--run_oracle_accuracy", action="store_true", help="Run oracle accuracy evaluation (given ground truth context)")
+    parser.add_argument("--no_oracle_accuracy", action="store_true", help="Disable oracle accuracy even when running compatibility")
+    parser.add_argument("--oracle_accuracy_batches", type=int, default=None, help="Number of batches for oracle accuracy (default: num_batches // 4)")
     parser.add_argument("--dump_batch", type=str, default=None, help="Dump one batch to file for debugging (path to output txt)")
     args = parser.parse_args()
 
@@ -265,6 +291,13 @@ def main():
         )
         return
 
+    # Determine whether to run oracle accuracy:
+    # - Enabled if --run_oracle_accuracy is passed
+    # - Also enabled if --run_compatibility is passed (unless --no_oracle_accuracy)
+    run_oracle = args.run_oracle_accuracy
+    if args.run_compatibility and not args.no_oracle_accuracy:
+        run_oracle = True
+
     # Run evaluation
     eval_result = run_eval(
         model_tag=args.model_tag,
@@ -274,6 +307,8 @@ def main():
         ckpt_dir=args.ckpt_dir,
         run_compatibility=args.run_compatibility,
         compatibility_batches=args.compatibility_batches,
+        run_oracle_accuracy=run_oracle,
+        oracle_accuracy_batches=args.oracle_accuracy_batches,
     )
 
     # Get block_size for printing
@@ -297,6 +332,14 @@ def main():
 
     # Optionally save to JSON
     if args.output_json:
+        # Backup existing file if it exists
+        if os.path.exists(args.output_json):
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y_%m_%d_%H_%M")
+            backup_path = args.output_json.replace(".json", f"_backup_{timestamp}.json")
+            os.rename(args.output_json, backup_path)
+            print0(f"Backed up existing results to {backup_path}")
+
         with open(args.output_json, "w") as f:
             json.dump(eval_result, f, indent=2)
         print0(f"\nResults saved to {args.output_json}")
