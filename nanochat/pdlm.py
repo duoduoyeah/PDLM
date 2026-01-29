@@ -826,8 +826,326 @@ class PDLM(nn.Module):
                 break
                 
             # Safety break
-            if step > 100: 
+            if step > 100:
                 break
-                
+
         return ids, block_debug
-        
+
+    @torch.inference_mode()
+    def generate_both_mtp(
+        self,
+        tokens,
+        max_new_tokens,
+        block_size=None,
+        temperature=0.0,
+        topk=0,
+        seed=42,
+        constrain_to_group=True,
+    ):
+        """
+        Generate tokens using both_mtp model (two-step per block).
+
+        Each block is generated in two steps:
+        1. MTP (Pure → Group): predict K group tokens from pure context
+        2. Denoise (Group → Pure): predict K pure tokens from group tokens
+
+        Args:
+            tokens: list of pure token ids (prompt)
+            max_new_tokens: number of new pure tokens to generate
+            block_size: K, tokens per block (default from config.n_future_tokens)
+            temperature: sampling temperature (0 = greedy)
+            topk: top-k sampling (0 = disabled)
+            seed: random seed for sampling
+            constrain_to_group: if True, constrain pure predictions to tokens within predicted group
+
+        Returns:
+            generated_tokens: tensor of pure token ids (1, total_len)
+            debug_blocks: list of per-block generation details
+        """
+        assert self.config.stage == "both_mtp", "generate_both_mtp requires both_mtp stage"
+        assert isinstance(tokens, list), "tokens must be a list"
+
+        device = self.get_device()
+        if block_size is None:
+            block_size = self.config.n_future_tokens
+        K = block_size
+
+        # Setup token map (only needed if constraining to group)
+        if constrain_to_group:
+            if self._token_map is None or self._token_map.device != device:
+                self._token_map = get_token_map(device=device)
+
+        # Setup RNG for sampling
+        rng = None
+        if temperature > 0:
+            rng = torch.Generator(device=device)
+            rng.manual_seed(seed)
+
+        pure_vocab_size = self.config.pure_vocab_size
+        group_offset = pure_vocab_size  # group tokens start after pure vocab
+
+        # Current sequence (pure tokens)
+        ids = torch.tensor([tokens], dtype=torch.long, device=device)  # (1, prompt_len)
+        prompt_len = ids.size(1)
+        target_len = prompt_len + max_new_tokens
+
+        debug_blocks = []
+        step = 0
+
+        while ids.size(1) < target_len:
+            current_len = ids.size(1)
+
+            # === Step 1: MTP (Pure → Group) ===
+            # Predict K group tokens from pure context
+            group_tokens = self._mtp_predict_block(ids, K)  # (1, K) group indices (0-based)
+
+            # === Step 2: Denoise (Group → Pure) ===
+            # Predict K pure tokens from group tokens
+            pure_tokens, pure_logits = self._denoise_predict_block(
+                ids, group_tokens, K,
+                temperature=temperature,
+                topk=topk,
+                rng=rng,
+                constrain_to_group=constrain_to_group,
+            )  # (1, K)
+
+            # Debug info
+            debug_blocks.append({
+                "step": step,
+                "context_len": current_len,
+                "group_tokens": group_tokens.cpu().tolist()[0],
+                "pure_tokens": pure_tokens.cpu().tolist()[0],
+            })
+
+            # Append pure tokens to sequence
+            ids = torch.cat([ids, pure_tokens], dim=1)
+            step += 1
+
+            # Safety break
+            if step > 1000:
+                break
+
+        # Truncate to exact target length
+        ids = ids[:, :target_len]
+        return ids, debug_blocks
+
+    def _mtp_predict_block(self, context_ids, K):
+        """
+        Predict K group tokens using MTP from pure context.
+
+        Uses the x0 path of the model:
+        - Main lm_head predicts 1st group token
+        - MTP head predicts 2nd..Kth group tokens autoregressively
+
+        Args:
+            context_ids: (1, T) pure token context
+            K: number of group tokens to predict
+
+        Returns:
+            group_tokens: (1, K) group token indices (0-based, not offset)
+        """
+        device = context_ids.device
+        T = context_ids.size(1)
+        pure_vocab_size = self.config.pure_vocab_size
+
+        # For MTP, we need to forward through transformer with pure tokens
+        # This is similar to training x0 path, but inference only
+
+        # Get rotary embeddings
+        cos = self.cos[:, :T]
+        sin = self.sin[:, :T]
+        cos_sin = (cos, sin)
+
+        # Forward through transformer (x0 path - pure tokens)
+        x = self.transformer.wte(context_ids)
+        x = norm(x)
+        for block in self.transformer.h:
+            # Causal attention for pure context
+            x = block(x, cos_sin, kv_cache=None, attn_mask=None)
+        x = norm(x)
+
+        # Get hidden state at last position
+        h = x[:, -1:, :]  # (1, 1, D)
+
+        # Compute logits for group tokens
+        softcap = 15
+        logits = self.lm_head(h)  # (1, 1, pure_vocab + num_groups)
+        logits = logits.float()
+        logits = softcap * torch.tanh(logits / softcap)
+
+        # Main model predicts 1st group token
+        group_logits = logits[:, :, pure_vocab_size:]  # (1, 1, num_groups)
+        g1 = group_logits.argmax(dim=-1).squeeze(1)  # (1,)
+
+        group_tokens = [g1]
+
+        # MTP head predicts 2nd..Kth group tokens autoregressively
+        prev_h = h  # (1, 1, D)
+        prev_tok = g1  # (1,)
+
+        # Rotary for single position (use position T since we're predicting "future")
+        mtp_cos = self.cos[:, T:T+1]
+        mtp_sin = self.sin[:, T:T+1]
+
+        for k in range(K - 1):
+            # Get token embedding for previous group prediction
+            tok_emb = self.group_wte(prev_tok).unsqueeze(1)  # (1, 1, D)
+
+            # Combine: [norm(h), norm(embed)] -> project
+            combined = torch.cat([norm(prev_h), norm(tok_emb)], dim=-1)  # (1, 1, 2D)
+            x_mtp = self.mtp_head.proj(combined)  # (1, 1, D)
+
+            # Forward through MTP block
+            prev_h = self.mtp_head.block(x_mtp, mtp_cos, mtp_sin)
+            prev_h = norm(prev_h)
+
+            # Compute group logits
+            step_logits = self.mtp_head.lm_head(prev_h)  # (1, 1, num_groups)
+            g_next = step_logits.argmax(dim=-1).squeeze(1)  # (1,)
+
+            group_tokens.append(g_next)
+            prev_tok = g_next
+
+        return torch.stack(group_tokens, dim=1)  # (1, K)
+
+    def _denoise_predict_block(
+        self,
+        context_ids,
+        group_tokens,
+        K,
+        temperature=0.0,
+        topk=0,
+        rng=None,
+        constrain_to_group=True,
+    ):
+        """
+        Predict K pure tokens from group tokens using Stage 2 denoising.
+
+        Uses the xt path of the model with block diffusion attention.
+
+        Args:
+            context_ids: (1, T) pure token context
+            group_tokens: (1, K) group token indices (0-based)
+            K: block size
+            temperature: sampling temperature
+            topk: top-k sampling
+            rng: random generator
+            constrain_to_group: if True, mask logits to only tokens in each group
+
+        Returns:
+            pure_tokens: (1, K) predicted pure tokens
+            pure_logits: (1, K, pure_vocab) logits for debugging
+        """
+        device = context_ids.device
+        T = context_ids.size(1)
+        pure_vocab_size = self.config.pure_vocab_size
+        group_offset = pure_vocab_size
+
+        # Build xt: [pure context..., G1+offset, G2+offset, ...]
+        group_token_ids = group_tokens + group_offset  # (1, K) - add offset to get actual token ids
+        xt = torch.cat([context_ids, group_token_ids], dim=1)  # (1, T+K)
+
+        # Build x0: [pure context..., placeholder (zeros)]
+        # The x0 positions for the block will use placeholder - they provide context via mask
+        x0 = torch.cat([context_ids, torch.zeros(1, K, dtype=torch.long, device=device)], dim=1)
+
+        # Total length for attention
+        total_len = T + K
+
+        # Create attention mask for inference
+        # For Stage 2 inference: xt positions with group tokens attend to pure prefix
+        # We need a simplified mask since we're not doing full 2L training
+        attn_mask = self._create_inference_denoise_mask(T, K, device)
+
+        # Concatenate [xt | x0] for the forward pass
+        combined_idx = torch.cat([xt, x0], dim=1)  # (1, 2*(T+K))
+
+        # Get rotary embeddings
+        cos = self.cos[:, :total_len]
+        sin = self.sin[:, :total_len]
+        cos_sin = (torch.cat([cos, cos], dim=1), torch.cat([sin, sin], dim=1))
+
+        # Forward through transformer
+        x = self.transformer.wte(combined_idx)
+        x = norm(x)
+        for block in self.transformer.h:
+            x = block(x, cos_sin, kv_cache=None, attn_mask=attn_mask)
+        x = norm(x)
+
+        # Compute logits
+        softcap = 15
+        logits = self.lm_head(x)  # (1, 2*(T+K), pure_vocab + num_groups)
+        logits = logits.float()
+        logits = softcap * torch.tanh(logits / softcap)
+
+        # Extract pure vocab logits at group positions (xt path, positions T:T+K)
+        pure_logits = logits[:, T:T+K, :pure_vocab_size]  # (1, K, pure_vocab)
+
+        # Optionally constrain to tokens within each group
+        if constrain_to_group:
+            for i in range(K):
+                group_idx = group_tokens[0, i].item()
+                group_mask = self._token_map.group_to_pure_mask[group_idx]  # (pure_vocab,)
+                pure_logits[:, i, ~group_mask] = float('-inf')
+
+        # Sample or argmax
+        if temperature > 0:
+            if topk > 0:
+                # Top-k filtering
+                v, _ = torch.topk(pure_logits, min(topk, pure_logits.size(-1)), dim=-1)
+                pure_logits[pure_logits < v[:, :, [-1]]] = float('-inf')
+            probs = F.softmax(pure_logits / temperature, dim=-1)
+            probs_2d = probs.view(-1, probs.size(-1))
+            pure_tokens = torch.multinomial(probs_2d, num_samples=1, generator=rng)
+            pure_tokens = pure_tokens.view(1, K)
+        else:
+            pure_tokens = pure_logits.argmax(dim=-1)  # (1, K)
+
+        return pure_tokens, pure_logits
+
+    def _create_inference_denoise_mask(self, prefix_len, block_size, device):
+        """
+        Create attention mask for Stage 2 denoising during inference.
+
+        Structure: [xt (prefix + block) | x0 (prefix + block)]
+        - xt prefix: causal within prefix
+        - xt block (group tokens): attend to xt prefix + all block positions (bidirectional)
+        - x0 prefix: attend to xt prefix + itself (causal)
+        - x0 block: attend to xt prefix + x0 prefix + x0 block
+
+        Args:
+            prefix_len: T, length of pure prefix
+            block_size: K, size of block
+            device: torch device
+
+        Returns:
+            mask: (2*(T+K), 2*(T+K)) boolean attention mask
+        """
+        T = prefix_len
+        K = block_size
+        L = T + K
+        total = 2 * L
+
+        # Build mask manually
+        mask = torch.zeros(total, total, dtype=torch.bool, device=device)
+
+        # === First half (xt): positions 0 to L-1 ===
+        # xt prefix (0:T): causal attention within prefix
+        for i in range(T):
+            mask[i, :i+1] = True
+
+        # xt block (T:L): attend to all xt (prefix + block bidirectional)
+        mask[T:L, :L] = True
+
+        # === Second half (x0): positions L to 2L-1 ===
+        # x0 prefix (L:L+T): attend to xt prefix + x0 prefix (causal)
+        for i in range(T):
+            mask[L + i, :T] = True  # attend to xt prefix
+            mask[L + i, L:L+i+1] = True  # attend to x0 prefix (causal)
+
+        # x0 block (L+T:2L): attend to xt prefix + all of x0
+        mask[L+T:, :T] = True  # attend to xt prefix
+        mask[L+T:, L:] = True  # attend to all of x0
+
+        return mask
+
