@@ -16,7 +16,7 @@ from nanochat.bd3lm import BDLM, BDLMConfig
 from nanochat.gpt_mtp import GPTMTP, GPTMTPConfig
 from nanochat.dataloader import get_data_loader
 from nanochat.bd3lm_eval import eval_bd3lm
-from nanochat.pdlm_eval import eval_pdlm, eval_pdlm_stage1_mask, eval_pdlm_stage1_block
+from nanochat.pdlm_eval import eval_pdlm, eval_pdlm_stage1_mask, eval_pdlm_stage1_block, eval_pdlm_both_block
 from nanochat.mtp_eval import eval_mtp
 from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, print_banner, get_base_dir, autodetect_device_type
 from nanochat.tokenizer import get_tokenizer
@@ -555,8 +555,54 @@ while True:
                     log_data[f"eval/pos_{pos}_ppl"] = pos_data["ppl"]
                     log_data[f"eval/pos_{pos}_accuracy"] = pos_data["accuracy"]
                 wandb_run.log(log_data)
+            elif pdlm_stage == "both_block":
+                print0(f"Running PDLM both_block evaluation at step {step} ({current_eval_batches} batches)...")
+                eval_result = eval_pdlm_both_block(
+                    model=orig_model,
+                    val_loader=val_loader,
+                    block_size=block_size,
+                    num_batches=current_eval_batches,
+                    attn_mask=eval_attn_mask,
+                    device=device,
+                    autocast_ctx=autocast_ctx,
+                    prefix_pure_tokens=prefix_pure_tokens,
+                    mtp_loss_weight=mtp_loss_weight,
+                    run_compatibility=False,
+                    run_oracle_accuracy=False,
+                )
+                s1 = eval_result["stage1"]
+                s2 = eval_result["stage2"]
+                print0(f"  [block_pdlm] combined_loss: {eval_result['combined_loss']:.4f}, end2end_loss: {eval_result['end2end_loss']:.4f}")
+                print0(f"    mtp_loss_weight: {eval_result['mtp_loss_weight']}, stage1_loss: {s1['overall_loss']:.4f}, stage2_loss: {s2['overall_loss']:.4f}")
+                print0(f"    Stage 1 (Block→Block): loss={s1['overall_loss']:.4f}, ppl={s1['overall_ppl']:.2f}, accuracy={s1['overall_accuracy']:.2%}")
+                for pos in range(block_size):
+                    pos_data = s1["positions"][pos]
+                    print0(f"      pos {pos}: loss={pos_data['loss']:.4f}, ppl={pos_data['ppl']:.2f}, accuracy={pos_data['accuracy']:.2%}")
+                print0(f"    Stage 2 (Denoise): loss={s2['overall_loss']:.4f}, ppl={s2['overall_ppl']:.2f}")
+                for pos in range(block_size):
+                    pos_data = s2["positions"][pos]
+                    print0(f"      pos {pos}: loss={pos_data['loss']:.4f}, ppl={pos_data['ppl']:.2f}")
+                log_data = {
+                    "step": step,
+                    "eval/combined_loss": eval_result["combined_loss"],
+                    "eval/end2end_loss": eval_result["end2end_loss"],
+                    "eval/stage1_loss": s1["overall_loss"],
+                    "eval/stage1_ppl": s1["overall_ppl"],
+                    "eval/stage1_accuracy": s1["overall_accuracy"],
+                    "eval/stage2_loss": s2["overall_loss"],
+                    "eval/stage2_ppl": s2["overall_ppl"],
+                }
+                for pos in range(block_size):
+                    s1p = s1["positions"][pos]
+                    log_data[f"eval/stage1_pos_{pos}_loss"] = s1p["loss"]
+                    log_data[f"eval/stage1_pos_{pos}_ppl"] = s1p["ppl"]
+                    log_data[f"eval/stage1_pos_{pos}_accuracy"] = s1p["accuracy"]
+                    s2p = s2["positions"][pos]
+                    log_data[f"eval/stage2_pos_{pos}_loss"] = s2p["loss"]
+                    log_data[f"eval/stage2_pos_{pos}_ppl"] = s2p["ppl"]
+                wandb_run.log(log_data)
             else:
-                # Stage 2 evaluation (also used for both_block Stage 2 eval)
+                # Stage 2 evaluation
                 print0(f"Running PDLM Stage 2 evaluation at step {step} ({current_eval_batches} batches)...")
                 eval_result = eval_pdlm(
                     model=orig_model,  # use uncompiled model

@@ -23,7 +23,7 @@ import torch
 from nanochat.common import compute_init, autodetect_device_type, get_base_dir, print0
 from nanochat.checkpoint_manager import load_checkpoint, find_last_step, find_largest_model
 from nanochat.pdlm import PDLM, PDLMConfig
-from nanochat.pdlm_eval import eval_pdlm, eval_pdlm_stage1_mask, eval_pdlm_stage1_block, eval_pdlm_compatibility, eval_pdlm_full, dump_batch_to_file
+from nanochat.pdlm_eval import eval_pdlm, eval_pdlm_stage1_mask, eval_pdlm_stage1_block, eval_pdlm_compatibility, eval_pdlm_full, eval_pdlm_both_block, dump_batch_to_file
 from nanochat.dataloader import get_data_loader
 from nanochat.attn_masks import gen_mask, gen_block_causal_mask
 from nanochat.group_tokenizer.token_map import get_token_map
@@ -203,6 +203,30 @@ def run_eval(
             autocast_ctx=autocast_ctx,
             prefix_pure_tokens=prefix_pure_tokens,
         )
+    elif stage == "both_block":
+        mtp_loss_weight = model_config_dict.get("mtp_loss_weight", 1.0)
+        extras = []
+        if run_compatibility:
+            extras.append("compatibility")
+        if run_oracle_accuracy:
+            extras.append("oracle accuracy")
+        extra_str = f" with {' + '.join(extras)}" if extras else ""
+        print0(f"Running both_block evaluation{extra_str}...")
+        eval_result = eval_pdlm_both_block(
+            model=model,
+            val_loader=val_loader,
+            block_size=block_size,
+            num_batches=num_batches,
+            attn_mask=attn_mask,
+            device=device,
+            autocast_ctx=autocast_ctx,
+            prefix_pure_tokens=prefix_pure_tokens,
+            mtp_loss_weight=mtp_loss_weight,
+            run_compatibility=run_compatibility,
+            compatibility_batches=compatibility_batches,
+            run_oracle_accuracy=run_oracle_accuracy,
+            oracle_accuracy_batches=oracle_accuracy_batches,
+        )
     elif run_compatibility or run_oracle_accuracy:
         extras = []
         if run_compatibility:
@@ -247,50 +271,87 @@ def print_results(eval_result, block_size):
     stage = eval_result.get("stage", "stage2")
 
     print0("\n" + "=" * 60)
-    if stage == "stage1_mask":
-        print0("PDLM STAGE 1 MASK EVALUATION RESULTS")
-    elif stage == "stage1_block":
-        print0("PDLM STAGE 1 BLOCK EVALUATION RESULTS")
+    if stage == "both_block":
+        print0("PDLM BOTH_BLOCK EVALUATION RESULTS")
+        print0("=" * 60)
+
+        s1 = eval_result["stage1"]
+        s2 = eval_result["stage2"]
+
+        print0(f"\n[block_pdlm] combined_loss: {eval_result['combined_loss']:.4f}, end2end_loss: {eval_result['end2end_loss']:.4f}")
+        print0(f"  mtp_loss_weight: {eval_result['mtp_loss_weight']}, stage1_loss: {s1['overall_loss']:.4f}, stage2_loss: {s2['overall_loss']:.4f}")
+
+        print0(f"\n  Stage 1 (Block→Block): loss={s1['overall_loss']:.4f}, ppl={s1['overall_ppl']:.2f}, accuracy={s1['overall_accuracy']:.2%}")
+        for pos in range(block_size):
+            pos_data = s1["positions"][pos]
+            print0(f"    pos {pos}: loss={pos_data['loss']:.4f}, ppl={pos_data['ppl']:.2f}, accuracy={pos_data['accuracy']:.2%}")
+
+        print0(f"\n  Stage 2 (Denoise): loss={s2['overall_loss']:.4f}, ppl={s2['overall_ppl']:.2f}")
+        for pos in range(block_size):
+            pos_data = s2["positions"][pos]
+            print0(f"    pos {pos}: loss={pos_data['loss']:.4f}, ppl={pos_data['ppl']:.2f}")
+
+        # Compatibility metrics (if present, in stage2)
+        if "compatibility" in s2:
+            compat = s2["compatibility"]
+            print0(f"\n  Compatibility: {compat['overall_compatibility']:.2%}")
+            for pos in range(block_size):
+                pos_data = compat["positions"][pos]
+                print0(f"    pos {pos}: {pos_data['compatibility']:.2%} ({pos_data['matched']}/{pos_data['total']})")
+
+        # Oracle accuracy metrics (if present, in stage2)
+        if "oracle_accuracy" in s2:
+            oracle = s2["oracle_accuracy"]
+            print0(f"\n  Oracle accuracy: {oracle['overall_accuracy']:.2%}")
+            for pos in range(block_size):
+                pos_data = oracle["positions"][pos]
+                print0(f"    pos {pos}: {pos_data['accuracy']:.2%} ({pos_data['matched']}/{pos_data['total']})")
+
     else:
-        print0("PDLM STAGE 2 EVALUATION RESULTS")
-    print0("=" * 60)
-
-    # Overall metrics
-    print0(f"\nOverall metrics:")
-    print0(f"  loss: {eval_result['overall_loss']:.4f}")
-    print0(f"  ppl:  {eval_result['overall_ppl']:.2f}")
-    if "overall_accuracy" in eval_result:
-        print0(f"  accuracy: {eval_result['overall_accuracy']:.2%}")
-    print0(f"  tokens evaluated: {eval_result['num_tokens_evaluated']:,}")
-
-    # Per-position metrics
-    print0(f"\nPer-position metrics (within block):")
-    for pos in range(block_size):
-        pos_data = eval_result["positions"][pos]
-        if "accuracy" in pos_data:
-            print0(f"  pos {pos}: loss={pos_data['loss']:.4f}, ppl={pos_data['ppl']:.2f}, accuracy={pos_data['accuracy']:.2%}, tokens={pos_data['tokens']:,}")
+        if stage == "stage1_mask":
+            print0("PDLM STAGE 1 MASK EVALUATION RESULTS")
+        elif stage == "stage1_block":
+            print0("PDLM STAGE 1 BLOCK EVALUATION RESULTS")
         else:
-            print0(f"  pos {pos}: loss={pos_data['loss']:.4f}, ppl={pos_data['ppl']:.2f}, tokens={pos_data['tokens']:,}")
+            print0("PDLM STAGE 2 EVALUATION RESULTS")
+        print0("=" * 60)
 
-    # Compatibility metrics (if present, Stage 2 only)
-    if "compatibility" in eval_result:
-        compat = eval_result["compatibility"]
-        print0(f"\nCompatibility metrics (self-consistency):")
-        print0(f"  overall compatibility: {compat['overall_compatibility']:.2%}")
-        print0(f"  Per-position compatibility:")
-        for pos in range(block_size):
-            pos_data = compat["positions"][pos]
-            print0(f"    pos {pos}: {pos_data['compatibility']:.2%} ({pos_data['matched']}/{pos_data['total']})")
+        # Overall metrics
+        print0(f"\nOverall metrics:")
+        print0(f"  loss: {eval_result['overall_loss']:.4f}")
+        print0(f"  ppl:  {eval_result['overall_ppl']:.2f}")
+        if "overall_accuracy" in eval_result:
+            print0(f"  accuracy: {eval_result['overall_accuracy']:.2%}")
+        print0(f"  tokens evaluated: {eval_result['num_tokens_evaluated']:,}")
 
-    # Oracle accuracy metrics (if present)
-    if "oracle_accuracy" in eval_result:
-        oracle = eval_result["oracle_accuracy"]
-        print0(f"\nOracle accuracy metrics (given ground truth context):")
-        print0(f"  overall accuracy: {oracle['overall_accuracy']:.2%}")
-        print0(f"  Per-position accuracy:")
+        # Per-position metrics
+        print0(f"\nPer-position metrics (within block):")
         for pos in range(block_size):
-            pos_data = oracle["positions"][pos]
-            print0(f"    pos {pos}: {pos_data['accuracy']:.2%} ({pos_data['matched']}/{pos_data['total']})")
+            pos_data = eval_result["positions"][pos]
+            if "accuracy" in pos_data:
+                print0(f"  pos {pos}: loss={pos_data['loss']:.4f}, ppl={pos_data['ppl']:.2f}, accuracy={pos_data['accuracy']:.2%}, tokens={pos_data['tokens']:,}")
+            else:
+                print0(f"  pos {pos}: loss={pos_data['loss']:.4f}, ppl={pos_data['ppl']:.2f}, tokens={pos_data['tokens']:,}")
+
+        # Compatibility metrics (if present, Stage 2 only)
+        if "compatibility" in eval_result:
+            compat = eval_result["compatibility"]
+            print0(f"\nCompatibility metrics (self-consistency):")
+            print0(f"  overall compatibility: {compat['overall_compatibility']:.2%}")
+            print0(f"  Per-position compatibility:")
+            for pos in range(block_size):
+                pos_data = compat["positions"][pos]
+                print0(f"    pos {pos}: {pos_data['compatibility']:.2%} ({pos_data['matched']}/{pos_data['total']})")
+
+        # Oracle accuracy metrics (if present)
+        if "oracle_accuracy" in eval_result:
+            oracle = eval_result["oracle_accuracy"]
+            print0(f"\nOracle accuracy metrics (given ground truth context):")
+            print0(f"  overall accuracy: {oracle['overall_accuracy']:.2%}")
+            print0(f"  Per-position accuracy:")
+            for pos in range(block_size):
+                pos_data = oracle["positions"][pos]
+                print0(f"    pos {pos}: {pos_data['accuracy']:.2%} ({pos_data['matched']}/{pos_data['total']})")
 
     print0("\n" + "=" * 60)
 
