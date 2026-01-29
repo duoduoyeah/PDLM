@@ -17,10 +17,11 @@ MODEL_TAG="${MODEL_TAG:-}"
 
 # Configurations for Experiment C
 # Format: num_groups overlap_k
+# Output naming: n{noise}_k{overlap_k}_g{num_groups} where noise = 4096 / num_groups
 CONFIGS=(
-    "64 1"    # g64_k1 - main experiment baseline
-    "16 1"    # g16_k1 - high noise
-    "256 1"   # g256_k1 - low noise
+    "64 1"    # n64_k1_g64 - main experiment baseline (noise=4096/64=64)
+    "16 1"    # n256_k1_g16 - high noise (noise=4096/16=256)
+    "256 1"   # n16_k1_g256 - low noise (noise=4096/256=16)
 )
 
 echo "============================================"
@@ -65,7 +66,9 @@ echo ""
 for config in "${CONFIGS[@]}"; do
     read -r num_groups overlap_k <<< "$config"
 
-    output_dir="${LOCAL_OUTPUT}/g${num_groups}_k${overlap_k}"
+    # Calculate noise_level = 4096 / num_groups (assuming vocab_size=4096)
+    noise_level=$((4096 / num_groups))
+    output_dir="${LOCAL_OUTPUT}/n${noise_level}_k${overlap_k}_g${num_groups}"
 
     echo "--------------------------------------------"
     echo "Building: num-groups=$num_groups, overlap-k=$overlap_k"

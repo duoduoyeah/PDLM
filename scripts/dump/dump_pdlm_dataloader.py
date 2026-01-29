@@ -2,7 +2,7 @@
 Dump PDLM dataloader output to verify the data structure.
 
 Usage (on Colab, after run_expc.sh setup):
-    export NANOCHAT_BASE_DIR=/content/pdlm_temp_train/expc_d4_b4_g64_k1_r10_test
+    export NANOCHAT_BASE_DIR=/content/pdlm_temp_train/expc_d4_b4_n64_k1_g64_r10_test
     python -m scripts.dump.dump_pdlm_dataloader
 """
 

@@ -5,15 +5,17 @@
 ## Production mode: data_ratio=20 (or user specified)
 ##
 ## Usage:
-##   bash launch/run_expc.sh --variant=g64
-##   bash launch/run_expc.sh --variant=g16 --depth=8 --test_mode=false --data_ratio=30
-##   bash launch/run_expc.sh --variant=g256 --block_size=8
+##   bash launch/run_expc.sh --noise_level=64 --num_groups=64
+##   bash launch/run_expc.sh --noise_level=256 --num_groups=16 --depth=8 --test_mode=false --data_ratio=30
+##   bash launch/run_expc.sh --noise_level=16 --num_groups=256 --block_size=8
 
 # ============================================================
 # Default values
 # ============================================================
-VARIANT="g64"  # g16, g64, g256 (num_groups)
-OVERLAP_K="1"  # overlap_k for group tokenizer
+# Tokenizer naming: n{noise}_k{overlap_k}_g{num_groups}
+NOISE_LEVEL="64"        # tokens per final group (e.g., 64, 256, 16)
+OVERLAP_K="1"           # how many groups each token appears in
+NUM_GROUPS="64"         # number of final groups
 TEST_MODE="true"
 DATA_RATIO="10"  # default 10 for test mode
 DEPTH="4"  # model depth
@@ -31,11 +33,14 @@ EVAL_NUM_BATCHES_FINAL="100"
 # Parse named arguments
 for arg in "$@"; do
     case $arg in
-        --variant=*)
-            VARIANT="${arg#*=}"
+        --noise_level=*)
+            NOISE_LEVEL="${arg#*=}"
             ;;
         --overlap_k=*)
             OVERLAP_K="${arg#*=}"
+            ;;
+        --num_groups=*)
+            NUM_GROUPS="${arg#*=}"
             ;;
         --test_mode=*)
             TEST_MODE="${arg#*=}"
@@ -72,29 +77,23 @@ for arg in "$@"; do
             ;;
         *)
             echo "Unknown argument: $arg"
-            echo "Usage: bash launch/run_expc.sh --variant=g64 [--depth=4] [--block_size=4] [--test_mode=true] [--data_ratio=10]"
-            echo "       [--overlap_k=1] [--prefix_pure_tokens=1] [--is_causal=False] [--max_seq_len=512]"
+            echo "Usage: bash launch/run_expc.sh [--noise_level=64] [--overlap_k=1] [--num_groups=64]"
+            echo "       [--depth=4] [--block_size=4] [--test_mode=true] [--data_ratio=10]"
+            echo "       [--prefix_pure_tokens=1] [--is_causal=False] [--max_seq_len=512]"
             echo "       [--device_batch_size=128] [--eval_every=2500]"
             echo ""
-            echo "Variants: g16, g64, g256 (num_groups for group tokenizer)"
+            echo "Tokenizer naming: n{noise}_k{overlap_k}_g{num_groups}"
+            echo "Examples: n64_k1_g64, n256_k1_g16, n16_k1_g256"
             exit 1
             ;;
     esac
 done
 
-# Validate variant
-case "${VARIANT}" in
-    "g16"|"g64"|"g256")
-        ;;
-    *)
-        echo "Unknown variant: ${VARIANT}"
-        echo "Available: g16, g64, g256"
-        exit 1
-        ;;
-esac
+# Build tokenizer variant name (matches folder naming convention)
+TOKENIZER_VARIANT="n${NOISE_LEVEL}_k${OVERLAP_K}_g${NUM_GROUPS}"
 
 # Build model name
-BASE_MODEL_NAME="expc_d${DEPTH}_b${BLOCK_SIZE}_${VARIANT}_k${OVERLAP_K}"
+BASE_MODEL_NAME="expc_d${DEPTH}_b${BLOCK_SIZE}_${TOKENIZER_VARIANT}"
 
 WANDB_GROUP="expc_d${DEPTH}"
 MODEL_REPO="duoduoyeah/expc_d${DEPTH}"
@@ -105,7 +104,8 @@ LOCAL_TRAIN_BASE="/content/pdlm_temp_train"
 
 # Group tokenizer path on Drive (built by build_group_tokenizer.sh)
 # Contains: tokenizer.pkl, token_maps.pt (self-contained, no need for base tokenizer)
-GROUP_TOKENIZER_PATH="${DRIVE_BASE}/group_tokenizers/${VARIANT}_k${OVERLAP_K}"
+# Naming convention: n{noise}_k{overlap_k}_g{num_groups}
+GROUP_TOKENIZER_PATH="${DRIVE_BASE}/group_tokenizers/${TOKENIZER_VARIANT}"
 
 # Load secrets from .env file
 if [ -f "launch/.env" ]; then
@@ -142,8 +142,8 @@ echo "=== Test mode: ${TEST_MODE} ==="
 echo "=== Data ratio: ${DATA_RATIO} ==="
 echo "=== Depth: ${DEPTH} ==="
 echo "=== Block size: ${BLOCK_SIZE} ==="
-echo "=== Variant: ${VARIANT} (overlap_k=${OVERLAP_K}) ==="
-echo "=== Group tokenizer: ${GROUP_TOKENIZER_PATH} ==="
+echo "=== Tokenizer: ${TOKENIZER_VARIANT} (noise=${NOISE_LEVEL}, overlap_k=${OVERLAP_K}, num_groups=${NUM_GROUPS}) ==="
+echo "=== Group tokenizer path: ${GROUP_TOKENIZER_PATH} ==="
 
 # ============================================================
 # Setup (run once per model)
