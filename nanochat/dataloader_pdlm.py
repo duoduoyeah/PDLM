@@ -129,8 +129,59 @@ def pdlm_data_loader(
 
             loss_extras = {"loss_mask": loss_mask}
 
-        elif stage in ["stage1_mtp", "stage1_mask"]:
-            # Stage 1: Pure/MASK → Group prediction
+        elif stage == "stage1_mask":
+            # Stage 1 MASK: [prefix, MASK, MASK, ...] → group tokens
+            # Input: pure tokens at prefix, MASK at block positions
+            # Output: predict group tokens for each MASK position
+            # Loss: any-correct over overlap_k valid groups
+
+            mask_id = model_config.mask_token_id
+            assert mask_id != -1, "stage1_mask requires mask_token_id to be set"
+
+            # PDLM doesn't use sliding prefix
+            prefix_sliding_tokens = 0
+            num_blocks = (T - prefix_sliding_tokens) // block_size
+            block_region_len = num_blocks * block_size
+
+            # Block boundaries
+            block_start = prefix_sliding_tokens
+            block_end = block_start + block_region_len
+
+            # Get token map info
+            pure_to_group = token_map.pure_to_group  # (pure_vocab, overlap_k)
+            overlap_k = token_map.overlap_k
+
+            # inputs: replace block positions with MASK token
+            inputs_cpu = targets_cpu.clone()
+            inputs_cpu[:, block_start:block_end] = mask_id
+
+            # group_targets: convert pure tokens to group IDs for loss
+            # Shape: (B, T, overlap_k) - all valid group assignments
+            group_targets = torch.full((B, T, overlap_k), -1, dtype=torch.long)
+            block_pure = targets_cpu[:, block_start:block_end]  # (B, block_region_len)
+            group_targets[:, block_start:block_end, :] = pure_to_group[block_pure]
+
+            # loss_mask: True at MASK positions (block region), False elsewhere
+            loss_mask = torch.zeros(B, T, dtype=torch.bool)
+            loss_mask[:, block_start:block_end] = True
+
+            # Exclude prefix_pure_tokens from loss if set
+            if prefix_pure_tokens > 0:
+                loss_mask[:, :prefix_pure_tokens] = False
+
+            # Move to device
+            inputs = inputs_cpu.to(device=device, non_blocking=use_cuda)
+            targets = targets_cpu.to(device=device, non_blocking=use_cuda)
+            loss_mask = loss_mask.to(device=device, non_blocking=use_cuda)
+            group_targets = group_targets.to(device=device, non_blocking=use_cuda)
+
+            loss_extras = {
+                "loss_mask": loss_mask,
+                "group_targets": group_targets,
+            }
+
+        elif stage == "stage1_mtp":
+            # Stage 1 MTP: handled separately by MTP dataloader
             raise NotImplementedError(f"PDLM {stage} not yet implemented in dataloader")
 
         elif stage == "both_mtp":

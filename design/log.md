@@ -1,7 +1,11 @@
+01/28
+1. read flow matching stuff, read how they solve the token dependencies stuff.
+2. we need to later first specify the in-compatible issue, then think a way to solve it.
+
 01/27
-1. new tokenizers
-2. start training gpt-mtp
-3. preparing for combined-pdlm 
+1. new tokenizers [Done]
+2. start training gpt-mtp [Done]
+3. preparing for combined-pdlm [Done]
 
 01/25
 - Add transition_accuracy metric to `nanochat/pdlm_eval.py` and `scripts/pdlm_eval.py` (per-position + per-group breakdown)
