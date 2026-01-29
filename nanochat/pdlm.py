@@ -86,6 +86,11 @@ class PDLMConfig:
     prefix_pure_tokens: int = 0
     mask_token_id: int = -1  # only needed for stage1_mask and both_mask
 
+    # MTP (Multi-Token Prediction) config for both_mtp stage
+    n_future_tokens: int = 4       # K: number of group tokens to predict for Stage 1
+    mtp_loss_beta: float = 0.8     # Exponential decay factor for MTP loss weights
+    mtp_loss_weight: float = 1.0   # Stage 1 MTP loss weight relative to Stage 2 (which is 1.0)
+
     def __post_init__(self):
         valid_stages = {"stage1_mtp", "stage1_mask", "stage2", "both_mtp", "both_mask"}
         if self.stage not in valid_stages:
@@ -237,6 +242,35 @@ class PDLM(nn.Module):
         self.inference_mask = None
         self.bucket_size = config.bucket_size
 
+        # MTP components for both_mtp stage
+        if config.stage == "both_mtp":
+            from nanochat.mtp_head import MTPHead
+
+            # Group embeddings for MTP teacher forcing
+            self.group_wte = nn.Embedding(config.num_groups, config.n_embd)
+
+            # Wrapper to slice lm_head output to only group logits
+            # MTPHead expects lm_head to output num_groups logits
+            class _GroupLogitHead(nn.Module):
+                def __init__(self, lm_head, pure_vocab_size):
+                    super().__init__()
+                    self.lm_head = lm_head
+                    self.offset = pure_vocab_size
+
+                def forward(self, x):
+                    return self.lm_head(x)[:, :, self.offset:]
+
+            self._group_logit_head = _GroupLogitHead(self.lm_head, config.pure_vocab_size)
+
+            # MTP head (uses wrapper that slices to group logits)
+            self.mtp_head = MTPHead(
+                n_embd=config.n_embd,
+                n_head=config.n_head,
+                n_future_tokens=config.n_future_tokens,
+                group_wte=self.group_wte,
+                lm_head=self._group_logit_head,
+            )
+
     def init_weights(self):
         self.apply(self._init_weights)
         # zero out classifier weights
@@ -252,6 +286,13 @@ class PDLM(nn.Module):
         # Cast the embeddings from fp32 to bf16: optim can tolerate it and it saves memory: both in the model and the activations
         if self.transformer.wte.weight.device.type == "cuda":
             self.transformer.wte.to(dtype=torch.bfloat16)
+
+        # Init MTP components for both_mtp stage
+        if self.config.stage == "both_mtp":
+            self.mtp_head.init_weights()
+            # Cast group_wte to bf16
+            if self.group_wte.weight.device.type == "cuda":
+                self.group_wte.to(dtype=torch.bfloat16)
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -302,7 +343,19 @@ class PDLM(nn.Module):
         matrix_params = list(self.transformer.h.parameters())
         embedding_params = list(self.transformer.wte.parameters())
         lm_head_params = list(self.lm_head.parameters())
-        assert len(list(self.parameters())) == len(matrix_params) + len(embedding_params) + len(lm_head_params)
+
+        # For both_mtp stage, also include MTP head parameters
+        if self.config.stage == "both_mtp":
+            # MTP block parameters go to matrix optimizer (Muon)
+            mtp_matrix_params = list(self.mtp_head.block.parameters()) + list(self.mtp_head.proj.parameters())
+            matrix_params = matrix_params + mtp_matrix_params
+            # Group embeddings go to AdamW like other embeddings
+            group_wte_params = list(self.group_wte.parameters())
+            embedding_params = embedding_params + group_wte_params
+            assert len(list(self.parameters())) == len(matrix_params) + len(embedding_params) + len(lm_head_params)
+        else:
+            assert len(list(self.parameters())) == len(matrix_params) + len(embedding_params) + len(lm_head_params)
+
         # Create the AdamW optimizer for the embedding and lm_head
         # Scale the LR for the AdamW parameters by ∝1/√dmodel (having tuned the LRs for 768 dim model)
         dmodel_lr_scale = (model_dim / 768) ** -0.5
@@ -328,6 +381,10 @@ class PDLM(nn.Module):
 
     def forward(self, idx, targets=None, kv_cache=None, attn_mask=None, loss_extras=None):
         """Training: idx/targets are length L; we concat to 2L inside this and apply block mask."""
+        # Dispatch to both_mtp forward if in both_mtp stage with targets
+        if self.config.stage == "both_mtp" and targets is not None:
+            return self._forward_both_mtp(idx, targets, attn_mask, loss_extras)
+
         if targets is not None:
             B, T = idx.size()
             assert attn_mask is not None, "Train should has attn mask"
@@ -411,6 +468,108 @@ class PDLM(nn.Module):
         else:
             # inference: just return the logits directly
             return logits
+
+    def _forward_both_mtp(self, idx, targets, attn_mask, loss_extras):
+        """
+        Forward pass for both_mtp stage: combines Stage 1 (MTP) and Stage 2 (denoising) in one pass.
+
+        Input structure (2L total):
+        - First L (idx/xt): group tokens at block positions -> Stage 2 predicts pure tokens
+        - Second L (targets/x0): pure tokens -> Stage 1 predicts K future group tokens via MTP
+
+        Args:
+            idx: (B, L) input tokens (xt: group tokens at block positions)
+            targets: (B, L) target tokens (x0: pure tokens)
+            attn_mask: (2L, 2L) block diffusion attention mask
+            loss_extras: dict with "loss_mask" (B, L) and "mtp_targets" (B, L, K, overlap_k)
+
+        Returns:
+            combined_loss: scalar loss = mtp_loss_weight * stage1_loss + stage2_loss
+        """
+        from nanochat.mtp_head import compute_mtp_loss
+
+        B, T = idx.size()
+        assert attn_mask is not None, "Train should have attn mask"
+        assert self.config.sequence_len == T, "use double seq length when train"
+        assert targets.size(1) == T, "Targets should match the base sequence length"
+
+        # Concatenate [xt | x0] to form (B, 2L) input
+        combined_idx = torch.cat((idx, targets), dim=1)  # (B, 2L)
+
+        # Get rotary embeddings for 2L sequence (same positions for both halves)
+        cos = self.cos[:, :T]
+        sin = self.sin[:, :T]
+        cos_sin = (torch.cat((cos, cos), dim=1), torch.cat((sin, sin), dim=1))
+
+        # Forward through transformer
+        x = self.transformer.wte(combined_idx)
+        x = norm(x)
+        for block in self.transformer.h:
+            x = block(x, cos_sin, kv_cache=None, attn_mask=attn_mask)
+        x = norm(x)
+
+        # Compute logits
+        softcap = 15
+        logits = self.lm_head(x)  # (B, 2L, pure_vocab_size + num_groups)
+        logits = logits.float()
+        logits = softcap * torch.tanh(logits / softcap)
+
+        # Split logits for Stage 1 and Stage 2
+        pure_vocab_size = self.config.pure_vocab_size
+
+        # Stage 2 Loss: Group → Pure denoising (first L positions, pure vocab logits)
+        stage2_logits = logits[:, :T, :pure_vocab_size]  # (B, T, pure_vocab_size)
+        loss_mask = loss_extras["loss_mask"]  # (B, T)
+
+        log_probs = F.log_softmax(stage2_logits, dim=-1)
+        target_log_probs = torch.gather(log_probs, dim=-1, index=targets.unsqueeze(-1))
+        nll = -target_log_probs.squeeze(-1)  # (B, T)
+        stage2_loss = (nll * loss_mask).sum() / loss_mask.sum()
+
+        # Stage 1 Loss: Pure → Group MTP (second L positions, group vocab logits)
+        # Main model's group logits for first token prediction
+        main_group_logits = logits[:, T:, pure_vocab_size:]  # (B, T, num_groups)
+
+        # Get hidden states from x0 portion for MTP head
+        x0_hidden = x[:, T:, :]  # (B, T, D)
+
+        # MTP targets: (B, T, K, overlap_k) - all K future group tokens
+        mtp_targets = loss_extras["mtp_targets"]  # (B, T, K, overlap_k)
+        K = mtp_targets.size(2)
+
+        # First group token for teacher forcing (use ground truth from mtp_targets[:,:,0,:])
+        # Take the first valid group (index 0) for teacher forcing
+        first_group_tok = mtp_targets[:, :, 0, 0]  # (B, T)
+
+        # MTP head predicts K-1 additional tokens (2nd through Kth)
+        # Rotary embeddings: [1, T, 1, head_dim//2] broadcasts with [B, T, n_head, head_dim]
+        mtp_cos = cos
+        mtp_sin = sin
+
+        # Teacher forcing targets for MTP: use ground truth for k=0..K-2 to predict k=1..K-1
+        # mtp_targets[:, :, k, 0] gives the k-th future group token (using first overlap option)
+        mtp_teacher_targets = mtp_targets[:, :, :-1, 0]  # (B, T, K-1) - targets for teacher forcing
+
+        mtp_logits = self.mtp_head(
+            h=x0_hidden,
+            cos=mtp_cos,
+            sin=mtp_sin,
+            first_group_tok=first_group_tok,
+            targets=mtp_teacher_targets,
+        )  # (B, T, K-1, num_groups)
+
+        # Compute MTP loss using any-correct loss
+        stage1_loss = compute_mtp_loss(
+            main_logits=main_group_logits,
+            mtp_logits=mtp_logits,
+            targets=mtp_targets,
+            mtp_loss_beta=self.config.mtp_loss_beta,
+        )
+
+        # Combine losses
+        combined_loss = self.config.mtp_loss_weight * stage1_loss + stage2_loss
+
+        return combined_loss
 
     def forward_for_eval(self, idx, targets, attn_mask):
         """

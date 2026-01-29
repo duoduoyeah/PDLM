@@ -19,6 +19,7 @@ LOCAL_DIR="/tmp/pdlm_eval"
 HF_REPO=""  # Empty = use default pattern (duoduoyeah/pdlm_d${DEPTH})
 CKPT_DIR=""  # Direct checkpoint path (overrides HF download)
 RUN_COMPATIBILITY="true"
+RUN_ORACLE_ACCURACY="true"
 DUMP_BATCH=""  # Path to dump batch output file
 
 # Parse named arguments
@@ -48,6 +49,9 @@ for arg in "$@"; do
         --run_compatibility)
             RUN_COMPATIBILITY="true"
             ;;
+        --run_oracle_accuracy)
+            RUN_ORACLE_ACCURACY="true"
+            ;;
         --dump_batch=*)
             DUMP_BATCH="${arg#*=}"
             ;;
@@ -56,7 +60,8 @@ for arg in "$@"; do
             echo "Usage: bash launch/eval_pdlm.sh --depth=8 [--data_ratio=20]"
             echo "       [--block_size=4] [--num_batches=20] [--local_dir=/tmp/pdlm_eval]"
             echo "       [--repo=duoduoyeah/pdlm_d8] [--ckpt_dir=/path/to/ckpt]"
-            echo "       [--run_compatibility] [--dump_batch=/path/to/output.txt]"
+            echo "       [--run_compatibility] [--run_oracle_accuracy]"
+            echo "       [--dump_batch=/path/to/output.txt]"
             exit 1
             ;;
     esac
@@ -65,12 +70,13 @@ done
 echo "============================================================"
 echo "PDLM Stage 2 Evaluation"
 echo "============================================================"
-echo "Depth:        ${DEPTH}"
-echo "Data Ratio:   ${DATA_RATIO}"
-echo "Block Size:   ${BLOCK_SIZE}"
-echo "Num Batches:  ${NUM_BATCHES}"
-echo "Local Dir:    ${LOCAL_DIR}"
-echo "Compatibility: ${RUN_COMPATIBILITY}"
+echo "Depth:          ${DEPTH}"
+echo "Data Ratio:     ${DATA_RATIO}"
+echo "Block Size:     ${BLOCK_SIZE}"
+echo "Num Batches:    ${NUM_BATCHES}"
+echo "Local Dir:      ${LOCAL_DIR}"
+echo "Compatibility:  ${RUN_COMPATIBILITY}"
+echo "Oracle Accuracy: ${RUN_ORACLE_ACCURACY}"
 echo "============================================================"
 
 # ============================================================
@@ -149,6 +155,11 @@ if [ -n "${CKPT_DIR}" ]; then
         COMPAT_FLAG="--run_compatibility"
     fi
 
+    ORACLE_FLAG=""
+    if [ "${RUN_ORACLE_ACCURACY}" = "true" ]; then
+        ORACLE_FLAG="--run_oracle_accuracy"
+    fi
+
     DUMP_FLAG=""
     if [ -n "${DUMP_BATCH}" ]; then
         DUMP_FLAG="--dump_batch=${DUMP_BATCH}"
@@ -170,7 +181,8 @@ if [ -n "${CKPT_DIR}" ]; then
         --ckpt_dir="${ACTUAL_CKPT_DIR}" \
         --num_batches=${NUM_BATCHES} \
         --output_json="${CKPT_DIR}/eval_result.json" \
-        ${COMPAT_FLAG}
+        ${COMPAT_FLAG} \
+        ${ORACLE_FLAG}
 
     echo ""
     echo "============================================================"
@@ -255,6 +267,11 @@ if [ "${RUN_COMPATIBILITY}" = "true" ]; then
     COMPAT_FLAG="--run_compatibility"
 fi
 
+ORACLE_FLAG=""
+if [ "${RUN_ORACLE_ACCURACY}" = "true" ]; then
+    ORACLE_FLAG="--run_oracle_accuracy"
+fi
+
 for MODEL_DIR in "${MODELS[@]}"; do
     MODEL_NAME=$(basename "$MODEL_DIR")
 
@@ -298,7 +315,8 @@ for MODEL_DIR in "${MODELS[@]}"; do
         --ckpt_dir="${CKPT_DIR}" \
         --num_batches=${NUM_BATCHES} \
         --output_json="${MODEL_DIR}/eval_result.json" \
-        ${COMPAT_FLAG} 2>&1)
+        ${COMPAT_FLAG} \
+        ${ORACLE_FLAG} 2>&1)
 
     EVAL_STATUS=$?
     echo "$OUTPUT"

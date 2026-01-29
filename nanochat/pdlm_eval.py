@@ -371,6 +371,10 @@ def eval_pdlm_compatibility(
        e.g., predict x4' given [prefix, x1, x2, x3, G4]
     3. Check if x_i == x_i'
 
+    Optimization: Tests all blocks simultaneously for each position.
+    Instead of (num_blocks × block_size) forward passes per batch,
+    uses only (1 + block_size) passes: 1 for initial predictions + 4 for position tests.
+
     Args:
         model: PDLM model (stage2)
         val_loader: validation data loader (can be None if cached_batches provided)
@@ -419,43 +423,41 @@ def eval_pdlm_compatibility(
 
             B, T = inputs.shape
             num_blocks = T // block_size
-            pure_vocab_size = token_map.pure_vocab_size
 
             with autocast_ctx:
-                # Step 1: Get initial predictions (all group tokens -> pure predictions)
+                # Step 1: Get initial predictions (1 forward pass)
                 logits = model.forward_for_eval(inputs, targets, attn_mask=attn_mask)
                 initial_preds = logits.argmax(dim=-1)  # (B, T)
 
-                # Step 2: For each position, reveal other pure tokens and re-predict
-                for block_idx in range(1, num_blocks):  # Skip block 0
-                    block_start = block_idx * block_size
-                    block_end = block_start + block_size
+                # Step 2: Test each position across ALL blocks (block_size forward passes)
+                for test_pos in range(block_size):
+                    # Create input: reveal predictions at OTHER positions, keep group at test_pos
+                    # This tests all blocks simultaneously
+                    modified = inputs.clone()
 
-                    for reveal_except_pos in range(block_size):
-                        # Create modified input: reveal all positions EXCEPT reveal_except_pos
-                        modified_inputs = inputs.clone()
-
+                    for block_idx in range(1, num_blocks):  # Skip block 0
                         for pos in range(block_size):
-                            abs_pos = block_start + pos
-                            if pos != reveal_except_pos:
-                                # Reveal: use initial prediction (pure token)
-                                modified_inputs[:, abs_pos] = initial_preds[:, abs_pos]
-                            # else: keep as group token
+                            abs_pos = block_idx * block_size + pos
+                            if pos != test_pos:
+                                # Reveal: use initial prediction
+                                modified[:, abs_pos] = initial_preds[:, abs_pos]
+                            # else: keep group token at test_pos
 
-                        # Re-predict
-                        modified_logits = model.forward_for_eval(
-                            modified_inputs, targets, attn_mask=attn_mask
-                        )
-                        modified_preds = modified_logits.argmax(dim=-1)
+                    # Single forward pass for all blocks
+                    modified_logits = model.forward_for_eval(
+                        modified, targets, attn_mask=attn_mask
+                    )
+                    modified_preds = modified_logits.argmax(dim=-1)
 
-                        # Compare at the position that was NOT revealed
-                        target_pos = block_start + reveal_except_pos
-                        original_pred = initial_preds[:, target_pos]
-                        new_pred = modified_preds[:, target_pos]
+                    # Compare at all test positions across all blocks
+                    for block_idx in range(1, num_blocks):
+                        abs_pos = block_idx * block_size + test_pos
+                        original_pred = initial_preds[:, abs_pos]
+                        new_pred = modified_preds[:, abs_pos]
 
                         matched = (original_pred == new_pred).sum().item()
-                        compat_by_pos[reveal_except_pos]["matched"] += matched
-                        compat_by_pos[reveal_except_pos]["total"] += B
+                        compat_by_pos[test_pos]["matched"] += matched
+                        compat_by_pos[test_pos]["total"] += B
 
     if was_training:
         model.train()
@@ -480,6 +482,122 @@ def eval_pdlm_compatibility(
     return result
 
 
+def eval_pdlm_oracle_accuracy(
+    model,
+    val_loader,
+    block_size,
+    num_batches,
+    attn_mask,
+    device,
+    autocast_ctx,
+    cached_batches=None,
+):
+    """
+    Test accuracy when given ground truth context (oracle test).
+
+    For each position i in a block:
+    - Input: [p1, p2, p3, G_i] (ground truth pure tokens at other positions, group token at i)
+    - Predict: x_i'
+    - Compare: p_i == x_i'?
+
+    This tests the model's capability to predict correctly given perfect context,
+    which helps interpret compatibility results:
+    - High oracle accuracy + low compatibility → model explores valid alternatives
+    - Low oracle accuracy → model fundamentally struggles even with perfect context
+
+    Optimization: Tests all blocks simultaneously for each position.
+    Instead of (num_blocks × block_size) forward passes per batch,
+    uses only block_size passes (4 for block_size=4).
+
+    Args:
+        model: PDLM model (stage2)
+        val_loader: validation data loader (can be None if cached_batches provided)
+        block_size: block size for PDLM
+        num_batches: number of batches to evaluate (ignored if cached_batches provided)
+        attn_mask: attention mask for the model
+        device: device to run on
+        autocast_ctx: autocast context for mixed precision
+        cached_batches: pre-cached list of (inputs, targets, loss_extras, state) tuples.
+
+    Returns:
+        dict with oracle accuracy results:
+        {
+            "overall_accuracy": float,  # % positions where prediction matches ground truth
+            "positions": {
+                0: {"accuracy": float, "total": int, "matched": int},
+                ...
+            },
+        }
+    """
+    was_training = model.training
+    model.eval()
+
+    # Accumulators
+    acc_by_pos = {p: {"matched": 0, "total": 0} for p in range(block_size)}
+
+    # Use cached batches if provided, otherwise consume from loader
+    def get_batch(idx):
+        if cached_batches is not None:
+            return cached_batches[idx]
+        return next(val_loader)
+
+    # Determine actual number of batches
+    actual_batches = len(cached_batches) if cached_batches is not None else num_batches
+
+    with torch.no_grad():
+        for batch_idx in range(actual_batches):
+            inputs, targets, loss_extras, _ = get_batch(batch_idx)
+            # inputs: (B, T) - group tokens at block positions
+            # targets: (B, T) - pure tokens (ground truth)
+
+            B, T = inputs.shape
+            num_blocks = T // block_size
+
+            with autocast_ctx:
+                # Test each position across ALL blocks (block_size forward passes total)
+                for test_pos in range(block_size):
+                    # Create input: ground truth everywhere, EXCEPT test_pos in each block
+                    # has group token
+                    modified = targets.clone()
+
+                    for block_idx in range(1, num_blocks):  # Skip block 0
+                        abs_pos = block_idx * block_size + test_pos
+                        modified[:, abs_pos] = inputs[:, abs_pos]  # put group token here
+
+                    # Single forward pass for all blocks
+                    logits = model.forward_for_eval(modified, targets, attn_mask=attn_mask)
+                    preds = logits.argmax(dim=-1)
+
+                    # Compare at all test positions across all blocks
+                    for block_idx in range(1, num_blocks):
+                        abs_pos = block_idx * block_size + test_pos
+                        matched = (preds[:, abs_pos] == targets[:, abs_pos]).sum().item()
+                        acc_by_pos[test_pos]["matched"] += matched
+                        acc_by_pos[test_pos]["total"] += B
+
+    if was_training:
+        model.train()
+
+    # Build result dict
+    result = {}
+
+    total_matched = sum(acc_by_pos[p]["matched"] for p in range(block_size))
+    total_count = sum(acc_by_pos[p]["total"] for p in range(block_size))
+    result["overall_accuracy"] = total_matched / total_count if total_count > 0 else 0.0
+
+    result["positions"] = {}
+    for pos in range(block_size):
+        matched = acc_by_pos[pos]["matched"]
+        total = acc_by_pos[pos]["total"]
+        result["positions"][pos] = {
+            "accuracy": matched / total if total > 0 else 0.0,
+            "matched": matched,
+            "total": total,
+        }
+
+    return result
+
+
 def eval_pdlm_full(
     model,
     val_loader,
@@ -491,9 +609,11 @@ def eval_pdlm_full(
     prefix_pure_tokens=0,
     run_compatibility=True,
     compatibility_batches=None,
+    run_oracle_accuracy=True,
+    oracle_accuracy_batches=None,
 ):
     """
-    Run full PDLM evaluation: loss + perplexity + optional compatibility.
+    Run full PDLM evaluation: loss + perplexity + optional compatibility + optional oracle accuracy.
 
     Args:
         model: PDLM model
@@ -506,6 +626,8 @@ def eval_pdlm_full(
         prefix_pure_tokens: pure prefix tokens
         run_compatibility: whether to run compatibility eval
         compatibility_batches: batches for compatibility (default: num_batches // 4)
+        run_oracle_accuracy: whether to run oracle accuracy eval
+        oracle_accuracy_batches: batches for oracle accuracy (default: num_batches // 4)
 
     Returns:
         dict with all metrics
@@ -538,6 +660,21 @@ def eval_pdlm_full(
         )
         result["compatibility"] = compat_result
 
+    # Run oracle accuracy evaluation on the same cached batches
+    if run_oracle_accuracy:
+        if oracle_accuracy_batches is None:
+            oracle_accuracy_batches = max(1, num_batches // 4)
+
+        # Use first oracle_accuracy_batches from cache (same data as loss eval)
+        oracle_batches = cached_batches[:oracle_accuracy_batches]
+
+        oracle_result = eval_pdlm_oracle_accuracy(
+            model, None, block_size, len(oracle_batches),
+            attn_mask, device, autocast_ctx,
+            cached_batches=oracle_batches,
+        )
+        result["oracle_accuracy"] = oracle_result
+
     if was_training:
         model.train()
 
@@ -553,9 +690,11 @@ def dump_batch_to_file(
     autocast_ctx,
     output_path,
     tokenizer_dir=None,
+    num_sequences=2,
+    num_blocks_to_show=3,
 ):
     """
-    Dump 1 batch showing input group tokens and model predictions.
+    Dump 1 batch showing input group tokens, model predictions, compatibility, and oracle tests.
 
     Args:
         model: PDLM model
@@ -566,12 +705,14 @@ def dump_batch_to_file(
         autocast_ctx: autocast context
         output_path: path to write txt file
         tokenizer_dir: path to tokenizer dir (default: uses get_base_dir())
+        num_sequences: number of sequences to dump (default: 2)
+        num_blocks_to_show: number of blocks to show detailed analysis for (default: 3)
 
     Output file format (per sequence):
         === Sequence 0 ===
-        Input (noised):  [<|G_12|>, <|G_45|>, ...]
-        Output (preds):  ['hello', ' world', ...]
-        Target (truth):  ['hello', ' world', ...]
+        [Basic predictions]
+        [Compatibility tests for blocks 1,2,3]
+        [Oracle accuracy tests for blocks 1,2,3]
     """
     from nanochat.group_tokenizer.dump import load_tokenizer
 
@@ -587,25 +728,11 @@ def dump_batch_to_file(
     tokenizer = load_tokenizer(tokenizer_dir)
     token_map = get_token_map(tokenizer_dir, device=device)
 
-    with torch.no_grad():
-        inputs, targets, loss_extras, _ = next(val_loader)
-        # inputs: (B, T) - group tokens at block positions
-        # targets: (B, T) - pure tokens
-
-        B, T = inputs.shape
-
-        with autocast_ctx:
-            logits = model.forward_for_eval(inputs, targets, attn_mask=attn_mask)
-            preds = logits.argmax(dim=-1)  # (B, T)
-
-    if was_training:
-        model.train()
-
     # Helper to format group token
     def fmt_group(tid):
         if token_map.is_group(torch.tensor(tid)):
             gid = tid - token_map.group_start_id
-            return f"<|G_{gid}|>"
+            return f"G{gid}"
         elif tokenizer:
             return repr(tokenizer.decode([tid]))
         return f"[{tid}]"
@@ -616,23 +743,138 @@ def dump_batch_to_file(
             return repr(tokenizer.decode([tid]))
         return f"[{tid}]"
 
+    # Helper to format a block slice
+    def fmt_block(tensor, b, block_start, is_input=False):
+        tokens = []
+        for pos in range(block_size):
+            tid = tensor[b, block_start + pos].item()
+            if is_input:
+                tokens.append(fmt_group(tid))
+            else:
+                tokens.append(fmt_pure(tid))
+        return "[" + ", ".join(tokens) + "]"
+
+    with torch.no_grad():
+        inputs, targets, loss_extras, _ = next(val_loader)
+        # inputs: (B, T) - group tokens at block positions
+        # targets: (B, T) - pure tokens
+
+        B, T = inputs.shape
+        num_blocks = T // block_size
+        num_sequences = min(num_sequences, B)
+        num_blocks_to_show = min(num_blocks_to_show, num_blocks - 1)  # skip block 0
+
+        with autocast_ctx:
+            # Step 1: Get initial predictions (parallel decode from group tokens)
+            logits = model.forward_for_eval(inputs, targets, attn_mask=attn_mask)
+            initial_preds = logits.argmax(dim=-1)  # (B, T)
+
+            # Step 2: Compatibility tests - for each position, reveal other predictions
+            # compat_preds[test_pos] = predictions when other positions revealed
+            compat_preds = {}
+            for test_pos in range(block_size):
+                modified = inputs.clone()
+                for block_idx in range(1, num_blocks):
+                    for pos in range(block_size):
+                        abs_pos = block_idx * block_size + pos
+                        if pos != test_pos:
+                            modified[:, abs_pos] = initial_preds[:, abs_pos]
+                modified_logits = model.forward_for_eval(modified, targets, attn_mask=attn_mask)
+                compat_preds[test_pos] = modified_logits.argmax(dim=-1)
+
+            # Step 3: Oracle tests - for each position, give ground truth at other positions
+            # oracle_preds[test_pos] = predictions when ground truth given at other positions
+            oracle_preds = {}
+            for test_pos in range(block_size):
+                modified = targets.clone()
+                for block_idx in range(1, num_blocks):
+                    abs_pos = block_idx * block_size + test_pos
+                    modified[:, abs_pos] = inputs[:, abs_pos]  # keep group token
+                modified_logits = model.forward_for_eval(modified, targets, attn_mask=attn_mask)
+                oracle_preds[test_pos] = modified_logits.argmax(dim=-1)
+
+    if was_training:
+        model.train()
+
     # Write output
     with open(output_path, "w") as f:
-        for b in range(B):
-            f.write(f"=== Sequence {b} ===\n")
+        f.write("=" * 80 + "\n")
+        f.write("PDLM BATCH DUMP - Compatibility & Oracle Analysis\n")
+        f.write("=" * 80 + "\n\n")
+        f.write(f"Block size: {block_size}, Sequence length: {T}, Num blocks: {num_blocks}\n")
+        f.write(f"Showing {num_sequences} sequences, {num_blocks_to_show} blocks each\n\n")
 
-            # Input tokens (group or pure)
-            input_strs = [fmt_group(inputs[b, t].item()) for t in range(T)]
-            f.write(f"Input (noised):  [{', '.join(input_strs)}]\n")
+        for b in range(num_sequences):
+            f.write("=" * 80 + "\n")
+            f.write(f"SEQUENCE {b}\n")
+            f.write("=" * 80 + "\n\n")
 
-            # Predicted tokens (argmax)
-            pred_strs = [fmt_pure(preds[b, t].item()) for t in range(T)]
-            f.write(f"Output (preds):  [{', '.join(pred_strs)}]\n")
+            # Show first few blocks overview
+            f.write("--- BLOCK OVERVIEW (first 5 blocks) ---\n")
+            for block_idx in range(min(5, num_blocks)):
+                block_start = block_idx * block_size
+                f.write(f"Block {block_idx}: ")
+                f.write(f"Input={fmt_block(inputs, b, block_start, is_input=True)} ")
+                f.write(f"Pred={fmt_block(initial_preds, b, block_start)} ")
+                f.write(f"Truth={fmt_block(targets, b, block_start)}\n")
+            f.write("\n")
 
-            # Target tokens (ground truth)
-            tgt_strs = [fmt_pure(targets[b, t].item()) for t in range(T)]
-            f.write(f"Target (truth):  [{', '.join(tgt_strs)}]\n")
+            # Detailed analysis for selected blocks
+            for block_idx in range(1, 1 + num_blocks_to_show):
+                block_start = block_idx * block_size
+                f.write("-" * 60 + "\n")
+                f.write(f"BLOCK {block_idx} DETAILED ANALYSIS (positions {block_start}-{block_start + block_size - 1})\n")
+                f.write("-" * 60 + "\n\n")
+
+                # Show the block
+                f.write(f"Input (group tokens):  {fmt_block(inputs, b, block_start, is_input=True)}\n")
+                f.write(f"Initial prediction:    {fmt_block(initial_preds, b, block_start)}\n")
+                f.write(f"Ground truth:          {fmt_block(targets, b, block_start)}\n\n")
+
+                # Compatibility analysis
+                f.write("COMPATIBILITY TEST: Re-predict each position after revealing others\n")
+                f.write("  (Does the model stick with its prediction when seeing its other outputs?)\n\n")
+                for test_pos in range(block_size):
+                    abs_pos = block_start + test_pos
+                    init_pred = initial_preds[b, abs_pos].item()
+                    new_pred = compat_preds[test_pos][b, abs_pos].item()
+                    matched = "✓ SAME" if init_pred == new_pred else "✗ CHANGED"
+
+                    # Show what the input looked like for this test
+                    input_desc = []
+                    for pos in range(block_size):
+                        if pos == test_pos:
+                            input_desc.append(fmt_group(inputs[b, block_start + pos].item()))
+                        else:
+                            input_desc.append(fmt_pure(initial_preds[b, block_start + pos].item()))
+                    input_str = "[" + ", ".join(input_desc) + "]"
+
+                    f.write(f"  Pos {test_pos}: Input={input_str}\n")
+                    f.write(f"         Initial={fmt_pure(init_pred)}, Re-pred={fmt_pure(new_pred)} → {matched}\n")
+                f.write("\n")
+
+                # Oracle accuracy analysis
+                f.write("ORACLE TEST: Predict each position given ground truth at others\n")
+                f.write("  (Can the model predict correctly with perfect context?)\n\n")
+                for test_pos in range(block_size):
+                    abs_pos = block_start + test_pos
+                    pred = oracle_preds[test_pos][b, abs_pos].item()
+                    truth = targets[b, abs_pos].item()
+                    matched = "✓ CORRECT" if pred == truth else "✗ WRONG"
+
+                    # Show what the input looked like for this test
+                    input_desc = []
+                    for pos in range(block_size):
+                        if pos == test_pos:
+                            input_desc.append(fmt_group(inputs[b, block_start + pos].item()))
+                        else:
+                            input_desc.append(fmt_pure(targets[b, block_start + pos].item()))
+                    input_str = "[" + ", ".join(input_desc) + "]"
+
+                    f.write(f"  Pos {test_pos}: Input={input_str}\n")
+                    f.write(f"         Pred={fmt_pure(pred)}, Truth={fmt_pure(truth)} → {matched}\n")
+                f.write("\n")
 
             f.write("\n")
 
-    print(f"Dumped {B} sequences to {output_path}")
+    print(f"Dumped {num_sequences} sequences to {output_path}")
