@@ -23,9 +23,9 @@ import torch
 from nanochat.common import compute_init, autodetect_device_type, get_base_dir, print0
 from nanochat.checkpoint_manager import load_checkpoint, find_last_step, find_largest_model
 from nanochat.pdlm import PDLM, PDLMConfig
-from nanochat.pdlm_eval import eval_pdlm, eval_pdlm_stage1_mask, eval_pdlm_compatibility, eval_pdlm_full, dump_batch_to_file
+from nanochat.pdlm_eval import eval_pdlm, eval_pdlm_stage1_mask, eval_pdlm_stage1_block, eval_pdlm_compatibility, eval_pdlm_full, dump_batch_to_file
 from nanochat.dataloader import get_data_loader
-from nanochat.attn_masks import gen_mask
+from nanochat.attn_masks import gen_mask, gen_block_causal_mask
 from nanochat.group_tokenizer.token_map import get_token_map
 
 
@@ -157,11 +157,18 @@ def run_eval(
         resume_state_dict=None,
     )
 
-    # Generate attention mask for eval (prefix_sliding_tokens=0 for eval)
-    attn_mask = gen_mask(
-        max_seq_len, block_size, attn_backend="sdpa",
-        is_causal=is_causal, prefix_sliding_tokens=0
-    ).to(device=device)
+    # Generate attention mask for eval
+    if stage == "stage1_block":
+        # stage1_block uses L×L block-causal mask (no 2L structure)
+        attn_mask = gen_block_causal_mask(
+            max_seq_len, block_size, attn_backend="sdpa", is_causal=is_causal
+        ).to(device=device)
+    else:
+        # Other stages use 2L×2L mask (prefix_sliding_tokens=0 for eval)
+        attn_mask = gen_mask(
+            max_seq_len, block_size, attn_backend="sdpa",
+            is_causal=is_causal, prefix_sliding_tokens=0
+        ).to(device=device)
 
     # Run evaluation - report actual data size
     total_sequences = num_batches * device_batch_size
@@ -175,6 +182,18 @@ def run_eval(
     if stage == "stage1_mask":
         print0(f"Running Stage 1 MASK evaluation...")
         eval_result = eval_pdlm_stage1_mask(
+            model=model,
+            val_loader=val_loader,
+            block_size=block_size,
+            num_batches=num_batches,
+            attn_mask=attn_mask,
+            device=device,
+            autocast_ctx=autocast_ctx,
+            prefix_pure_tokens=prefix_pure_tokens,
+        )
+    elif stage == "stage1_block":
+        print0(f"Running Stage 1 Block evaluation...")
+        eval_result = eval_pdlm_stage1_block(
             model=model,
             val_loader=val_loader,
             block_size=block_size,
@@ -230,6 +249,8 @@ def print_results(eval_result, block_size):
     print0("\n" + "=" * 60)
     if stage == "stage1_mask":
         print0("PDLM STAGE 1 MASK EVALUATION RESULTS")
+    elif stage == "stage1_block":
+        print0("PDLM STAGE 1 BLOCK EVALUATION RESULTS")
     else:
         print0("PDLM STAGE 2 EVALUATION RESULTS")
     print0("=" * 60)

@@ -65,7 +65,7 @@ def any_correct_ce_loss(logits, valid_targets, loss_mask=None):
         return nll.mean()
 
 # Stage types for PDLM
-PDLMStage = Literal["stage1_mtp", "stage1_mask", "stage2", "both_mtp", "both_mask"]
+PDLMStage = Literal["stage1_mtp", "stage1_mask", "stage1_block", "stage2", "both_mtp", "both_mask", "both_block"]
 
 @dataclass
 class PDLMConfig:
@@ -92,7 +92,7 @@ class PDLMConfig:
     mtp_loss_weight: float = 1.0   # Stage 1 MTP loss weight relative to Stage 2 (which is 1.0)
 
     def __post_init__(self):
-        valid_stages = {"stage1_mtp", "stage1_mask", "stage2", "both_mtp", "both_mask"}
+        valid_stages = {"stage1_mtp", "stage1_mask", "stage1_block", "stage2", "both_mtp", "both_mask", "both_block"}
         if self.stage not in valid_stages:
             raise ValueError(f"Invalid stage: {self.stage}. Must be one of {valid_stages}")
 
@@ -105,10 +105,16 @@ class PDLMConfig:
             assert self.mask_token_id != -1, "stage1_mask requires mask_token_id"
             wte_size = self.pure_vocab_size + 1  # pure + MASK
             lm_head_size = self.num_groups
+        elif self.stage == "stage1_block":
+            wte_size = self.pure_vocab_size
+            lm_head_size = self.num_groups
         elif self.stage == "stage2":
             wte_size = self.pure_vocab_size + self.num_groups
             lm_head_size = self.pure_vocab_size
         elif self.stage == "both_mtp":
+            wte_size = self.pure_vocab_size + self.num_groups
+            lm_head_size = self.pure_vocab_size + self.num_groups
+        elif self.stage == "both_block":
             wte_size = self.pure_vocab_size + self.num_groups
             lm_head_size = self.pure_vocab_size + self.num_groups
         elif self.stage == "both_mask":
@@ -381,7 +387,11 @@ class PDLM(nn.Module):
 
     def forward(self, idx, targets=None, kv_cache=None, attn_mask=None, loss_extras=None):
         """Training: idx/targets are length L; we concat to 2L inside this and apply block mask."""
-        # Dispatch to both_mtp forward if in both_mtp stage with targets
+        # Dispatch to specialized forward methods for certain stages
+        if self.config.stage == "stage1_block" and targets is not None:
+            return self._forward_stage1_block(idx, targets, attn_mask, loss_extras)
+        if self.config.stage == "both_block" and targets is not None:
+            return self._forward_both_block(idx, targets, attn_mask, loss_extras)
         if self.config.stage == "both_mtp" and targets is not None:
             return self._forward_both_mtp(idx, targets, attn_mask, loss_extras)
 
@@ -569,6 +579,128 @@ class PDLM(nn.Module):
         # Combine losses
         combined_loss = self.config.mtp_loss_weight * stage1_loss + stage2_loss
 
+        return combined_loss
+
+    def _forward_stage1_block(self, idx, targets, attn_mask, loss_extras):
+        """
+        Forward pass for stage1_block: L pure tokens in, L×L block-causal mask.
+        Position k in block i predicts the group token at position k in block i+1.
+        No 2L concatenation — just direct forward through transformer with block-causal mask.
+
+        Args:
+            idx: (B, L) pure token inputs
+            targets: (B, L) pure tokens (unused directly, kept for API consistency)
+            attn_mask: (L, L) block-causal mask
+            loss_extras: dict with "group_targets" (B, T, overlap_k) and "loss_mask" (B, T)
+
+        Returns:
+            loss: scalar loss
+        """
+        B, T = idx.size()
+        assert attn_mask is not None, "stage1_block requires attention mask"
+
+        # Rotary embeddings for L tokens
+        cos_sin = self.cos[:, :T], self.sin[:, :T]
+
+        # Forward through transformer (no 2L concatenation)
+        x = self.transformer.wte(idx)
+        x = norm(x)
+        for block in self.transformer.h:
+            x = block(x, cos_sin, kv_cache=None, attn_mask=attn_mask)
+        x = norm(x)
+
+        # Compute logits
+        softcap = 15
+        logits = self.lm_head(x)  # (B, T, num_groups)
+        logits = logits.float()
+        logits = softcap * torch.tanh(logits / softcap)
+
+        # Compute any-correct loss on group targets
+        assert loss_extras is not None and "group_targets" in loss_extras
+        group_targets = loss_extras["group_targets"]
+        loss_mask = loss_extras["loss_mask"]
+        V = logits.size(-1)
+        overlap_k = group_targets.size(-1)
+
+        loss = any_correct_ce_loss(
+            logits.reshape(-1, V),
+            group_targets.reshape(-1, overlap_k),
+            loss_mask.reshape(-1),
+        )
+        return loss
+
+    def _forward_both_block(self, idx, targets, attn_mask, loss_extras):
+        """
+        Forward pass for both_block stage: combines Stage 1 (block→block) and Stage 2 (denoising).
+
+        Same 2L structure as both_mtp:
+        - First L (idx/xt): group tokens at block positions -> Stage 2 predicts pure tokens
+        - Second L (targets/x0): pure tokens -> Stage 1 predicts group tokens for next block
+
+        Stage 1 uses block→block prediction via lm_head (no MTP head).
+
+        Args:
+            idx: (B, L) input tokens (xt: group tokens at block positions)
+            targets: (B, L) target tokens (x0: pure tokens)
+            attn_mask: (2L, 2L) block diffusion attention mask
+            loss_extras: dict with "loss_mask" (B, L), "block_targets" (B, L, overlap_k),
+                         "block_loss_mask" (B, L)
+
+        Returns:
+            combined_loss: scalar loss = mtp_loss_weight * stage1_loss + stage2_loss
+        """
+        B, T = idx.size()
+        assert attn_mask is not None, "Train should have attn mask"
+        assert self.config.sequence_len == T, "use double seq length when train"
+        assert targets.size(1) == T, "Targets should match the base sequence length"
+
+        # Concatenate [xt | x0] to form (B, 2L) input
+        combined_idx = torch.cat((idx, targets), dim=1)  # (B, 2L)
+
+        # Get rotary embeddings for 2L sequence (same positions for both halves)
+        cos = self.cos[:, :T]
+        sin = self.sin[:, :T]
+        cos_sin = (torch.cat((cos, cos), dim=1), torch.cat((sin, sin), dim=1))
+
+        # Forward through transformer
+        x = self.transformer.wte(combined_idx)
+        x = norm(x)
+        for block in self.transformer.h:
+            x = block(x, cos_sin, kv_cache=None, attn_mask=attn_mask)
+        x = norm(x)
+
+        # Compute logits
+        softcap = 15
+        logits = self.lm_head(x)  # (B, 2L, pure_vocab_size + num_groups)
+        logits = logits.float()
+        logits = softcap * torch.tanh(logits / softcap)
+
+        pure_vocab_size = self.config.pure_vocab_size
+
+        # Stage 2 Loss: Group -> Pure denoising (first L positions, pure vocab logits)
+        stage2_logits = logits[:, :T, :pure_vocab_size]  # (B, T, pure_vocab_size)
+        loss_mask = loss_extras["loss_mask"]  # (B, T)
+
+        log_probs = F.log_softmax(stage2_logits, dim=-1)
+        target_log_probs = torch.gather(log_probs, dim=-1, index=targets.unsqueeze(-1))
+        nll = -target_log_probs.squeeze(-1)  # (B, T)
+        stage2_loss = (nll * loss_mask).sum() / loss_mask.sum()
+
+        # Stage 1 Loss: block->block on x0 half (second L positions, group logits)
+        group_logits = logits[:, T:, pure_vocab_size:]  # (B, T, num_groups)
+        block_targets = loss_extras["block_targets"]  # (B, T, overlap_k)
+        block_loss_mask = loss_extras["block_loss_mask"]  # (B, T)
+        V_group = group_logits.size(-1)
+        overlap_k = block_targets.size(-1)
+
+        stage1_loss = any_correct_ce_loss(
+            group_logits.reshape(-1, V_group),
+            block_targets.reshape(-1, overlap_k),
+            block_loss_mask.reshape(-1),
+        )
+
+        # Combine losses
+        combined_loss = self.config.mtp_loss_weight * stage1_loss + stage2_loss
         return combined_loss
 
     def forward_for_eval(self, idx, targets, attn_mask):

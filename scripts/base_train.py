@@ -16,13 +16,13 @@ from nanochat.bd3lm import BDLM, BDLMConfig
 from nanochat.gpt_mtp import GPTMTP, GPTMTPConfig
 from nanochat.dataloader import get_data_loader
 from nanochat.bd3lm_eval import eval_bd3lm
-from nanochat.pdlm_eval import eval_pdlm, eval_pdlm_stage1_mask
+from nanochat.pdlm_eval import eval_pdlm, eval_pdlm_stage1_mask, eval_pdlm_stage1_block
 from nanochat.mtp_eval import eval_mtp
 from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, print_banner, get_base_dir, autodetect_device_type
 from nanochat.tokenizer import get_tokenizer
 from nanochat.group_tokenizer.token_map import get_token_map
 from nanochat.checkpoint_manager import save_checkpoint, load_checkpoint
-from nanochat.attn_masks import gen_mask
+from nanochat.attn_masks import gen_mask, gen_block_causal_mask
 print_banner()
 
 # -----------------------------------------------------------------------------
@@ -199,12 +199,14 @@ elif model_type == "pdlm":
         bucket_size=block_size,
         model_name=run,
     )
+    # Add loss weight for combined stages
+    if pdlm_stage in ("both_mtp", "both_block"):
+        model_config_kwargs["mtp_loss_weight"] = mtp_loss_weight
     # Add MTP-specific params for both_mtp stage
     if pdlm_stage == "both_mtp":
         model_config_kwargs.update(
             n_future_tokens=n_future_tokens,
             mtp_loss_beta=mtp_loss_beta,
-            mtp_loss_weight=mtp_loss_weight,
         )
 elif model_type == "mtp":
     ModelConfig, Model = GPTMTPConfig, GPTMTP
@@ -238,6 +240,9 @@ if model_type == "bd3lm":
         for i in range(block_size)
     ]
     print0(f"Pre-generated {block_size} attention masks for prefix_sliding_tokens cycling")
+elif model_type == "pdlm" and pdlm_stage == "stage1_block":
+    # stage1_block uses L×L block-causal mask (no 2L structure)
+    block_diff_masks = [gen_block_causal_mask(max_seq_len, block_size, attn_backend="sdpa", is_causal=is_causal).to(device=device)]
 else:
     # Single mask with prefix_sliding_tokens = 0
     block_diff_masks = [gen_mask(max_seq_len, block_size, attn_backend="sdpa", is_causal=is_causal, prefix_sliding_tokens=0).to(device=device)]
@@ -352,8 +357,11 @@ if eval_every > 0:
             model_config=model_config,
             resume_state_dict=None,  # always start fresh for validation
         )
-        # Eval uses prefix_sliding_tokens=0 (no sliding prefix for eval)
-        eval_attn_mask = gen_mask(max_seq_len, block_size, attn_backend="sdpa", is_causal=is_causal, prefix_sliding_tokens=0).to(device=device)
+        # Eval mask: L×L for stage1_block, 2L×2L for other stages
+        if pdlm_stage == "stage1_block":
+            eval_attn_mask = gen_block_causal_mask(max_seq_len, block_size, attn_backend="sdpa", is_causal=is_causal).to(device=device)
+        else:
+            eval_attn_mask = gen_mask(max_seq_len, block_size, attn_backend="sdpa", is_causal=is_causal, prefix_sliding_tokens=0).to(device=device)
         print0(f"Initialized validation dataloader and eval attention mask for PDLM evaluation")
     elif model_type == "next_token_ar":
         pass  # TODO: AR validation setup
@@ -519,8 +527,36 @@ while True:
                     log_data[f"eval/pos_{pos}_ppl"] = pos_data["ppl"]
                     log_data[f"eval/pos_{pos}_accuracy"] = pos_data["accuracy"]
                 wandb_run.log(log_data)
+            elif pdlm_stage == "stage1_block":
+                print0(f"Running PDLM Stage 1 Block evaluation at step {step} ({current_eval_batches} batches)...")
+                eval_result = eval_pdlm_stage1_block(
+                    model=orig_model,
+                    val_loader=val_loader,
+                    block_size=block_size,
+                    num_batches=current_eval_batches,
+                    attn_mask=eval_attn_mask,
+                    device=device,
+                    autocast_ctx=autocast_ctx,
+                    prefix_pure_tokens=prefix_pure_tokens,
+                )
+                print0(f"  [pdlm stage1_block] overall_loss: {eval_result['overall_loss']:.4f}, overall_ppl: {eval_result['overall_ppl']:.2f}, overall_accuracy: {eval_result['overall_accuracy']:.2%}")
+                for pos in range(block_size):
+                    pos_data = eval_result["positions"][pos]
+                    print0(f"    pos {pos}: loss={pos_data['loss']:.4f}, ppl={pos_data['ppl']:.2f}, accuracy={pos_data['accuracy']:.2%}")
+                log_data = {
+                    "step": step,
+                    "eval/overall_loss": eval_result["overall_loss"],
+                    "eval/overall_ppl": eval_result["overall_ppl"],
+                    "eval/overall_accuracy": eval_result["overall_accuracy"],
+                }
+                for pos in range(block_size):
+                    pos_data = eval_result["positions"][pos]
+                    log_data[f"eval/pos_{pos}_loss"] = pos_data["loss"]
+                    log_data[f"eval/pos_{pos}_ppl"] = pos_data["ppl"]
+                    log_data[f"eval/pos_{pos}_accuracy"] = pos_data["accuracy"]
+                wandb_run.log(log_data)
             else:
-                # Stage 2 evaluation
+                # Stage 2 evaluation (also used for both_block Stage 2 eval)
                 print0(f"Running PDLM Stage 2 evaluation at step {step} ({current_eval_batches} batches)...")
                 eval_result = eval_pdlm(
                     model=orig_model,  # use uncompiled model
