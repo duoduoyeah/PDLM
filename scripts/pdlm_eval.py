@@ -1,6 +1,7 @@
 """
-Standalone PDLM Stage 2 evaluation script.
+Standalone PDLM evaluation script.
 
+Supports both Stage 1 MASK and Stage 2 evaluation.
 Loads a PDLM model from checkpoint and runs evaluation on validation data.
 
 Usage:
@@ -20,7 +21,7 @@ import torch
 from nanochat.common import compute_init, autodetect_device_type, get_base_dir, print0
 from nanochat.checkpoint_manager import load_checkpoint, find_last_step, find_largest_model
 from nanochat.pdlm import PDLM, PDLMConfig
-from nanochat.pdlm_eval import eval_pdlm, eval_pdlm_compatibility, eval_pdlm_full, dump_batch_to_file
+from nanochat.pdlm_eval import eval_pdlm, eval_pdlm_stage1_mask, eval_pdlm_compatibility, eval_pdlm_full, dump_batch_to_file
 from nanochat.dataloader import get_data_loader
 from nanochat.attn_masks import gen_mask
 from nanochat.group_tokenizer.token_map import get_token_map
@@ -107,7 +108,7 @@ def run_eval(
     compatibility_batches=None,
 ):
     """
-    Run PDLM Stage 2 evaluation.
+    Run PDLM evaluation (Stage 1 MASK or Stage 2).
 
     Args:
         model_tag: Model directory name
@@ -115,7 +116,7 @@ def run_eval(
         num_batches: Number of validation batches to evaluate
         device_type: Device type
         ckpt_dir: Direct path to checkpoint directory. If provided, overrides model_tag.
-        run_compatibility: Whether to run compatibility evaluation
+        run_compatibility: Whether to run compatibility evaluation (Stage 2 only)
         compatibility_batches: Number of batches for compatibility (default: num_batches // 4)
 
     Returns:
@@ -164,8 +165,21 @@ def run_eval(
     print0(f"Running evaluation: {num_batches} batches × {device_batch_size} seqs = {total_sequences} sequences")
     print0(f"  {blocks_per_seq} blocks/seq, {eval_blocks_per_seq} evaluated (skip block 0) = {total_eval_blocks:,} total blocks")
 
-    if run_compatibility:
-        print0(f"Running full evaluation with compatibility check...")
+    # Branch based on stage
+    if stage == "stage1_mask":
+        print0(f"Running Stage 1 MASK evaluation...")
+        eval_result = eval_pdlm_stage1_mask(
+            model=model,
+            val_loader=val_loader,
+            block_size=block_size,
+            num_batches=num_batches,
+            attn_mask=attn_mask,
+            device=device,
+            autocast_ctx=autocast_ctx,
+            prefix_pure_tokens=prefix_pure_tokens,
+        )
+    elif run_compatibility:
+        print0(f"Running Stage 2 full evaluation with compatibility check...")
         eval_result = eval_pdlm_full(
             model=model,
             val_loader=val_loader,
@@ -179,6 +193,7 @@ def run_eval(
             compatibility_batches=compatibility_batches,
         )
     else:
+        print0(f"Running Stage 2 evaluation...")
         eval_result = eval_pdlm(
             model=model,
             val_loader=val_loader,
@@ -190,28 +205,40 @@ def run_eval(
             prefix_pure_tokens=prefix_pure_tokens,
         )
 
+    # Add stage to result for print_results
+    eval_result["stage"] = stage
     return eval_result
 
 
 def print_results(eval_result, block_size):
     """Pretty print evaluation results."""
+    stage = eval_result.get("stage", "stage2")
+
     print0("\n" + "=" * 60)
-    print0("PDLM STAGE 2 EVALUATION RESULTS")
+    if stage == "stage1_mask":
+        print0("PDLM STAGE 1 MASK EVALUATION RESULTS")
+    else:
+        print0("PDLM STAGE 2 EVALUATION RESULTS")
     print0("=" * 60)
 
     # Overall metrics
     print0(f"\nOverall metrics:")
     print0(f"  loss: {eval_result['overall_loss']:.4f}")
     print0(f"  ppl:  {eval_result['overall_ppl']:.2f}")
+    if "overall_accuracy" in eval_result:
+        print0(f"  accuracy: {eval_result['overall_accuracy']:.2%}")
     print0(f"  tokens evaluated: {eval_result['num_tokens_evaluated']:,}")
 
     # Per-position metrics
     print0(f"\nPer-position metrics (within block):")
     for pos in range(block_size):
         pos_data = eval_result["positions"][pos]
-        print0(f"  pos {pos}: loss={pos_data['loss']:.4f}, ppl={pos_data['ppl']:.2f}, tokens={pos_data['tokens']:,}")
+        if "accuracy" in pos_data:
+            print0(f"  pos {pos}: loss={pos_data['loss']:.4f}, ppl={pos_data['ppl']:.2f}, accuracy={pos_data['accuracy']:.2%}, tokens={pos_data['tokens']:,}")
+        else:
+            print0(f"  pos {pos}: loss={pos_data['loss']:.4f}, ppl={pos_data['ppl']:.2f}, tokens={pos_data['tokens']:,}")
 
-    # Compatibility metrics (if present)
+    # Compatibility metrics (if present, Stage 2 only)
     if "compatibility" in eval_result:
         compat = eval_result["compatibility"]
         print0(f"\nCompatibility metrics:")
@@ -225,7 +252,7 @@ def print_results(eval_result, block_size):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Standalone PDLM Stage 2 evaluation")
+    parser = argparse.ArgumentParser(description="Standalone PDLM evaluation (Stage 1 MASK or Stage 2)")
     parser.add_argument("--model_tag", type=str, default=None, help="Model directory name (e.g., d8)")
     parser.add_argument("--ckpt_dir", type=str, default=None, help="Direct path to checkpoint directory (overrides model_tag)")
     parser.add_argument("--step", type=int, default=None, help="Checkpoint step (default: last)")

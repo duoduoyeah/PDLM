@@ -1,6 +1,8 @@
 01/28
 1. read flow matching stuff, read how they solve the token dependencies stuff.
 2. we need to later first specify the in-compatible issue, then think a way to solve it.
+3. eval for mtp-pdlm, and mask-pdlm, report seperate loss for two stages
+4. new stage-1 design that do not use mtp, do not use mask
 
 01/27
 1. new tokenizers [Done]
