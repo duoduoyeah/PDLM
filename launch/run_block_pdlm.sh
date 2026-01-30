@@ -29,6 +29,7 @@ DATA_RATIO="10"            # default 10 for test mode
 DEPTH="4"                  # model depth
 BLOCK_SIZE="4"             # bucket_size for block diffusion
 MTP_LOSS_WEIGHT="1.0"      # Stage 1 loss weight relative to Stage 2
+LOSS_WEIGHT_MODE="manual"  # "manual" or "fixed" - fixed computes weight from warmup batches
 DRIVE_OUTPUT_FOLDER=""     # subfolder under DRIVE_BASE for outputs (empty = save directly under DRIVE_BASE)
 
 # Common training arguments
@@ -65,6 +66,9 @@ for arg in "$@"; do
         --mtp_loss_weight=*)
             MTP_LOSS_WEIGHT="${arg#*=}"
             ;;
+        --loss_weight_mode=*)
+            LOSS_WEIGHT_MODE="${arg#*=}"
+            ;;
         --max_seq_len=*)
             MAX_SEQ_LEN="${arg#*=}"
             ;;
@@ -86,7 +90,7 @@ for arg in "$@"; do
         *)
             echo "Unknown argument: $arg"
             echo "Usage: bash launch/run_block_pdlm.sh [--noise_level=64] [--overlap_k=1] [--num_groups=64]"
-            echo "       [--depth=4] [--block_size=8] [--mtp_loss_weight=1.0]"
+            echo "       [--depth=4] [--block_size=8] [--mtp_loss_weight=1.0] [--loss_weight_mode=manual]"
             echo "       [--test_mode=true] [--data_ratio=10]"
             echo "       [--max_seq_len=512] [--device_batch_size=64]"
             echo "       [--drive_output_folder=<folder>]"
@@ -99,7 +103,8 @@ for arg in "$@"; do
             echo "  --overlap_k         How many groups each token appears in"
             echo "  --num_groups        Number of final groups"
             echo "  --block_size        Bucket size for block diffusion"
-            echo "  --mtp_loss_weight   Stage 1 loss weight relative to Stage 2"
+            echo "  --mtp_loss_weight   Stage 1 loss weight relative to Stage 2 (used when loss_weight_mode=manual)"
+            echo "  --loss_weight_mode  'manual' (use mtp_loss_weight) or 'fixed' (compute from warmup batches)"
             echo "  --drive_output_folder  Save outputs to subfolder under DRIVE_BASE"
             exit 1
             ;;
@@ -157,6 +162,7 @@ echo "=== Data ratio: ${DATA_RATIO} ==="
 echo "=== Depth: ${DEPTH} ==="
 echo "=== Block size (bucket): ${BLOCK_SIZE} ==="
 echo "=== MTP loss weight: ${MTP_LOSS_WEIGHT} ==="
+echo "=== Loss weight mode: ${LOSS_WEIGHT_MODE} ==="
 echo "=== Tokenizer: ${TOKENIZER_VARIANT} (noise=${NOISE_LEVEL}, overlap_k=${OVERLAP_K}, num_groups=${NUM_GROUPS}) ==="
 echo "=== Group tokenizer path: ${GROUP_TOKENIZER_PATH} ==="
 
@@ -230,6 +236,7 @@ python -m scripts.base_train \
     --depth=${DEPTH} \
     --block_size=${BLOCK_SIZE} \
     --mtp_loss_weight=${MTP_LOSS_WEIGHT} \
+    --loss_weight_mode=${LOSS_WEIGHT_MODE} \
     --max_seq_len=${MAX_SEQ_LEN} \
     --device_batch_size=${DEVICE_BATCH_SIZE} \
     --target_param_data_ratio=${DATA_RATIO} \

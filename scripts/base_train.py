@@ -49,6 +49,8 @@ bd3lm_compute_matched = True # If True, don't adjust iterations for BD3LM (compu
 mtp_loss_beta = 0.8 # MTP: exponential decay factor for loss weighting (β^k)
 n_future_tokens = 4 # MTP/both_mtp: number of future group tokens to predict (K)
 mtp_loss_weight = 1.0 # both_mtp: Stage 1 MTP loss weight relative to Stage 2
+loss_weight_mode = "manual" # "manual" or "fixed" - fixed computes weight from warmup batches
+loss_weight_warmup_steps = 10 # number of batches for estimating loss ratio (used when loss_weight_mode="fixed")
 # Debug
 debug = False
 # Training horizon. Only one of these 3 will be used, in this order of precedence.
@@ -382,6 +384,30 @@ if debug:
     debug_dir = os.path.join(os.getcwd(), "temp")
     os.makedirs(debug_dir, exist_ok=True)
     debug_dump_path = os.path.join(debug_dir, "pdlm_debug_xy.txt")
+
+# -----------------------------------------------------------------------------
+# Compute fixed loss weight if requested (for both_block stage)
+if model_type == "pdlm" and pdlm_stage == "both_block" and loss_weight_mode == "fixed":
+    print0(f"Computing fixed loss weight from {loss_weight_warmup_steps} warmup batches...")
+    total_s1, total_s2, count = 0.0, 0.0, 0
+
+    with torch.no_grad():
+        for _ in range(loss_weight_warmup_steps):
+            with autocast_ctx:
+                _, s1_loss, s2_loss = model(x, y, attn_mask=block_diff_masks[0],
+                                            loss_extras=loss_extras, return_separate_losses=True)
+            total_s1 += s1_loss.item()
+            total_s2 += s2_loss.item()
+            count += 1
+            x, y, loss_extras, dataloader_state_dict = next(train_loader)
+
+    avg_s1 = total_s1 / count
+    avg_s2 = total_s2 / count
+    computed_weight = avg_s2 / avg_s1
+    orig_model.config.mtp_loss_weight = computed_weight
+    print0(f"  Stage 1 avg loss: {avg_s1:.4f}")
+    print0(f"  Stage 2 avg loss: {avg_s2:.4f}")
+    print0(f"  Computed mtp_loss_weight: {computed_weight:.4f}")
 
 # -----------------------------------------------------------------------------
 # Set up hyperparameter schedulers

@@ -18,9 +18,10 @@ Stage 2: Group → Pure        (predict exact token given group hint)
 | Approach | Input | Output | Notes |
 |----------|-------|--------|-------|
 | MASK-based | `[prefix, MASK, MASK, ...]` | group tokens | Explicit position markers |
-| MTP-based | `[prefix]` | group tokens | Simpler, no MASK needed |
+| MTP-based | `[prefix]` | group tokens via MTP head | Simpler, no MASK needed |
+| Block-based | `[pure tokens]` | group tokens via lm_head | No extra head, block-causal mask |
 
-**Start with**: MTP-based (simpler architecture, no new vocab tokens needed).
+**Block-based approach**: Position k in block i predicts the group token at position k in block i+1. Uses block-causal attention (bidirectional within block, causal across blocks). Loss computed on blocks 1..N-1 (block 0 has no prior context). Simpler than MTP - reuses lm_head, no separate MTP head needed.
 
 ## Loss Weighting
 

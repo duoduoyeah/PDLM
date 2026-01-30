@@ -385,13 +385,13 @@ class PDLM(nn.Module):
                 group["initial_lr"] = group["lr"]
         return optimizers
 
-    def forward(self, idx, targets=None, kv_cache=None, attn_mask=None, loss_extras=None):
+    def forward(self, idx, targets=None, kv_cache=None, attn_mask=None, loss_extras=None, return_separate_losses=False):
         """Training: idx/targets are length L; we concat to 2L inside this and apply block mask."""
         # Dispatch to specialized forward methods for certain stages
         if self.config.stage == "stage1_block" and targets is not None:
             return self._forward_stage1_block(idx, targets, attn_mask, loss_extras)
         if self.config.stage == "both_block" and targets is not None:
-            return self._forward_both_block(idx, targets, attn_mask, loss_extras)
+            return self._forward_both_block(idx, targets, attn_mask, loss_extras, return_separate_losses)
         if self.config.stage == "both_mtp" and targets is not None:
             return self._forward_both_mtp(idx, targets, attn_mask, loss_extras)
 
@@ -629,7 +629,7 @@ class PDLM(nn.Module):
         )
         return loss
 
-    def _forward_both_block(self, idx, targets, attn_mask, loss_extras):
+    def _forward_both_block(self, idx, targets, attn_mask, loss_extras, return_separate_losses=False):
         """
         Forward pass for both_block stage: combines Stage 1 (block→block) and Stage 2 (denoising).
 
@@ -645,9 +645,11 @@ class PDLM(nn.Module):
             attn_mask: (2L, 2L) block diffusion attention mask
             loss_extras: dict with "loss_mask" (B, L), "block_targets" (B, L, overlap_k),
                          "block_loss_mask" (B, L)
+            return_separate_losses: if True, return (combined_loss, stage1_loss, stage2_loss)
 
         Returns:
             combined_loss: scalar loss = mtp_loss_weight * stage1_loss + stage2_loss
+            If return_separate_losses=True: (combined_loss, stage1_loss.detach(), stage2_loss.detach())
         """
         B, T = idx.size()
         assert attn_mask is not None, "Train should have attn mask"
@@ -701,6 +703,9 @@ class PDLM(nn.Module):
 
         # Combine losses
         combined_loss = self.config.mtp_loss_weight * stage1_loss + stage2_loss
+
+        if return_separate_losses:
+            return combined_loss, stage1_loss.detach(), stage2_loss.detach()
         return combined_loss
 
     def forward_for_eval(self, idx, targets, attn_mask):
