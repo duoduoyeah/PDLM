@@ -29,6 +29,7 @@ DATA_RATIO="10"         # default 10 for test mode
 DEPTH="4"               # model depth
 BLOCK_SIZE="4"          # n_future_tokens (K group tokens to predict)
 MTP_LOSS_BETA="0.8"     # exponential decay for loss weighting
+DRIVE_OUTPUT_FOLDER=""  # subfolder under DRIVE_BASE for outputs (empty = save directly under DRIVE_BASE)
 
 # Common training arguments
 MAX_SEQ_LEN="512"
@@ -79,14 +80,20 @@ for arg in "$@"; do
         --eval_num_batches_final=*)
             EVAL_NUM_BATCHES_FINAL="${arg#*=}"
             ;;
+        --drive_output_folder=*)
+            DRIVE_OUTPUT_FOLDER="${arg#*=}"
+            ;;
         *)
             echo "Unknown argument: $arg"
             echo "Usage: bash launch/run_mtp.sh [--noise_level=64] [--overlap_k=1] [--num_groups=64]"
             echo "       [--depth=4] [--block_size=4] [--test_mode=true] [--data_ratio=10]"
             echo "       [--mtp_loss_beta=0.8] [--max_seq_len=512] [--device_batch_size=128]"
+            echo "       [--eval_every=2500] [--drive_output_folder=<folder>]"
             echo ""
             echo "Tokenizer naming: n{noise}_k{overlap_k}_g{num_groups}"
             echo "Examples: n64_k1_g64, n1024_k7_g28, n1024_k55_g220"
+            echo ""
+            echo "Use --drive_output_folder to save outputs to a subfolder under DRIVE_BASE"
             exit 1
             ;;
     esac
@@ -139,6 +146,7 @@ export NANOCHAT_BASE_DIR="${LOCAL_TRAIN_BASE}/${MODEL_NAME}"
 echo "=== Running MTP Stage 1: ${MODEL_NAME} ==="
 echo "=== Local base dir: ${NANOCHAT_BASE_DIR} ==="
 echo "=== Drive base: ${DRIVE_BASE} ==="
+echo "=== Drive output folder: ${DRIVE_OUTPUT_FOLDER:-<root>} ==="
 echo "=== Test mode: ${TEST_MODE} ==="
 echo "=== Data ratio: ${DATA_RATIO} ==="
 echo "=== Depth: ${DEPTH} ==="
@@ -230,7 +238,11 @@ rm -rf "${NANOCHAT_BASE_DIR}/simple_story_data"
 rm -rf "${NANOCHAT_BASE_DIR}/tokenized_data"
 
 # Copy results to Drive for persistence
-DRIVE_OUTPUT_DIR="${DRIVE_BASE}/${MODEL_NAME}"
+if [ -n "${DRIVE_OUTPUT_FOLDER}" ]; then
+    DRIVE_OUTPUT_DIR="${DRIVE_BASE}/${DRIVE_OUTPUT_FOLDER}/${MODEL_NAME}"
+else
+    DRIVE_OUTPUT_DIR="${DRIVE_BASE}/${MODEL_NAME}"
+fi
 if [ -d "${DRIVE_OUTPUT_DIR}" ]; then
     if [ "${TEST_MODE}" = "true" ]; then
         echo "Test mode: Removing old Drive output dir ${DRIVE_OUTPUT_DIR}"
