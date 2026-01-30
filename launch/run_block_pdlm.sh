@@ -27,7 +27,7 @@ NUM_GROUPS="64"            # number of final groups
 TEST_MODE="true"
 DATA_RATIO="10"            # default 10 for test mode
 DEPTH="4"                  # model depth
-BLOCK_SIZE="8"             # bucket_size for block diffusion
+BLOCK_SIZE="4"             # bucket_size for block diffusion
 MTP_LOSS_WEIGHT="1.0"      # Stage 1 loss weight relative to Stage 2
 DRIVE_OUTPUT_FOLDER=""     # subfolder under DRIVE_BASE for outputs (empty = save directly under DRIVE_BASE)
 
