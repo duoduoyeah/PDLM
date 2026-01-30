@@ -54,7 +54,13 @@ def pdlm_data_loader(
     assert block_size >= 1, "block_size (bucket_size) must be >= 1"
     assert T % block_size == 0, f"T ({T}) must be divisible by block_size ({block_size})"
 
-    needed_tokens = B * T
+    # Compute needed_tokens based on stage (fetch extra tokens for shifted targets)
+    if stage in ("stage1_block", "both_block"):
+        needed_tokens = B * T + block_size
+    elif stage == "both_mtp":
+        needed_tokens = B * T + model_config.n_future_tokens
+    else:
+        needed_tokens = B * T
 
     token_buffer = create_token_buffer(
         split, resume_state_dict, tokenizer_threads, tokenizer_batch_size
@@ -68,8 +74,8 @@ def pdlm_data_loader(
     while True:
         tokens, pq_idx, rg_idx, epoch = token_buffer.get_tokens(needed_tokens)
 
-        targets_cpu = torch.tensor(tokens, dtype=torch.long, pin_memory=use_cuda)
-        targets_cpu = targets_cpu.view(B, T)
+        scratch = torch.tensor(tokens, dtype=torch.long, pin_memory=use_cuda)
+        targets_cpu = scratch[:B * T].view(B, T)
 
         if stage == "stage2":
             # Stage 2: Group → Pure denoising
@@ -184,7 +190,7 @@ def pdlm_data_loader(
             # Stage 1 Block: pure tokens in, predict group token at same position in next block
             # No MASK tokens, no 2L structure — just L pure tokens with block-causal mask.
             # group_targets[b, pos_in_block_i] = pure_to_group[pure_token_at_block_(i+1)_pos]
-            # loss_mask: True for blocks 1 through N-2 (skip block 0 = no context, skip last = no next block)
+            # loss_mask: True for blocks 1 through N-1 (skip block 0 = no prior block context)
 
             prefix_sliding_tokens = 0
             num_blocks = (T - prefix_sliding_tokens) // block_size
@@ -199,20 +205,13 @@ def pdlm_data_loader(
             # inputs: just pure tokens (clone of targets)
             inputs_cpu = targets_cpu.clone()
 
-            # group_targets: (B, T, overlap_k)
-            # For position p in block b, target = group of pure token at block (b+1) position p
-            group_targets = torch.full((B, T, overlap_k), -1, dtype=torch.long)
+            # group_targets: shifted view — position i predicts group of token at i + block_size
+            future_pure = scratch[block_size:B * T + block_size].view(B, T)
+            group_targets = pure_to_group[future_pure]  # (B, T, overlap_k)
 
-            # For blocks 0 through num_blocks-2, target is the token at same position in next block
-            for blk in range(num_blocks - 1):
-                src_start = block_start + (blk + 1) * block_size  # next block start
-                dst_start = block_start + blk * block_size         # current block start
-                next_block_pure = targets_cpu[:, src_start:src_start + block_size]  # (B, block_size)
-                group_targets[:, dst_start:dst_start + block_size, :] = pure_to_group[next_block_pure]
-
-            # loss_mask: skip block 0 (no prior context) and last block (no next block)
+            # loss_mask: skip block 0 (no prior block context)
             loss_mask = torch.zeros(B, T, dtype=torch.bool)
-            for blk in range(1, num_blocks - 1):
+            for blk in range(1, num_blocks):
                 blk_start = block_start + blk * block_size
                 loss_mask[:, blk_start:blk_start + block_size] = True
 
@@ -236,19 +235,7 @@ def pdlm_data_loader(
 
         elif stage == "both_mtp":
             # Both stages combined: Stage 1 (MTP) + Stage 2 (denoising)
-            # Need extra K tokens for MTP future targets
             K = model_config.n_future_tokens
-            needed_tokens_both = B * T + K
-
-            # Re-fetch with extra tokens if needed
-            if needed_tokens != needed_tokens_both:
-                tokens, pq_idx, rg_idx, epoch = token_buffer.get_tokens(needed_tokens_both)
-
-            # Use a scratch buffer for creating shifted views
-            scratch = torch.tensor(tokens, dtype=torch.long, pin_memory=use_cuda)
-
-            # targets (x0): pure tokens - shape (B, T)
-            targets_cpu = scratch[:B * T].view(B, T)
 
             # Create inputs (xt): group tokens at block positions
             prefix_sliding_tokens = 0
@@ -311,7 +298,6 @@ def pdlm_data_loader(
         elif stage == "both_block":
             # Both stages combined: Stage 1 (block→block) + Stage 2 (denoising)
             # Same 2L structure as both_mtp, but Stage 1 uses block→block on x0 instead of MTP head.
-            # No extra tokens needed (unlike both_mtp which fetches B*T+K).
 
             prefix_sliding_tokens = 0
             num_blocks = (T - prefix_sliding_tokens) // block_size
@@ -347,17 +333,13 @@ def pdlm_data_loader(
                 loss_mask[:, :prefix_pure_tokens] = False
 
             # === Stage 1 side: block→block targets on x0 half ===
-            # block_targets: (B, T, overlap_k) — same construction as stage1_block
-            block_targets = torch.full((B, T, overlap_k), -1, dtype=torch.long)
-            for blk in range(num_blocks - 1):
-                src_start = block_start + (blk + 1) * block_size
-                dst_start = block_start + blk * block_size
-                next_block_pure = targets_cpu[:, src_start:src_start + block_size]
-                block_targets[:, dst_start:dst_start + block_size, :] = pure_to_group[next_block_pure]
+            # Shifted view: position i predicts group of token at i + block_size
+            future_pure = scratch[block_size:B * T + block_size].view(B, T)
+            block_targets = pure_to_group[future_pure]  # (B, T, overlap_k)
 
-            # block_loss_mask: skip block 0 (no context) and last block (no next block)
+            # block_loss_mask: skip block 0 (no prior block context)
             block_loss_mask = torch.zeros(B, T, dtype=torch.bool)
-            for blk in range(1, num_blocks - 1):
+            for blk in range(1, num_blocks):
                 blk_start = block_start + blk * block_size
                 block_loss_mask[:, blk_start:blk_start + block_size] = True
             if prefix_pure_tokens > 0:

@@ -460,7 +460,7 @@ class PDLM(nn.Module):
                 target_log_probs = torch.gather(log_probs, dim=-1, index=targets.unsqueeze(-1))
                 nll = -target_log_probs.squeeze(-1)  # (B, T)
                 # Apply mask and compute mean
-                loss = (nll * loss_mask).sum() / loss_mask.sum()
+                loss = (nll * loss_mask).sum() / loss_mask.sum().clamp(min=1)
             else:
                 # Legacy mode: use ignore_index for prefix_pure_tokens
                 loss_targets = targets
@@ -534,7 +534,7 @@ class PDLM(nn.Module):
         log_probs = F.log_softmax(stage2_logits, dim=-1)
         target_log_probs = torch.gather(log_probs, dim=-1, index=targets.unsqueeze(-1))
         nll = -target_log_probs.squeeze(-1)  # (B, T)
-        stage2_loss = (nll * loss_mask).sum() / loss_mask.sum()
+        stage2_loss = (nll * loss_mask).sum() / loss_mask.sum().clamp(min=1)
 
         # Stage 1 Loss: Pure → Group MTP (second L positions, group vocab logits)
         # Main model's group logits for first token prediction
@@ -684,7 +684,7 @@ class PDLM(nn.Module):
         log_probs = F.log_softmax(stage2_logits, dim=-1)
         target_log_probs = torch.gather(log_probs, dim=-1, index=targets.unsqueeze(-1))
         nll = -target_log_probs.squeeze(-1)  # (B, T)
-        stage2_loss = (nll * loss_mask).sum() / loss_mask.sum()
+        stage2_loss = (nll * loss_mask).sum() / loss_mask.sum().clamp(min=1)
 
         # Stage 1 Loss: block->block on x0 half (second L positions, group logits)
         group_logits = logits[:, T:, pure_vocab_size:]  # (B, T, num_groups)
