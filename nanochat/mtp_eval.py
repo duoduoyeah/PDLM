@@ -320,3 +320,199 @@ def _build_result(stats_by_pos, stats_by_group, K, num_groups):
         }
 
     return result
+
+
+def dump_mtp_batch(
+    model,
+    val_loader,
+    device,
+    autocast_ctx,
+    output_path,
+    tokenizer_dir=None,
+    num_sequences=5,
+    num_positions_to_show=8,
+    start_pos=5,
+):
+    """
+    Dump MTP predictions showing K future predictions per position.
+
+    For each position shows predictions for k=0..K-1 with:
+    - Predicted pure token (argmax of pure logits)
+    - Predicted group (argmax after collapse to groups)
+    - True pure token
+    - Match status (PURE, GROUP, or WRONG)
+
+    Args:
+        model: GPTMTP model (pure mode)
+        val_loader: validation data loader
+        device: device
+        autocast_ctx: autocast context
+        output_path: path to write txt file
+        tokenizer_dir: path to tokenizer dir (default: uses get_base_dir())
+        num_sequences: number of sequences to dump (default: 5)
+        num_positions_to_show: number of positions to show per sequence (default: 8)
+        start_pos: starting position index for display (default: 5)
+    """
+    from nanochat.group_tokenizer.dump import load_tokenizer
+
+    was_training = model.training
+    model.eval()
+
+    K = model.config.n_future_tokens
+    target_mode = getattr(model.config, "stage1_target_mode", "group")
+    assert target_mode == "pure", f"dump_mtp_batch only supports pure mode, got {target_mode}"
+
+    # Load tokenizer for decoding
+    if tokenizer_dir is None:
+        import os
+        from nanochat.common import get_base_dir
+        tokenizer_dir = os.path.join(get_base_dir(), "tokenizer")
+
+    tokenizer = load_tokenizer(tokenizer_dir)
+
+    # Get group mask from model
+    group_to_pure_mask = model.group_to_pure_mask  # (num_groups, pure_vocab)
+
+    def fmt_pure(tid):
+        if tokenizer:
+            try:
+                return repr(tokenizer.decode([tid]))
+            except Exception:
+                return f"[{tid}]"
+        return f"[{tid}]"
+
+    with torch.no_grad():
+        inputs, targets, loss_extras, _ = next(val_loader)
+        # inputs: (B, T) pure tokens
+        # targets: (B, T, K) pure token IDs (pure mode)
+
+        B, T = inputs.shape
+        pure_to_group = loss_extras.get("pure_to_group", None)
+        assert pure_to_group is not None, "pure_to_group required for MTP dump"
+
+        overlap_k = pure_to_group.size(-1)
+        num_sequences = min(num_sequences, B)
+
+        # Clamp positions to valid range (need start_pos + num_positions_to_show + K - 1 < T)
+        max_start = T - K - num_positions_to_show
+        if start_pos > max_start:
+            start_pos = max(0, max_start)
+        end_pos = min(start_pos + num_positions_to_show, T - K)
+
+        with autocast_ctx:
+            # Forward pass
+            main_logits, mtp_logits = model.forward_for_eval(
+                inputs, targets, pure_to_group=pure_to_group
+            )
+            # main_logits: (B, T, pure_vocab_size) for k=0
+            # mtp_logits: (B, T, K-1, pure_vocab_size) for k=1..K-1
+
+            # Stack into (B, T, K, V)
+            all_logits = torch.cat([
+                main_logits.unsqueeze(2),  # (B, T, 1, V)
+                mtp_logits,                # (B, T, K-1, V)
+            ], dim=2)  # (B, T, K, V)
+
+            # Pure predictions: argmax over pure vocab
+            pred_pure = all_logits.argmax(dim=-1)  # (B, T, K)
+
+            # Group predictions: collapse logits via group_to_pure_mask
+            # group_to_pure_mask: (num_groups, pure_vocab) -> transpose to (pure_vocab, num_groups)
+            group_logits = all_logits @ group_to_pure_mask.T  # (B, T, K, num_groups)
+            pred_groups = group_logits.argmax(dim=-1)  # (B, T, K)
+
+    # Write output
+    with open(output_path, "w") as f:
+        f.write("=" * 80 + "\n")
+        f.write("MTP STAGE 1 DUMP - Multi-Token Predictions\n")
+        f.write("=" * 80 + "\n\n")
+        f.write(f"Sequence length: {T}, K: {K}, Target mode: {target_mode}\n")
+        f.write(f"Overlap_k: {overlap_k}\n")
+        f.write(f"Showing {num_sequences} sequences, {end_pos - start_pos} positions each\n\n")
+
+        # Column widths
+        k_w = 3
+        pred_pure_w = 20
+        pred_group_w = 10
+        true_pure_w = 20
+        status_w = 10
+
+        for b in range(num_sequences):
+            f.write("=" * 80 + "\n")
+            f.write(f"=== SEQUENCE {b} ===\n")
+            f.write("=" * 80 + "\n\n")
+
+            # Show input tokens around the positions we'll display
+            show_start = max(0, start_pos - 2)
+            show_end = min(T, end_pos + K + 2)
+            input_tokens = [fmt_pure(inputs[b, i].item()) for i in range(show_start, show_end)]
+            f.write(f"Input: {' '.join(input_tokens)}\n\n")
+
+            for pos in range(start_pos, end_pos):
+                input_str = fmt_pure(inputs[b, pos].item())
+                target_end = pos + K
+                f.write(f"--- POSITION {pos} (input: {input_str}) → predicts tokens {pos + 1}-{target_end} ---\n")
+
+                # Header
+                header = (
+                    f"{'k':>{k_w}} | "
+                    f"{'Pred Pure':<{pred_pure_w}} | "
+                    f"{'Pred Grp':<{pred_group_w}} | "
+                    f"{'True Pure':<{true_pure_w}} | "
+                    f"{'Status':<{status_w}}"
+                )
+                f.write("  " + header + "\n")
+
+                # Stats for this position
+                pure_matches = 0
+                group_matches = 0
+                wrong = 0
+
+                for k in range(K):
+                    # Predicted pure token
+                    pred_pure_tid = pred_pure[b, pos, k].item()
+                    pred_pure_str = fmt_pure(pred_pure_tid)
+
+                    # Predicted group
+                    pred_group_id = pred_groups[b, pos, k].item()
+                    pred_group_str = f"G{pred_group_id}"
+
+                    # True pure token: targets[b, pos, k]
+                    true_pure_tid = targets[b, pos, k].item()
+                    true_pure_str = fmt_pure(true_pure_tid)
+
+                    # True groups for this target token
+                    true_group_ids = pure_to_group[true_pure_tid]  # (overlap_k,)
+                    valid_mask = true_group_ids >= 0
+
+                    # Determine match status
+                    if pred_pure_tid == true_pure_tid:
+                        status = "PURE"
+                        pure_matches += 1
+                    elif valid_mask.any() and (true_group_ids[valid_mask] == pred_group_id).any():
+                        status = "GROUP"
+                        group_matches += 1
+                    else:
+                        status = "WRONG"
+                        wrong += 1
+
+                    row = (
+                        f"{k:>{k_w}} | "
+                        f"{pred_pure_str:<{pred_pure_w}} | "
+                        f"{pred_group_str:<{pred_group_w}} | "
+                        f"{true_pure_str:<{true_pure_w}} | "
+                        f"{status:<{status_w}}"
+                    )
+                    f.write("  " + row + "\n")
+
+                f.write(f"\nPosition {pos} summary: ")
+                f.write(f"Pure={pure_matches}/{K} ")
+                f.write(f"Group={group_matches}/{K} ")
+                f.write(f"Wrong={wrong}/{K}\n\n")
+
+            f.write("\n")
+
+    if was_training:
+        model.train()
+
+    print(f"Dumped {num_sequences} sequences to {output_path}")

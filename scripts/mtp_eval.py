@@ -19,7 +19,7 @@ import torch
 from nanochat.common import compute_init, autodetect_device_type, get_base_dir, print0
 from nanochat.checkpoint_manager import load_checkpoint, find_last_step, find_largest_model
 from nanochat.gpt_mtp import GPTMTP, GPTMTPConfig
-from nanochat.mtp_eval import eval_mtp
+from nanochat.mtp_eval import eval_mtp, dump_mtp_batch
 from nanochat.dataloader import get_data_loader
 from nanochat.group_tokenizer.token_map import get_token_map
 
@@ -217,7 +217,34 @@ def main():
     parser.add_argument("--num_batches", type=int, default=20, help="Number of validation batches")
     parser.add_argument("--device", type=str, default="auto", help="Device type (cuda/cpu/mps/auto)")
     parser.add_argument("--output_json", type=str, default=None, help="Optional: save results to JSON file")
+    parser.add_argument("--dump_mtp", type=str, default=None, help="Dump MTP predictions to file (path to output txt)")
+    parser.add_argument("--dump_sequences", type=int, default=5, help="Number of sequences to dump (default: 5)")
     args = parser.parse_args()
+
+    # Handle dump_mtp mode (separate from normal eval)
+    if args.dump_mtp:
+        model, meta_data, device, autocast_ctx, model_config = load_mtp_model(
+            args.model_tag, args.step, args.device, ckpt_dir=args.ckpt_dir
+        )
+        model_config_dict = meta_data["model_config"]
+        user_config = meta_data.get("user_config", {})
+        max_seq_len = model_config_dict["sequence_len"]
+        device_batch_size = user_config.get("device_batch_size", 32)
+
+        val_loader = get_data_loader(
+            device_batch_size, max_seq_len, split="val", device=device,
+            model_config=model_config, resume_state_dict=None,
+        )
+
+        dump_mtp_batch(
+            model=model,
+            val_loader=val_loader,
+            device=device,
+            autocast_ctx=autocast_ctx,
+            output_path=args.dump_mtp,
+            num_sequences=args.dump_sequences,
+        )
+        return
 
     # Run evaluation
     eval_result = run_eval(
