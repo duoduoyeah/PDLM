@@ -1,0 +1,24 @@
+"""PDLM Evaluation Module - supports stage1_mask, stage1_block, stage2, both_block."""
+
+from nanochat.pdlm_eval.stage1_mask import eval_pdlm_stage1_mask
+from nanochat.pdlm_eval.stage1_block import eval_pdlm_stage1_block, dump_stage1_block_batch
+from nanochat.pdlm_eval.stage2 import (
+    eval_pdlm,
+    eval_pdlm_compatibility,
+    eval_pdlm_oracle_accuracy,
+    eval_pdlm_full,
+)
+from nanochat.pdlm_eval.both_block import eval_pdlm_both_block
+from nanochat.pdlm_eval.dump import dump_batch_to_file
+
+__all__ = [
+    "eval_pdlm_stage1_mask",
+    "eval_pdlm_stage1_block",
+    "eval_pdlm",
+    "eval_pdlm_compatibility",
+    "eval_pdlm_oracle_accuracy",
+    "eval_pdlm_full",
+    "eval_pdlm_both_block",
+    "dump_batch_to_file",
+    "dump_stage1_block_batch",
+]

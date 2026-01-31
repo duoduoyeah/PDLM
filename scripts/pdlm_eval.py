@@ -23,7 +23,7 @@ import torch
 from nanochat.common import compute_init, autodetect_device_type, get_base_dir, print0
 from nanochat.checkpoint_manager import load_checkpoint, find_last_step, find_largest_model
 from nanochat.pdlm import PDLM, PDLMConfig
-from nanochat.pdlm_eval import eval_pdlm, eval_pdlm_stage1_mask, eval_pdlm_stage1_block, eval_pdlm_compatibility, eval_pdlm_full, eval_pdlm_both_block, dump_batch_to_file
+from nanochat.pdlm_eval import eval_pdlm, eval_pdlm_stage1_mask, eval_pdlm_stage1_block, eval_pdlm_compatibility, eval_pdlm_full, eval_pdlm_both_block, dump_batch_to_file, dump_stage1_block_batch
 from nanochat.dataloader import get_data_loader
 from nanochat.attn_masks import gen_mask, gen_block_causal_mask
 from nanochat.group_tokenizer.token_map import get_token_map
@@ -370,6 +370,8 @@ def main():
     parser.add_argument("--no_oracle_accuracy", action="store_true", help="Disable oracle accuracy even when running compatibility")
     parser.add_argument("--oracle_accuracy_batches", type=int, default=None, help="Number of batches for oracle accuracy (default: num_batches // 4)")
     parser.add_argument("--dump_batch", type=str, default=None, help="Dump one batch to file for debugging (path to output txt)")
+    parser.add_argument("--dump_stage1_block", type=str, default=None, help="Dump stage1_block predictions to file (path to output txt)")
+    parser.add_argument("--dump_sequences", type=int, default=10, help="Number of sequences to dump (default: 10)")
     args = parser.parse_args()
 
     # Handle dump_batch mode (separate from normal eval)
@@ -397,6 +399,39 @@ def main():
             model=model, val_loader=val_loader, block_size=block_size,
             attn_mask=attn_mask, device=device, autocast_ctx=autocast_ctx,
             output_path=args.dump_batch,
+        )
+        return
+
+    # Handle dump_stage1_block mode (separate from normal eval)
+    if args.dump_stage1_block:
+        model, meta_data, device, autocast_ctx, model_config = load_pdlm_model(
+            args.model_tag, args.step, args.device, ckpt_dir=args.ckpt_dir
+        )
+        model_config_dict = meta_data["model_config"]
+        user_config = meta_data.get("user_config", {})
+        max_seq_len = model_config_dict["sequence_len"]
+        block_size = model_config_dict.get("bucket_size", user_config.get("block_size", 4))
+        is_causal = model_config_dict.get("is_causal", True)
+        device_batch_size = user_config.get("device_batch_size", 32)
+        stage = model_config_dict.get("stage", "stage2")
+
+        if stage != "stage1_block":
+            print0(f"Warning: Model stage is {stage}, not stage1_block. Dump may not work correctly.")
+
+        val_loader = get_data_loader(
+            device_batch_size, max_seq_len, split="val", device=device,
+            model_config=model_config, resume_state_dict=None,
+        )
+        # stage1_block uses L×L block-causal mask
+        attn_mask = gen_block_causal_mask(
+            max_seq_len, block_size, attn_backend="sdpa", is_causal=is_causal
+        ).to(device=device)
+
+        dump_stage1_block_batch(
+            model=model, val_loader=val_loader, block_size=block_size,
+            attn_mask=attn_mask, device=device, autocast_ctx=autocast_ctx,
+            output_path=args.dump_stage1_block,
+            num_sequences=args.dump_sequences,
         )
         return
 

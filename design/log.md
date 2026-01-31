@@ -1,3 +1,6 @@
+01/31
+1. I guess make the group level almost equal by adjust the overlap and sub-group level?-> new tokenizer, run new exp_c model 
+
 01/28
 1. read flow matching stuff, read how they solve the token dependencies stuff.
 2. we need to later first specify the in-compatible issue, then think a way to solve it.
@@ -5,7 +8,10 @@
 4. new stage-1 design that do not use mtp, do not use mask
 5. design eval/chat stuff for end2end model
 6. continue analyze the result from experiment_d, task new method and mask method 
-7. I feel our method has advatage compared to fast-mtp: we use indenpdent input x so the input-output is one2one; compared with apple-mtp, mask is inefficient, in train and this mask token is meaningless and lead to extra-cost when inference;
+7. I feel our method has advatage compared to fast-mtp: we use 
+indenpdent input x so the input-output is one2one; compared with apple-mtp, mask is inefficient, in train and this mask token is meaningless and lead to extra-cost when inference;
+
+8. when we compare expertiment_c with the normal gpt, remember we need to give a weight for gpt to make it loss smaller since stage-2 pdlm only need to do the loss stuff on a partial of vocab; also we need to make sure the stage-2 pdlm also adjust its weight
 
 01/27
 1. new tokenizers [Done]
