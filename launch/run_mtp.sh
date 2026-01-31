@@ -27,8 +27,9 @@ NUM_GROUPS="64"         # number of final groups
 TEST_MODE="true"
 DATA_RATIO="10"         # default 10 for test mode
 DEPTH="4"               # model depth
-BLOCK_SIZE="4"          # n_future_tokens (K group tokens to predict)
+BLOCK_SIZE="4"          # n_future_tokens (K tokens to predict)
 MTP_LOSS_BETA="0.8"     # exponential decay for loss weighting
+STAGE1_TARGET_MODE="pure"  # "pure" (default) or "group" (legacy)
 DRIVE_OUTPUT_FOLDER=""  # subfolder under DRIVE_BASE for outputs (empty = save directly under DRIVE_BASE)
 
 # Common training arguments
@@ -65,6 +66,9 @@ for arg in "$@"; do
         --mtp_loss_beta=*)
             MTP_LOSS_BETA="${arg#*=}"
             ;;
+        --stage1_target_mode=*)
+            STAGE1_TARGET_MODE="${arg#*=}"
+            ;;
         --max_seq_len=*)
             MAX_SEQ_LEN="${arg#*=}"
             ;;
@@ -87,8 +91,8 @@ for arg in "$@"; do
             echo "Unknown argument: $arg"
             echo "Usage: bash launch/run_mtp.sh [--noise_level=64] [--overlap_k=1] [--num_groups=64]"
             echo "       [--depth=4] [--block_size=4] [--test_mode=true] [--data_ratio=10]"
-            echo "       [--mtp_loss_beta=0.8] [--max_seq_len=512] [--device_batch_size=128]"
-            echo "       [--eval_every=2500] [--drive_output_folder=<folder>]"
+            echo "       [--mtp_loss_beta=0.8] [--stage1_target_mode=pure] [--max_seq_len=512]"
+            echo "       [--device_batch_size=128] [--eval_every=2500] [--drive_output_folder=<folder>]"
             echo ""
             echo "Tokenizer naming: n{noise}_k{overlap_k}_g{num_groups}"
             echo "Examples: n64_k1_g64, n1024_k7_g28, n1024_k55_g220"
@@ -152,6 +156,7 @@ echo "=== Data ratio: ${DATA_RATIO} ==="
 echo "=== Depth: ${DEPTH} ==="
 echo "=== Block size (K): ${BLOCK_SIZE} ==="
 echo "=== MTP loss beta: ${MTP_LOSS_BETA} ==="
+echo "=== Stage 1 target mode: ${STAGE1_TARGET_MODE} ==="
 echo "=== Tokenizer: ${TOKENIZER_VARIANT} (noise=${NOISE_LEVEL}, overlap_k=${OVERLAP_K}, num_groups=${NUM_GROUPS}) ==="
 echo "=== Group tokenizer path: ${GROUP_TOKENIZER_PATH} ==="
 
@@ -220,6 +225,7 @@ python -m scripts.base_train \
     --depth=${DEPTH} \
     --block_size=${BLOCK_SIZE} \
     --mtp_loss_beta=${MTP_LOSS_BETA} \
+    --stage1_target_mode=${STAGE1_TARGET_MODE} \
     --max_seq_len=${MAX_SEQ_LEN} \
     --device_batch_size=${DEVICE_BATCH_SIZE} \
     --target_param_data_ratio=${DATA_RATIO} \

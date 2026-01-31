@@ -9,9 +9,9 @@ Block-PDLM is an autoregressive language generation model that generates text bl
 ```
 Input:  [xt (group tokens) | x0 (pure tokens)]
          ↓                   ↓
-Stage 2: Group → Pure       Stage 1: Block → Block (predict next block's groups)
+Stage 2: Group → Pure       Stage 1: Block → Block (predict next block's tokens/groups)
          ↓                   ↓
-Output:  pure vocab logits   group vocab logits
+Output:  pure vocab logits   pure/group vocab logits (mode-dependent)
 ```
 
 ## Training
@@ -23,8 +23,31 @@ Output:  pure vocab logits   group vocab logits
 combined_loss = mtp_loss_weight * stage1_loss + stage2_loss
 ```
 
-- Stage 1: any-correct CE loss on group targets (blocks 1..N-1)
-- Stage 2: CE loss on pure targets (all block positions)
+### Stage 1 Target Modes
+
+**Pure-target mode (default):**
+- `lm_head` shape: `(pure_vocab_size, n_embd)` - full pure vocabulary
+- Stage 1 loss: CE against **pure token targets** (blocks 1..N-1)
+- At inference: pre-compute `group_head = group_to_pure_mask @ lm_head.weight` to predict groups
+
+**Group-target mode (legacy, `--stage1_target_mode=group`):**
+- `lm_head` shape: `(num_groups, n_embd)` - group vocabulary only
+- Stage 1 loss: any-correct CE against **group token targets** (blocks 1..N-1)
+
+### Stage 2
+
+- Stage 2 loss: CE against pure token targets (all block positions)
+
+### Why Pure-Target Mode?
+
+The key insight is that **Stage 2 acts as error correction**. Even if Stage 1 doesn't perfectly predict the next token, as long as it assigns high probability to tokens within the correct group, Stage 2 can recover.
+
+When we collapse pure logits to group logits via `group_to_pure_mask @ lm_head.weight`:
+- The group with highest summed member logits wins
+- A "near miss" (high prob on wrong token but same group) still leads to correct group prediction
+- Stage 2 then refines within the group
+
+This makes the two-stage pipeline more robust than requiring Stage 1 to directly predict coarse groups perfectly.
 
 ## Generation
 
@@ -34,11 +57,9 @@ Two steps per block:
 
 ## Open Questions
 
-**Q: lm_head outputs both pure and group logits - how does the model ensure xt positions only produce pure logits and x0 positions only produce group logits?**
-
 **Loss combination:** Two standard approaches exist - (1) **Joint**: sum losses and backprop once, (2) **Alternating**: backprop each loss separately with separate updates. Current implementation uses joint.
 
-**Loss weighting problem:** Stage 1 (Pure→Group) has lower loss (~0.3) than Stage 2 (Group→Pure, ~1.5) due to different target space sizes. With w1=1, Stage 2 dominates gradients (~83%). Options from multi-task learning:
+**Loss weighting problem:** With pure-target mode, both Stage 1 and Stage 2 now predict pure tokens, so their loss magnitudes are similar. The `mtp_loss_weight` parameter still allows tuning if needed. Options from multi-task learning:
 - **DWA (Dynamic Weight Average)**: Adjust weights based on loss rate-of-change, prioritizes slower-converging tasks. Simple, low cost.
 - **Uncertainty Weighting**: Learn σ per task, `L = L1/σ1² + L2/σ2² + log(σ1) + log(σ2)`. Principled, auto-balances.
 - **GradNorm**: Directly balance gradient magnitudes across tasks. Medium cost.

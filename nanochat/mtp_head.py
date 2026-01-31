@@ -93,22 +93,24 @@ class MTPHead(nn.Module):
     """
     Multi-token prediction head for Stage 1 MTP.
 
-    Predicts K-1 additional group tokens (2nd..Kth) given:
+    Predicts K-1 additional tokens (2nd..Kth) given:
     - Hidden states h from main model
-    - 1st group token prediction from main model's lm_head
+    - 1st token prediction from main model's lm_head
 
     Args:
         n_embd: embedding dimension
         n_head: number of attention heads
         n_future_tokens: K, total number of tokens to predict (head predicts K-1)
-        group_wte: embedding layer for group tokens
-        lm_head: shared output head (outputs num_groups logits)
+        group_wte: embedding layer for group tokens (used for teacher forcing)
+        lm_head: shared output head (outputs V logits, where V depends on target mode)
+        stage1_target_mode: "pure" or "group" - determines loss computation
     """
-    def __init__(self, n_embd, n_head, n_future_tokens, group_wte, lm_head):
+    def __init__(self, n_embd, n_head, n_future_tokens, group_wte, lm_head, stage1_target_mode="pure"):
         super().__init__()
         self.n_future_tokens = n_future_tokens
-        self.group_wte = group_wte  # shared, not owned
+        self.group_wte = group_wte  # shared, not owned (always used for teacher forcing)
         self.lm_head = lm_head  # shared, not owned
+        self.stage1_target_mode = stage1_target_mode
 
         # Projection to combine hidden state + token embedding
         # DeepSeek style: concat + project
@@ -124,30 +126,38 @@ class MTPHead(nn.Module):
         nn.init.zeros_(self.block.attn.c_proj.weight)
         nn.init.zeros_(self.block.mlp.c_proj.weight)
 
-    def forward(self, h, cos, sin, first_group_tok, targets=None):
+    def forward(self, h, cos, sin, first_group_tok, targets=None, pure_to_group=None):
         """
         Forward pass for MTP head.
+
+        Teacher forcing always uses group embeddings (group_wte). In pure mode,
+        if using autoregressive (targets=None), predictions are converted to
+        group tokens via pure_to_group for the next iteration.
 
         Args:
             h: hidden states from main model, shape (B, T, D)
             cos, sin: rotary embeddings from main model
-            first_group_tok: (B, T) first group token (from main model prediction or target)
-            targets: ground truth group tokens for teacher forcing, shape (B, T, K-1) or None
+            first_group_tok: (B, T) first group token index (already converted from pure if needed)
+            targets: ground truth GROUP tokens for teacher forcing, shape (B, T, K-1) or None.
+                     In pure mode, caller should convert pure targets to group tokens first.
+            pure_to_group: (pure_vocab_size, overlap_k) mapping for autoregressive in pure mode.
+                           Only used when targets=None and stage1_target_mode="pure".
 
         Returns:
-            all_logits: (B, T, K-1, num_groups) logits for 2nd..Kth group tokens
+            all_logits: (B, T, K-1, V) logits for 2nd..Kth tokens
+                        V = pure_vocab_size in pure mode, num_groups in group mode
         """
         B, T, D = h.shape
         K = self.n_future_tokens
         all_logits = []
 
         prev_h = h  # start from main model's final hidden state
-        prev_tok = first_group_tok  # first group token
+        prev_group_tok = first_group_tok  # group token index for embedding lookup
 
         # Predict K-1 additional tokens (2nd through Kth)
         for k in range(K - 1):
-            # Get token embedding for previous prediction
-            tok_emb = self.group_wte(prev_tok)  # (B, T, D)
+            # Get token embedding for previous prediction (always group embedding)
+            tok_emb = self.group_wte(prev_group_tok)  # (B, T, D)
 
             # Combine: [norm(h), norm(embed)] -> project
             combined = torch.cat([norm(prev_h), norm(tok_emb)], dim=-1)  # (B, T, 2D)
@@ -158,62 +168,102 @@ class MTPHead(nn.Module):
             prev_h = norm(prev_h)
 
             # Compute logits
-            logits = self.lm_head(prev_h)  # (B, T, num_groups)
+            logits = self.lm_head(prev_h)  # (B, T, V)
             all_logits.append(logits)
 
-            # Get next token for next iteration
+            # Get next group token for next iteration
             if targets is not None:
-                # Teacher forcing: use ground truth
-                prev_tok = targets[:, :, k]  # (B, T)
+                # Teacher forcing: use ground truth (already group tokens)
+                prev_group_tok = targets[:, :, k]  # (B, T)
             else:
                 # Autoregressive: use prediction
-                prev_tok = logits.argmax(dim=-1)  # (B, T)
+                if self.stage1_target_mode == "pure":
+                    # In pure mode, logits are over pure vocab
+                    # Convert predicted pure token to group token
+                    pred_pure = logits.argmax(dim=-1)  # (B, T)
+                    assert pure_to_group is not None, "pure_to_group required for autoregressive pure mode"
+                    pred_groups = pure_to_group[pred_pure]  # (B, T, overlap_k)
+                    prev_group_tok = pred_groups[:, :, 0]  # (B, T) use first group
+                else:
+                    # In group mode, logits are over group vocab
+                    prev_group_tok = logits.argmax(dim=-1)  # (B, T)
 
-        return torch.stack(all_logits, dim=2)  # (B, T, K-1, num_groups)
+        return torch.stack(all_logits, dim=2)  # (B, T, K-1, V)
 
 
-def compute_mtp_loss(main_logits, mtp_logits, targets, loss_weights=None, mtp_loss_beta=0.8):
+def compute_mtp_loss(main_logits, mtp_logits, targets, loss_weights=None,
+                     mtp_loss_beta=0.8, stage1_target_mode="pure"):
     """
     Compute combined MTP loss with exponential decay weights.
 
-    When overlap_k > 1, uses any-correct loss where predicting ANY valid
-    group is considered correct.
+    In pure mode: standard cross-entropy loss against pure token targets.
+    In group mode: any-correct loss where predicting ANY valid group is correct.
 
     Args:
-        main_logits: (B, T, num_groups) logits from main model for 1st token
-        mtp_logits: (B, T, K-1, num_groups) logits from MTP head for 2nd..Kth tokens
-        targets: (B, T, K, overlap_k) ground truth group token ids with all valid groups
+        main_logits: (B, T, V) logits from main model for 1st token
+        mtp_logits: (B, T, K-1, V) logits from MTP head for 2nd..Kth tokens
+        targets: Target format depends on stage1_target_mode:
+                 - pure mode: (B, T, K) pure token ids
+                 - group mode: (B, T, K, overlap_k) group token ids with all valid groups
         loss_weights: optional (K,) weights, default exponential decay
         mtp_loss_beta: decay factor for exponential weights
+        stage1_target_mode: "pure" or "group"
 
     Returns:
         loss: scalar combined loss
     """
-    B, T, K, overlap_k = targets.shape
     V = main_logits.shape[-1]
+
+    if stage1_target_mode == "pure":
+        # Pure mode: targets are (B, T, K) pure token ids
+        B, T, K = targets.shape
+    else:
+        # Group mode: targets are (B, T, K, overlap_k) group token ids
+        B, T, K, overlap_k = targets.shape
 
     if loss_weights is None:
         loss_weights = exponential_decay_weights(K, mtp_loss_beta, device=main_logits.device)
 
     total_loss = 0.0
 
-    # Loss for 1st token (from main model)
-    step_targets = targets[:, :, 0, :]  # (B, T, overlap_k)
-    step_loss = any_correct_ce_loss(
-        main_logits.reshape(-1, V),
-        step_targets.reshape(-1, overlap_k)
-    )
-    total_loss = total_loss + loss_weights[0] * step_loss
+    if stage1_target_mode == "pure":
+        # Pure mode: standard cross-entropy against pure tokens
+        # Loss for 1st token (from main model)
+        step_targets = targets[:, :, 0]  # (B, T)
+        step_loss = F.cross_entropy(
+            main_logits.reshape(-1, V),
+            step_targets.reshape(-1)
+        )
+        total_loss = total_loss + loss_weights[0] * step_loss
 
-    # Loss for 2nd..Kth tokens (from MTP head)
-    for k in range(K - 1):
-        step_logits = mtp_logits[:, :, k, :]  # (B, T, V)
-        step_targets = targets[:, :, k + 1, :]  # (B, T, overlap_k)
+        # Loss for 2nd..Kth tokens (from MTP head)
+        for k in range(K - 1):
+            step_logits = mtp_logits[:, :, k, :]  # (B, T, V)
+            step_targets = targets[:, :, k + 1]  # (B, T)
+            step_loss = F.cross_entropy(
+                step_logits.reshape(-1, V),
+                step_targets.reshape(-1)
+            )
+            total_loss = total_loss + loss_weights[k + 1] * step_loss
+    else:
+        # Group mode: any-correct loss for overlap tokenizer
+        # Loss for 1st token (from main model)
+        step_targets = targets[:, :, 0, :]  # (B, T, overlap_k)
         step_loss = any_correct_ce_loss(
-            step_logits.reshape(-1, V),
+            main_logits.reshape(-1, V),
             step_targets.reshape(-1, overlap_k)
         )
-        total_loss = total_loss + loss_weights[k + 1] * step_loss
+        total_loss = total_loss + loss_weights[0] * step_loss
+
+        # Loss for 2nd..Kth tokens (from MTP head)
+        for k in range(K - 1):
+            step_logits = mtp_logits[:, :, k, :]  # (B, T, V)
+            step_targets = targets[:, :, k + 1, :]  # (B, T, overlap_k)
+            step_loss = any_correct_ce_loss(
+                step_logits.reshape(-1, V),
+                step_targets.reshape(-1, overlap_k)
+            )
+            total_loss = total_loss + loss_weights[k + 1] * step_loss
 
     return total_loss
 

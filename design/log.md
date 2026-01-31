@@ -4,6 +4,7 @@
 3. eval for mtp-pdlm, and mask-pdlm, report seperate loss for two stages
 4. new stage-1 design that do not use mtp, do not use mask
 5. design eval/chat stuff for end2end model
+6. continue analyze the result from experiment_d, task new method and mask method 
 
 01/27
 1. new tokenizers [Done]

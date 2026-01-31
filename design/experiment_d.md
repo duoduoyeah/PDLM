@@ -23,6 +23,48 @@ Stage 2: Group → Pure        (predict exact token given group hint)
 
 **Block-based approach**: Position k in block i predicts the group token at position k in block i+1. Uses block-causal attention (bidirectional within block, causal across blocks). Loss computed on blocks 1..N-1 (block 0 has no prior context). Simpler than MTP - reuses lm_head, no separate MTP head needed.
 
+## Stage 1 Target Modes
+
+Two modes for Stage 1 training targets:
+
+### Pure-Target Mode (Default)
+
+**Training:**
+- `lm_head` shape: `(pure_vocab_size, n_embd)` e.g., `(4096, 768)`
+- Output: logits over **pure tokens**
+- Loss: standard CE against **pure token targets**
+
+**Inference:**
+- Pre-compute: `group_head = group_to_pure_mask @ lm_head.weight` → `(num_groups, n_embd)`
+- Use `group_head` like any other linear layer
+- Argmax over group logits = group with highest summed pure logits among its members
+
+```python
+# Pre-compute once before inference
+group_head = token_map.group_to_pure_mask.float() @ lm_head.weight  # (64, 768)
+
+# During inference
+group_logits = hidden @ group_head.T  # (B, T, 64)
+predicted_group = group_logits.argmax(dim=-1)
+```
+
+**Why pure-target mode?**
+1. **Stage 2 error correction**: Even if Stage 1 doesn't predict the exact token, it may still put high probability on tokens within the correct group. Stage 2 can then correct within-group errors. This makes the two-stage system more robust than requiring Stage 1 to perfectly predict groups.
+2. **Simpler training**: Standard next-token prediction objective, no special group-aware loss needed.
+3. **Richer signal**: Learning full token distribution provides more gradient signal than coarse group targets.
+
+### Group-Target Mode (Legacy)
+
+**Training:**
+- `lm_head` shape: `(num_groups, n_embd)` e.g., `(64, 768)`
+- Output: logits over **group tokens**
+- Loss: any-correct CE against **group token targets** (handles overlap_k > 1)
+
+**Inference:**
+- Directly use `lm_head` for group predictions
+
+Use `--stage1_target_mode=group` to enable legacy mode.
+
 ## Loss Weighting
 
 Exponential decay: `weight[k] = β^k / Σβ^k` (β=0.8, or β=1.0 for uniform)
@@ -63,5 +105,7 @@ transition_accuracy = mean(target_token in group_members[predicted_group])
 ## TODO
 
 - [x] Implement Stage 1 MTP training (predict group tokens from pure prefix)
+- [x] Design pure-target mode for Stage 1 (train with pure targets, collapse to groups at inference)
+- [ ] Implement pure-target mode in code (default) with group-target mode as legacy option
 - [ ] Evaluate transition accuracy per position (does i+1 differ from i+4?)
 - [ ] End-to-end decoding: Stage 1 + Stage 2 combined

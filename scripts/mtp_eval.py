@@ -21,6 +21,7 @@ from nanochat.checkpoint_manager import load_checkpoint, find_last_step, find_la
 from nanochat.gpt_mtp import GPTMTP, GPTMTPConfig
 from nanochat.mtp_eval import eval_mtp
 from nanochat.dataloader import get_data_loader
+from nanochat.group_tokenizer.token_map import get_token_map
 
 
 def load_mtp_model(model_tag=None, step=None, device_type="auto", ckpt_dir=None):
@@ -81,6 +82,14 @@ def load_mtp_model(model_tag=None, step=None, device_type="auto", ckpt_dir=None)
     model.to_empty(device=device)
     model.init_weights()
     model.load_state_dict(model_data, strict=True, assign=True)
+
+    # Register group mask for pure mode (needed for inference collapse)
+    stage1_target_mode = model_config_kwargs.get("stage1_target_mode", "pure")
+    if stage1_target_mode == "pure":
+        token_map = get_token_map(device=device)
+        model.register_group_mask(token_map.group_to_pure_mask)
+        print0(f"Registered group_to_pure_mask for pure mode evaluation")
+
     model.eval()
 
     # Prepare autocast
@@ -121,8 +130,9 @@ def run_eval(
     max_seq_len = model_config_dict["sequence_len"]
     n_future_tokens = model_config_dict.get("n_future_tokens", 4)
     num_groups = model_config_dict["num_groups"]
+    stage1_target_mode = model_config_dict.get("stage1_target_mode", "pure")
 
-    print0(f"Config: max_seq_len={max_seq_len}, K={n_future_tokens}, num_groups={num_groups}")
+    print0(f"Config: max_seq_len={max_seq_len}, K={n_future_tokens}, num_groups={num_groups}, target_mode={stage1_target_mode}")
 
     # Create validation dataloader
     device_batch_size = user_config.get("device_batch_size", 32)

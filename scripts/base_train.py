@@ -51,6 +51,7 @@ n_future_tokens = 4 # MTP/both_mtp: number of future group tokens to predict (K)
 mtp_loss_weight = 1.0 # both_mtp: Stage 1 MTP loss weight relative to Stage 2
 loss_weight_mode = "manual" # "manual" or "fixed" - fixed computes weight from warmup batches
 loss_weight_warmup_steps = 10 # number of batches for estimating loss ratio (used when loss_weight_mode="fixed")
+stage1_target_mode = "pure" # MTP: "pure" (default) or "group" (legacy) - determines target format and loss
 # Debug
 debug = False
 # Training horizon. Only one of these 3 will be used, in this order of precedence.
@@ -216,12 +217,13 @@ elif model_type == "mtp":
         sequence_len=max_seq_len,
         pure_vocab_size=pure_vocab_size,
         num_groups=num_groups,
-        n_future_tokens=block_size,  # predict block_size group tokens
+        n_future_tokens=block_size,  # predict block_size tokens
         mtp_loss_beta=mtp_loss_beta,
         n_layer=num_layers,
         n_head=num_heads,
         n_kv_head=num_kv_heads,
         n_embd=model_dim,
+        stage1_target_mode=stage1_target_mode,
     )
 else:
     raise ValueError(f"Unknown model_type: {model_type}")
@@ -230,6 +232,11 @@ with torch.device("meta"):
     model = Model(model_config)
 model.to_empty(device=device)
 model.init_weights()
+
+# Register group mask for MTP pure mode (needed for inference collapse)
+if model_type == "mtp" and stage1_target_mode == "pure":
+    model.register_group_mask(token_map.group_to_pure_mask.to(device=device))
+    print0(f"Registered group_to_pure_mask for MTP pure mode ({token_map.num_groups} groups × {token_map.pure_vocab_size} pure tokens)")
 
 # Generate attention masks
 # For BD3LM: pre-generate block_size masks for prefix_sliding_tokens cycling (both normal and target_shift modes)
@@ -793,8 +800,10 @@ while True:
                     batch_effective_tokens = x.numel() * ddp_world_size
                 total_effective_tokens += batch_effective_tokens
             elif model_type == "mtp":
-                # MTP: x is (B, T) pure tokens, y is (B, T, K) group token targets
-                loss = model(x, y)
+                # MTP: x is (B, T) pure tokens, y is targets (format depends on stage1_target_mode)
+                # For pure mode: loss_extras contains pure_to_group mapping
+                pure_to_group = loss_extras.get("pure_to_group") if loss_extras else None
+                loss = model(x, y, pure_to_group=pure_to_group)
                 total_effective_tokens += x.numel() * ddp_world_size
             else:
                 # next_token_ar: GPT forward doesn't take attn_mask
