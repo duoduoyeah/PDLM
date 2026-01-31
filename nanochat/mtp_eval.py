@@ -94,8 +94,8 @@ def eval_mtp(
                     # main_logits: (B, T, pure_vocab_size) for k=0
                     # mtp_logits: (B, T, K-1, pure_vocab_size) for k=1..K-1
 
-                    # Get collapsed group head for accuracy computation
-                    group_head = model.get_group_head_weight()  # (num_groups, n_embd)
+                    # Get group_to_pure_mask for collapsing logits to group predictions
+                    group_to_pure_mask = model.group_to_pure_mask  # (num_groups, pure_vocab)
 
                     # Compute metrics for k=0 (main model prediction)
                     _update_position_stats_pure(
@@ -104,8 +104,7 @@ def eval_mtp(
                         main_logits,
                         targets[:, :, 0],  # (B, T) pure token targets
                         pure_to_group,
-                        group_head,
-                        model,
+                        group_to_pure_mask,
                     )
 
                     # Compute metrics for k=1..K-1 (MTP head predictions)
@@ -118,8 +117,7 @@ def eval_mtp(
                             step_logits,
                             step_targets,
                             pure_to_group,
-                            group_head,
-                            model,
+                            group_to_pure_mask,
                         )
                 else:
                     # Group mode: targets are (B, T, K, overlap_k) group token IDs
@@ -154,21 +152,22 @@ def eval_mtp(
 
 
 def _update_position_stats_pure(pos_stats, group_stats, logits, targets,
-                                pure_to_group, group_head, model):
+                                pure_to_group, group_to_pure_mask):
     """
     Update per-position and per-group statistics for pure target mode.
 
     Loss is standard CE against pure tokens.
-    Accuracy is computed by collapsing predictions to groups.
+    Accuracy is computed by collapsing logits to group space (via group_to_pure_mask),
+    taking argmax to get the predicted group, then checking if that group is among
+    the target token's valid groups.
 
     Args:
         pos_stats: dict to accumulate position-level stats
         group_stats: dict to accumulate per-group stats
         logits: (B, T, pure_vocab_size) prediction logits over pure tokens
         targets: (B, T) pure token targets
-        pure_to_group: (pure_vocab_size, overlap_k) mapping
-        group_head: (num_groups, n_embd) collapsed group head for accuracy
-        model: GPTMTP model for getting hidden states
+        pure_to_group: (pure_vocab_size, overlap_k) mapping from pure token to its valid groups
+        group_to_pure_mask: (num_groups, pure_vocab_size) mask for collapsing logits to groups
     """
     B, T, V = logits.shape
 
@@ -179,27 +178,17 @@ def _update_position_stats_pure(pos_stats, group_stats, logits, targets,
     targets_expanded = targets.unsqueeze(-1)  # (B, T, 1)
     nll = -log_probs.gather(-1, targets_expanded).squeeze(-1)  # (B, T)
 
-    # For accuracy: collapse logits to group predictions
-    # Method: get predicted token, then check if its group matches target's group
-    pred_pure = logits.argmax(dim=-1)  # (B, T) predicted pure tokens
-    pred_groups = pure_to_group[pred_pure]  # (B, T, overlap_k) possible groups of predicted token
+    # For accuracy: collapse logits to group space, then argmax
+    # group_to_pure_mask: (num_groups, pure_vocab) -> transpose to (pure_vocab, num_groups)
+    group_logits = logits @ group_to_pure_mask.T  # (B, T, num_groups)
+    pred_group = group_logits.argmax(dim=-1)  # (B, T) predicted group
 
-    # Get groups for target tokens
-    target_groups = pure_to_group[targets]  # (B, T, overlap_k) valid groups for target
+    # Get valid groups for each target token
+    target_groups = pure_to_group[targets]  # (B, T, overlap_k)
+    valid_mask = target_groups >= 0  # (B, T, overlap_k)
 
-    # Accuracy: check if any predicted group matches any target group
-    # pred_groups[:, :, :, None]: (B, T, overlap_k, 1)
-    # target_groups[:, :, None, :]: (B, T, 1, overlap_k)
-    pred_groups_exp = pred_groups.unsqueeze(-1)  # (B, T, overlap_k, 1)
-    target_groups_exp = target_groups.unsqueeze(-2)  # (B, T, 1, overlap_k)
-
-    # Mask out invalid groups (-1)
-    valid_pred = pred_groups_exp >= 0
-    valid_target = target_groups_exp >= 0
-
-    # Check if any valid pred group matches any valid target group
-    matches = (pred_groups_exp == target_groups_exp) & valid_pred & valid_target
-    correct = matches.any(dim=-1).any(dim=-1)  # (B, T)
+    # Correct if predicted group matches any valid target group
+    correct = (pred_group.unsqueeze(-1) == target_groups).any(dim=-1) & valid_mask.any(dim=-1)  # (B, T)
 
     # Update position stats
     pos_stats["nll"] += nll.sum().item()
