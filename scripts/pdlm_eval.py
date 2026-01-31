@@ -91,8 +91,16 @@ def load_pdlm_model(model_tag=None, step=None, device_type="auto", ckpt_dir=None
 
     model.to_empty(device=device)
     model.init_weights()
+
+    # Extract group_to_pure_mask before strict loading (it's a buffer, not a parameter)
+    group_to_pure_mask = model_data.pop("group_to_pure_mask", None)
+
     model.load_state_dict(model_data, strict=True, assign=True)
     model.eval()
+
+    # Register group mask for inference collapse (e.g. stage1_block eval)
+    if group_to_pure_mask is not None:
+        model.register_group_mask(group_to_pure_mask)
 
     # Prepare autocast
     autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=torch.bfloat16) if device_type == "cuda" else nullcontext()
