@@ -17,7 +17,7 @@
 # ============================================================
 CKPT_PATH=""
 NUM_BATCHES="20"
-LOCAL_DIR="/tmp/pdlm_s1b_eval"
+LOCAL_DIR="/content/pdlm_s1b_eval"
 DUMP_PATH=""
 DUMP_SEQUENCES="5"
 
