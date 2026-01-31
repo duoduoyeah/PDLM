@@ -27,7 +27,7 @@ NUM_GROUPS="64"         # number of final groups
 TEST_MODE="true"
 DATA_RATIO="10"         # default 10 for test mode
 DEPTH="4"               # model depth
-BLOCK_SIZE="8"          # bucket size (parallel block prediction)
+BLOCK_SIZE="4"          # bucket size (parallel block prediction)
 PREFIX_PURE_TOKENS="1"  # pure prefix tokens for conditioning
 IS_CAUSAL="False"       # bidirectional attention within blocks
 
