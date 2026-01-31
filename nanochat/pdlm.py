@@ -245,6 +245,7 @@ class PDLM(nn.Module):
         self.register_buffer("sin", sin, persistent=False)
         self._token_map = None
         self._is_causal = self.config.is_causal
+        self.register_buffer("group_to_pure_mask", None, persistent=False)
         self.inference_mask = None
         self.bucket_size = config.bucket_size
 
