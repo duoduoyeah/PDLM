@@ -66,7 +66,7 @@ def eval_mtp(
 
     K = model.config.n_future_tokens
     num_groups = model.config.num_groups
-    target_mode = getattr(model.config, "stage1_target_mode", "group")
+    target_mode = model.config.stage1_target_mode
 
     # Accumulators per position k
     stats_by_pos = {k: {"nll": 0.0, "correct": 0, "tokens": 0} for k in range(K)}
@@ -348,7 +348,7 @@ def dump_mtp_batch(
     model.eval()
 
     K = model.config.n_future_tokens
-    target_mode = getattr(model.config, "stage1_target_mode", "group")
+    target_mode = model.config.stage1_target_mode
     assert target_mode == "pure", f"dump_mtp_batch only supports pure mode, got {target_mode}"
 
     # Load tokenizer for decoding

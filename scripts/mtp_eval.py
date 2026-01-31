@@ -74,6 +74,8 @@ def load_mtp_model(model_tag=None, step=None, device_type="auto", ckpt_dir=None)
 
     # Build model
     model_config_kwargs = meta_data["model_config"]
+    # Old checkpoints don't have stage1_target_mode; they used group targets
+    model_config_kwargs.setdefault("stage1_target_mode", "group")
     model_config = GPTMTPConfig(**model_config_kwargs)
 
     with torch.device("meta"):
@@ -84,7 +86,7 @@ def load_mtp_model(model_tag=None, step=None, device_type="auto", ckpt_dir=None)
     model.load_state_dict(model_data, strict=True, assign=True)
 
     # Register group mask for pure mode (needed for inference collapse)
-    stage1_target_mode = model_config_kwargs.get("stage1_target_mode", "pure")
+    stage1_target_mode = model_config_kwargs.get("stage1_target_mode", "group")
     if stage1_target_mode == "pure":
         token_map = get_token_map(device=device)
         model.register_group_mask(token_map.group_to_pure_mask)
