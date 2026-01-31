@@ -379,7 +379,7 @@ def main():
     parser.add_argument("--oracle_accuracy_batches", type=int, default=None, help="Number of batches for oracle accuracy (default: num_batches // 4)")
     parser.add_argument("--dump_batch", type=str, default=None, help="Dump one batch to file for debugging (path to output txt)")
     parser.add_argument("--dump_stage1_block", type=str, default=None, help="Dump stage1_block predictions to file (path to output txt)")
-    parser.add_argument("--dump_sequences", type=int, default=10, help="Number of sequences to dump (default: 10)")
+    parser.add_argument("--dump_sequences", type=int, default=5, help="Number of sequences to dump (default: 5)")
     args = parser.parse_args()
 
     # Handle dump_batch mode (separate from normal eval)

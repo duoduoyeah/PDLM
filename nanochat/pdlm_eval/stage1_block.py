@@ -154,8 +154,8 @@ def dump_stage1_block_batch(
     autocast_ctx,
     output_path,
     tokenizer_dir=None,
-    num_sequences=10,
-    num_blocks_to_show=3,
+    num_sequences=5,
+    num_blocks_to_show=8,
 ):
     """
     Dump stage1_block predictions showing input, predicted, and true tokens.
@@ -265,6 +265,19 @@ def dump_stage1_block_batch(
             f.write("=" * 80 + "\n")
             f.write(f"=== SEQUENCE {b} ===\n")
             f.write("=" * 80 + "\n\n")
+
+            # Show full input sequence (blocks 0 through num_blocks_to_show)
+            total_tokens_shown = (num_blocks_to_show + 1) * block_size
+            total_tokens_shown = min(total_tokens_shown, T)
+            input_tokens = [fmt_pure(inputs[b, i].item()) for i in range(total_tokens_shown)]
+            f.write(f"Input: {' '.join(input_tokens)}\n\n")
+
+            # Show block 0 (context block, not used for eval)
+            f.write("-" * 80 + "\n")
+            f.write(f"--- BLOCK 0 (positions 0-{block_size - 1}, context only - not evaluated) ---\n")
+            f.write("-" * 80 + "\n")
+            block0_tokens = [fmt_pure(inputs[b, i].item()) for i in range(block_size)]
+            f.write(f"  {' '.join(block0_tokens)}\n\n")
 
             # For each block (skip block 0 and last block)
             for block_idx in range(1, 1 + num_blocks_to_show):
