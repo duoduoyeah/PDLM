@@ -107,7 +107,7 @@ class PDLMConfig:
             lm_head_size = self.num_groups
         elif self.stage == "stage1_block":
             wte_size = self.pure_vocab_size
-            lm_head_size = self.num_groups
+            lm_head_size = self.pure_vocab_size  # Full vocab for pure-target mode
         elif self.stage == "stage2":
             wte_size = self.pure_vocab_size + self.num_groups
             lm_head_size = self.pure_vocab_size
@@ -276,6 +276,14 @@ class PDLM(nn.Module):
                 group_wte=self.group_wte,
                 lm_head=self._group_logit_head,
             )
+
+    def register_group_mask(self, group_to_pure_mask):
+        """Register group mask for stage1_block inference collapse."""
+        self.register_buffer("group_to_pure_mask", group_to_pure_mask.float())
+
+    def get_group_head_weight(self):
+        """Get collapsed group head: (num_groups, n_embd)"""
+        return self.group_to_pure_mask @ self.lm_head.weight
 
     def init_weights(self):
         self.apply(self._init_weights)
@@ -583,15 +591,18 @@ class PDLM(nn.Module):
 
     def _forward_stage1_block(self, idx, targets, attn_mask, loss_extras):
         """
-        Forward pass for stage1_block: L pure tokens in, L×L block-causal mask.
-        Position k in block i predicts the group token at position k in block i+1.
+        Forward pass for stage1_block (pure-target mode): L pure tokens in, L×L block-causal mask.
+        Position k in block i predicts the pure token at position k in block i+1.
         No 2L concatenation — just direct forward through transformer with block-causal mask.
+
+        Training: Standard CE loss against pure tokens.
+        Inference: Collapse lm_head to groups via group_to_pure_mask @ lm_head.weight.
 
         Args:
             idx: (B, L) pure token inputs
             targets: (B, L) pure tokens (unused directly, kept for API consistency)
             attn_mask: (L, L) block-causal mask
-            loss_extras: dict with "group_targets" (B, T, overlap_k) and "loss_mask" (B, T)
+            loss_extras: dict with "pure_targets" (B, T) and "loss_mask" (B, T)
 
         Returns:
             loss: scalar loss
@@ -609,24 +620,22 @@ class PDLM(nn.Module):
             x = block(x, cos_sin, kv_cache=None, attn_mask=attn_mask)
         x = norm(x)
 
-        # Compute logits
+        # Compute logits: (B, T, pure_vocab_size)
         softcap = 15
-        logits = self.lm_head(x)  # (B, T, num_groups)
+        logits = self.lm_head(x)
         logits = logits.float()
         logits = softcap * torch.tanh(logits / softcap)
 
-        # Compute any-correct loss on group targets
-        assert loss_extras is not None and "group_targets" in loss_extras
-        group_targets = loss_extras["group_targets"]
-        loss_mask = loss_extras["loss_mask"]
-        V = logits.size(-1)
-        overlap_k = group_targets.size(-1)
+        # Standard CE loss against pure targets
+        assert loss_extras is not None and "pure_targets" in loss_extras
+        pure_targets = loss_extras["pure_targets"]  # (B, T)
+        loss_mask = loss_extras["loss_mask"]  # (B, T)
 
-        loss = any_correct_ce_loss(
-            logits.reshape(-1, V),
-            group_targets.reshape(-1, overlap_k),
-            loss_mask.reshape(-1),
-        )
+        log_probs = F.log_softmax(logits, dim=-1)
+        target_log_probs = torch.gather(log_probs, dim=-1, index=pure_targets.unsqueeze(-1))
+        nll = -target_log_probs.squeeze(-1)
+        loss = (nll * loss_mask).sum() / loss_mask.sum().clamp(min=1)
+
         return loss
 
     def _forward_both_block(self, idx, targets, attn_mask, loss_extras, return_separate_losses=False):

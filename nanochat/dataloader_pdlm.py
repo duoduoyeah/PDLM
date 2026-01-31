@@ -187,31 +187,25 @@ def pdlm_data_loader(
             }
 
         elif stage == "stage1_block":
-            # Stage 1 Block: pure tokens in, predict group token at same position in next block
+            # Stage 1 Block (pure-target mode): pure tokens in, predict pure token at same position in next block
             # No MASK tokens, no 2L structure — just L pure tokens with block-causal mask.
-            # group_targets[b, pos_in_block_i] = pure_to_group[pure_token_at_block_(i+1)_pos]
-            # loss_mask: True for blocks 1 through N-1 (skip block 0 = no prior block context)
+            # pure_targets[i] = pure token at position i + block_size
+            # loss_mask: True for blocks 1 through N-2 (skip block 0 = no prior block context, skip last block = no future to predict)
 
             prefix_sliding_tokens = 0
             num_blocks = (T - prefix_sliding_tokens) // block_size
             block_region_len = num_blocks * block_size
-
             block_start = prefix_sliding_tokens
-            block_end = block_start + block_region_len
 
-            pure_to_group = token_map.pure_to_group  # (pure_vocab, overlap_k)
-            overlap_k = token_map.overlap_k
-
-            # inputs: just pure tokens (clone of targets)
+            # inputs: just pure tokens
             inputs_cpu = targets_cpu.clone()
 
-            # group_targets: shifted view — position i predicts group of token at i + block_size
-            future_pure = scratch[block_size:B * T + block_size].view(B, T)
-            group_targets = pure_to_group[future_pure]  # (B, T, overlap_k)
+            # pure_targets: shifted view — position i predicts token at i + block_size
+            pure_targets = scratch[block_size:B * T + block_size].view(B, T)
 
-            # loss_mask: skip block 0 (no prior block context)
+            # loss_mask: skip block 0 (no prior block context), skip last block (no future to predict)
             loss_mask = torch.zeros(B, T, dtype=torch.bool)
-            for blk in range(1, num_blocks):
+            for blk in range(1, num_blocks - 1):
                 blk_start = block_start + blk * block_size
                 loss_mask[:, blk_start:blk_start + block_size] = True
 
@@ -220,13 +214,15 @@ def pdlm_data_loader(
 
             # Move to device
             inputs = inputs_cpu.to(device=device, non_blocking=use_cuda)
-            targets = targets_cpu.to(device=device, non_blocking=use_cuda)
+            targets = targets_cpu.to(device=device, non_blocking=use_cuda)  # kept for API consistency
             loss_mask = loss_mask.to(device=device, non_blocking=use_cuda)
-            group_targets = group_targets.to(device=device, non_blocking=use_cuda)
+            pure_targets = pure_targets.to(device=device, non_blocking=use_cuda)
 
+            # Also include pure_to_group for eval accuracy computation
             loss_extras = {
                 "loss_mask": loss_mask,
-                "group_targets": group_targets,
+                "pure_targets": pure_targets,
+                "pure_to_group": token_map.pure_to_group.to(device=device, non_blocking=use_cuda),
             }
 
         elif stage == "stage1_mtp":

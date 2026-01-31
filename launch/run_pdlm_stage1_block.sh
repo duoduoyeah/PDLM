@@ -27,6 +27,7 @@ DEPTH="4"               # model depth
 BLOCK_SIZE="8"          # bucket size (parallel block prediction)
 PREFIX_PURE_TOKENS="0"  # pure prefix tokens for conditioning
 IS_CAUSAL="False"       # bidirectional attention within blocks
+DRIVE_OUTPUT_FOLDER=""  # subfolder under DRIVE_BASE for outputs (empty = save directly under DRIVE_BASE)
 
 # Common training arguments
 MAX_SEQ_LEN="512"
@@ -80,12 +81,17 @@ for arg in "$@"; do
         --eval_num_batches_final=*)
             EVAL_NUM_BATCHES_FINAL="${arg#*=}"
             ;;
+        --drive_output_folder=*)
+            DRIVE_OUTPUT_FOLDER="${arg#*=}"
+            ;;
         *)
             echo "Unknown argument: $arg"
             echo "Usage: bash launch/run_pdlm_stage1_block.sh [--noise_level=64] [--overlap_k=1] [--num_groups=64]"
             echo "       [--depth=4] [--block_size=8] [--prefix_pure_tokens=0] [--is_causal=False]"
             echo "       [--test_mode=true] [--data_ratio=10]"
-            echo "       [--max_seq_len=512] [--device_batch_size=64]"
+            echo "       [--max_seq_len=512] [--device_batch_size=64] [--drive_output_folder=<folder>]"
+            echo ""
+            echo "Use --drive_output_folder to save outputs to a subfolder under DRIVE_BASE"
             exit 1
             ;;
     esac
@@ -136,6 +142,7 @@ export NANOCHAT_BASE_DIR="${LOCAL_TRAIN_BASE}/${MODEL_NAME}"
 echo "=== Running PDLM Stage 1 Block: ${MODEL_NAME} ==="
 echo "=== Local base dir: ${NANOCHAT_BASE_DIR} ==="
 echo "=== Drive base: ${DRIVE_BASE} ==="
+echo "=== Drive output folder: ${DRIVE_OUTPUT_FOLDER:-<root>} ==="
 echo "=== Test mode: ${TEST_MODE} ==="
 echo "=== Data ratio: ${DATA_RATIO} ==="
 echo "=== Depth: ${DEPTH} ==="
@@ -230,7 +237,11 @@ rm -rf "${NANOCHAT_BASE_DIR}/simple_story_data"
 rm -rf "${NANOCHAT_BASE_DIR}/tokenized_data"
 
 # Copy results to Drive for persistence
-DRIVE_OUTPUT_DIR="${DRIVE_BASE}/${MODEL_NAME}"
+if [ -n "${DRIVE_OUTPUT_FOLDER}" ]; then
+    DRIVE_OUTPUT_DIR="${DRIVE_BASE}/${DRIVE_OUTPUT_FOLDER}/${MODEL_NAME}"
+else
+    DRIVE_OUTPUT_DIR="${DRIVE_BASE}/${MODEL_NAME}"
+fi
 if [ -d "${DRIVE_OUTPUT_DIR}" ]; then
     if [ "${TEST_MODE}" = "true" ]; then
         echo "Test mode: Removing old Drive output dir ${DRIVE_OUTPUT_DIR}"

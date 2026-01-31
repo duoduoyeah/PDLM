@@ -238,6 +238,11 @@ if model_type == "mtp" and stage1_target_mode == "pure":
     model.register_group_mask(token_map.group_to_pure_mask.to(device=device))
     print0(f"Registered group_to_pure_mask for MTP pure mode ({token_map.num_groups} groups × {token_map.pure_vocab_size} pure tokens)")
 
+# Register group mask for stage1_block pure mode (needed for eval group collapse)
+if model_type == "pdlm" and pdlm_stage == "stage1_block":
+    model.register_group_mask(token_map.group_to_pure_mask.to(device=device))
+    print0(f"Registered group_to_pure_mask for stage1_block ({token_map.num_groups} groups × {token_map.pure_vocab_size} pure tokens)")
+
 # Generate attention masks
 # For BD3LM: pre-generate block_size masks for prefix_sliding_tokens cycling (both normal and target_shift modes)
 # For other model types: single mask with prefix_sliding_tokens = 0

@@ -212,17 +212,20 @@ def eval_pdlm_stage1_block(
     prefix_pure_tokens=0,
 ):
     """
-    Evaluate PDLM Stage 1 Block model on validation set.
+    Evaluate PDLM Stage 1 Block model with pure-target mode on validation set.
 
-    Stage 1 Block: pure tokens in, L×L block-causal mask, predict group tokens
-    for the next block. No 2L structure — model is called directly.
+    Stage 1 Block (pure-target mode): pure tokens in, L×L block-causal mask,
+    lm_head outputs pure vocab logits. No 2L structure — model is called directly.
+
+    Loss: CE against pure tokens
+    Accuracy: Group-level - predicted group contains target token?
 
     Args:
         model: PDLM model (stage1_block)
         val_loader: validation data loader (yields inputs, targets, loss_extras, state_dict)
                     inputs: pure tokens
                     targets: pure tokens
-                    loss_extras: {"loss_mask", "group_targets"}
+                    loss_extras: {"loss_mask", "pure_targets", "pure_to_group"}
         block_size: block size for PDLM
         num_batches: number of batches to evaluate
         attn_mask: L×L block-causal attention mask
@@ -231,13 +234,20 @@ def eval_pdlm_stage1_block(
         prefix_pure_tokens: number of pure prefix tokens (no loss on these)
 
     Returns:
-        dict with evaluation results (same format as eval_pdlm_stage1_mask)
+        dict with evaluation results:
+        {
+            "overall_loss": float,  # CE against pure tokens
+            "overall_ppl": float,
+            "overall_accuracy": float,  # group-level accuracy
+            "positions": {...},
+            "num_tokens_evaluated": int,
+        }
     """
     was_training = model.training
     model.eval()
 
     with torch.no_grad():
-        result = _eval_stage1_block_per_position(
+        result = _eval_stage1_block_pure_target(
             model, val_loader, block_size, num_batches,
             attn_mask, device, autocast_ctx, prefix_pure_tokens
         )
@@ -247,37 +257,56 @@ def eval_pdlm_stage1_block(
     return result
 
 
-def _eval_stage1_block_per_position(
+def _eval_stage1_block_pure_target(
     model, val_loader, block_size, num_batches,
     attn_mask, device, autocast_ctx, prefix_pure_tokens,
 ):
     """
-    Evaluate Stage 1 Block loss and accuracy broken down by position within block.
-    Skip block 0 (no context) and last block (no next block to predict).
+    Pure-target mode evaluation for stage1_block.
+
+    Loss: Standard CE against pure tokens.
+    Accuracy: Collapse logits to groups, check if target token is in predicted group.
     """
     metrics_by_pos = {p: {"nll": 0.0, "correct": 0, "tokens": 0} for p in range(block_size)}
+
+    # Get group head for accuracy computation: (num_groups, n_embd)
+    # group_logits = pure_logits @ group_to_pure_mask.T (sum pure logits per group)
+    group_to_pure_mask = model.group_to_pure_mask  # (num_groups, pure_vocab)
 
     for batch_idx in range(num_batches):
         inputs, targets, loss_extras, state = next(val_loader)
         # inputs: (B, T) - pure tokens
-        # loss_extras: {"loss_mask": (B, T), "group_targets": (B, T, overlap_k)}
+        # loss_extras: {"loss_mask": (B, T), "pure_targets": (B, T), "pure_to_group": (pure_vocab, overlap_k)}
 
         B, T = inputs.shape
         loss_mask = loss_extras.get("loss_mask", None)
-        group_targets = loss_extras.get("group_targets", None)
+        pure_targets = loss_extras.get("pure_targets", None)
+        pure_to_group = loss_extras.get("pure_to_group", None)
 
-        if group_targets is None:
-            raise ValueError("Stage 1 Block eval requires group_targets in loss_extras")
+        if pure_targets is None:
+            raise ValueError("Stage 1 Block eval requires pure_targets in loss_extras")
+        if pure_to_group is None:
+            raise ValueError("Stage 1 Block eval requires pure_to_group in loss_extras")
 
-        overlap_k = group_targets.size(-1)
+        overlap_k = pure_to_group.size(-1)
 
         with autocast_ctx:
             # Forward pass: direct call (no 2L, no forward_for_eval)
             logits = model(inputs, attn_mask=attn_mask)
-            # logits: (B, T, num_groups)
+            # logits: (B, T, pure_vocab_size)
 
+            # Loss: standard CE against pure targets
             log_probs = F.log_softmax(logits.float(), dim=-1)
-            preds = logits.argmax(dim=-1)  # (B, T)
+            target_log_probs = log_probs.gather(-1, pure_targets.unsqueeze(-1)).squeeze(-1)
+
+            # For accuracy: collapse logits to group logits
+            # group_logits[g] = sum of pure_logits for all tokens in group g
+            # This is equivalent to: group_logits = logits @ group_to_pure_mask.T
+            group_logits = logits @ group_to_pure_mask.T  # (B, T, num_groups)
+            pred_groups = group_logits.argmax(dim=-1)  # (B, T)
+
+            # Check if target token is in predicted group
+            target_groups = pure_to_group[pure_targets]  # (B, T, overlap_k)
 
             num_blocks = T // block_size
 
@@ -291,27 +320,18 @@ def _eval_stage1_block_per_position(
                     else:
                         mask_at_pos = torch.ones(B, dtype=torch.bool, device=device)
 
-                    valid_groups = group_targets[:, pos_in_seq, :]  # (B, overlap_k)
-
-                    # Compute any-correct NLL
-                    valid_mask = valid_groups >= 0
-                    safe_targets = valid_groups.clamp(min=0)
-                    valid_log_probs = torch.gather(
-                        log_probs[:, pos_in_seq, :], dim=-1, index=safe_targets
-                    )
-                    valid_log_probs = valid_log_probs.masked_fill(~valid_mask, float('-inf'))
-                    log_valid_prob = torch.logsumexp(valid_log_probs, dim=-1)
-                    nll = -log_valid_prob
-
+                    # NLL
+                    nll = -target_log_probs[:, pos_in_seq]
                     nll_masked = nll * mask_at_pos.float()
                     metrics_by_pos[pos]["nll"] += nll_masked.sum().item()
                     metrics_by_pos[pos]["tokens"] += mask_at_pos.sum().item()
 
-                    # Compute any-correct accuracy
-                    pred_at_pos = preds[:, pos_in_seq]
-                    pred_expanded = pred_at_pos.unsqueeze(-1)
-                    any_correct = ((valid_groups == pred_expanded) & valid_mask).any(dim=-1)
-                    correct_masked = any_correct & mask_at_pos
+                    # Group accuracy: check if predicted group contains target token
+                    pred_g = pred_groups[:, pos_in_seq]  # (B,)
+                    valid_groups = target_groups[:, pos_in_seq, :]  # (B, overlap_k)
+                    valid_mask = valid_groups >= 0
+                    any_match = ((valid_groups == pred_g.unsqueeze(-1)) & valid_mask).any(dim=-1)
+                    correct_masked = any_match & mask_at_pos
                     metrics_by_pos[pos]["correct"] += correct_masked.sum().item()
 
     # Build result dict
