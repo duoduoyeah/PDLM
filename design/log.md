@@ -5,6 +5,7 @@
 4. new stage-1 design that do not use mtp, do not use mask
 5. design eval/chat stuff for end2end model
 6. continue analyze the result from experiment_d, task new method and mask method 
+7. I feel our method has advatage compared to fast-mtp: we use indenpdent input x so the input-output is one2one; compared with apple-mtp, mask is inefficient, in train and this mask token is meaningless and lead to extra-cost when inference;
 
 01/27
 1. new tokenizers [Done]
