@@ -17,7 +17,7 @@
 # ============================================================
 CKPT_PATH=""
 NUM_BATCHES="20"
-LOCAL_DIR="/content/mtp_eval"
+LOCAL_DIR=""
 DUMP_PATH=""
 DUMP_SEQUENCES="5"
 
@@ -60,6 +60,12 @@ fi
 if [ ! -d "${CKPT_PATH}" ]; then
     echo "Error: Checkpoint path does not exist: ${CKPT_PATH}"
     exit 1
+fi
+
+# Derive LOCAL_DIR from model name if not explicitly set
+if [ -z "${LOCAL_DIR}" ]; then
+    MODEL_NAME=$(basename "${CKPT_PATH}")
+    LOCAL_DIR="/content/mtp_eval/${MODEL_NAME}"
 fi
 
 echo "============================================================"
