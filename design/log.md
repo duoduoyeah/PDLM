@@ -1,3 +1,6 @@
+02/01
+1. 
+
 01/31
 1. I guess make the group level almost equal by adjust the overlap and sub-group level?-> new tokenizer, run new exp_c model 
 2. eval mtp pure and group one. think about this question

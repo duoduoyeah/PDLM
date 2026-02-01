@@ -55,6 +55,14 @@ Two steps per block:
 1. **Predict groups**: Forward pure context with causal attention → argmax group logits
 2. **Denoise**: Build `[xt | x0]` with predicted groups → argmax pure logits
 
+## RoPE Position Analysis
+
+**Question:** In block-to-block prediction with block_size=4, the last block's tokens have RoPE positions [T-4, T-3, T-2, T-1] but predict targets at positions [T, T+1, T+2, T+3]. Is this a problem?
+
+**Answer:** No. The gap between input position and prediction position is a constant `block_size` for every token — the same pattern as standard AR (where the gap is a constant 1). The model learns this fixed offset during training since every block boundary has the same structure. RoPE correctly encodes the true positions of context tokens for attention computation; the lm_head simply learns "predict block_size ahead" instead of "predict 1 ahead."
+
+**Why within-block bidirectional attention is fine with sequential RoPE:** All tokens in a block see the same context (bidirectional within block + causal to prefix), but produce different predictions because their RoPE positions give each a unique identity. RoPE naturally handles both forward and backward relative positions, so bidirectional attention within a block works correctly.
+
 ## Open Questions
 
 **Loss combination:** Two standard approaches exist - (1) **Joint**: sum losses and backprop once, (2) **Alternating**: backprop each loss separately with separate updates. Current implementation uses joint.

@@ -124,6 +124,10 @@ transition_accuracy = mean(target_token in group_members[predicted_group])
 - Baseline (random): 1/num_groups
 - Target: >90% for viable end-to-end decoding
 
+## Experimental Results: Pure-Target vs Group-Target
+
+Results from `mtp_d8_b4_n256_k31_g496_r40` model setting. Group-target mode significantly outperforms pure-target mode on group accuracy (82.8% vs 48.3%). The pure-target model's logit collapse via `group_to_pure_mask` produces degenerate behavior: it over-predicts a handful of groups, ignores most others, and achieves low precision even on its favorites (per-group mean accuracy 35% vs 73% for group-target). The pure-target model's accuracy is also flat across positions (~48% for all k), suggesting it fails to learn position-dependent prediction, while group-target shows the expected degradation pattern (92% at k=0 → 77% at k=3). Training directly on group targets gives the model a cleaner optimization signal — 496 outputs focused on the right abstraction level, rather than 4096 outputs spread across within-group distinctions that are irrelevant for Stage 1. Group-target is the clear choice for the combined Stage 1 + Stage 2 pipeline.
+
 ## TODO
 
 - [x] Implement Stage 1 MTP training (predict group tokens from pure prefix)
