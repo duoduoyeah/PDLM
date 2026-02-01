@@ -270,6 +270,81 @@ if output_dir:
     print0(f"Verification: TokenMap loaded successfully")
     print0(f"  pure_vocab_size={tm.pure_vocab_size}, num_groups={tm.num_groups}, overlap_k={tm.overlap_k}")
 else:
+    token_maps = model.binarize(threshold=0.5)
     print0("Warning: no --output_dir specified, results not saved")
 
+# ============================================================
+# Step 6: Final evaluation summary
+# ============================================================
+print0("")
+print0("=" * 60)
+print0("FINAL EVALUATION")
+print0("=" * 60)
+
+# --- Mapping stats ---
+pure_to_group = token_maps["pure_to_group"]  # (V, overlap_k)
+group_to_pure_mask = token_maps["group_to_pure_mask"]  # (G, V)
+
+# Overlap: how many groups each token belongs to
+groups_per_token = (pure_to_group >= 0).sum(dim=1).float()  # (V,)
+# Group sizes: how many tokens in each group
+tokens_per_group = group_to_pure_mask.sum(dim=1).float()  # (G,)
+
+print0(f"\nMapping stats (V={pure_vocab_size}, G={num_groups}):")
+print0(f"  overlap_k:        {token_maps['overlap_k']}")
+print0(f"  groups/token:     min={groups_per_token.min().item():.0f}, "
+       f"mean={groups_per_token.mean().item():.2f}, "
+       f"max={groups_per_token.max().item():.0f}")
+print0(f"  tokens/group:     min={tokens_per_group.min().item():.0f}, "
+       f"mean={tokens_per_group.mean().item():.2f}, "
+       f"max={tokens_per_group.max().item():.0f}")
+print0(f"  ideal tokens/grp: {pure_vocab_size / num_groups:.1f}")
+
+# Empty groups
+empty_groups = (tokens_per_group == 0).sum().item()
+if empty_groups > 0:
+    print0(f"  empty groups:     {empty_groups}/{num_groups}")
+
+# --- Accuracy on eval set using binarized mapping ---
+print0(f"\nEval accuracy (binarized, {num_eval} batches):")
+
+binary_assign = group_to_pure_mask.T.float().to(device)  # (V, G)
+eval_group_correct = 0
+eval_group_total = 0
+
+model.eval()
+with torch.no_grad():
+    for eval_idx in eval_indices:
+        pure_logits, pure_targets, loss_mask = dataset[eval_idx]
+        pure_logits = pure_logits.to(device=device, dtype=torch.float32)
+        pure_targets = pure_targets.to(device=device)
+        loss_mask = loss_mask.to(device=device)
+
+        # Group logits using binarized assignment
+        group_logits = pure_logits @ binary_assign  # (B, T, G)
+        pred_groups = group_logits.argmax(dim=-1)  # (B, T)
+
+        # Check if target token is in predicted group
+        target_in_group = group_to_pure_mask.to(device)[pred_groups]  # (B, T, V)
+        B, T = pure_targets.shape
+        correct = target_in_group.gather(-1, pure_targets.unsqueeze(-1)).squeeze(-1)  # (B, T)
+
+        mask_float = loss_mask.float()
+        eval_group_correct += (correct.float() * mask_float).sum().item()
+        eval_group_total += mask_float.sum().item()
+
+eval_acc = eval_group_correct / max(eval_group_total, 1)
+print0(f"  group_accuracy:   {eval_acc:.2%} ({int(eval_group_correct)}/{int(eval_group_total)})")
+
+wandb_run.log({
+    "final/group_accuracy_binarized": eval_acc,
+    "final/overlap_k": token_maps["overlap_k"],
+    "final/groups_per_token_mean": groups_per_token.mean().item(),
+    "final/tokens_per_group_mean": tokens_per_group.mean().item(),
+    "final/tokens_per_group_max": tokens_per_group.max().item(),
+    "final/tokens_per_group_min": tokens_per_group.min().item(),
+}, step=step)
+
+print0("")
+print0("=" * 60)
 print0("Done.")

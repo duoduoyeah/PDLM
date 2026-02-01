@@ -12,6 +12,24 @@
 ## The checkpoint folder should contain:
 ##   - base_checkpoints/  (with model_*.pt files)
 ##   - tokenizer/
+##
+## Prepared folder structure:
+##   LOCAL_DIR/
+##   ├── tokenizer/              # copied from CKPT_PATH/tokenizer/
+##   │   ├── tokenizer.pkl
+##   │   └── token_maps.pt       # original mapping (needed by dataloader)
+##   ├── base_checkpoints/       # copied from CKPT_PATH/base_checkpoints/
+##   │   └── <model_tag>/
+##   │       ├── model_NNNNNN.pt
+##   │       └── meta_NNNNNN.json
+##   ├── simple_story_data/      # downloaded by nanochat.dataset
+##   │   └── val/
+##   └── output_g<G>/            # OUTPUT_DIR
+##       ├── logit_cache/        # cached pure logits
+##       │   ├── batch_0000.pt .. batch_NNNN.pt
+##       │   └── cache_meta.json
+##       ├── token_maps.pt       # final binarized output (TokenMap-compatible)
+##       └── assignment_raw.pt   # raw soft assignment matrix
 
 # ============================================================
 # Default values
@@ -107,18 +125,20 @@ for arg in "$@"; do
 done
 
 # ============================================================
-# Validate
+# Step 0: Validate and setup
 # ============================================================
 if [ -z "${CKPT_PATH}" ] && [ -z "${CACHE_DIR}" ]; then
     echo "Error: Must provide --ckpt_path or --cache_dir"
     exit 1
 fi
 
-# ============================================================
-# Setup
-# ============================================================
 if [ -z "${OUTPUT_DIR}" ]; then
     OUTPUT_DIR="${LOCAL_DIR}/output_g${NUM_GROUPS}"
+fi
+
+if [ -n "${CKPT_PATH}" ] && [ ! -d "${CKPT_PATH}" ]; then
+    echo "Error: Checkpoint path does not exist: ${CKPT_PATH}"
+    exit 1
 fi
 
 echo "============================================================"
@@ -136,33 +156,52 @@ echo "Sharp Ramp Start: ${SHARP_RAMP_START}"
 echo "Max Size Mult:    ${MAX_SIZE_MULT}"
 echo "Min Overlap Soft: ${MIN_OVERLAP_SOFT}"
 echo "Output Dir:       ${OUTPUT_DIR}"
+echo "Local Dir:        ${LOCAL_DIR}"
 echo "Run:              ${RUN}"
 echo "============================================================"
 
 mkdir -p "${OUTPUT_DIR}"
 
-# ============================================================
-# Setup NANOCHAT_BASE_DIR if using checkpoint path
-# ============================================================
 if [ -n "${CKPT_PATH}" ]; then
-    # Copy tokenizer to local dir
-    mkdir -p "${LOCAL_DIR}"
+    # --ckpt_path mode: copy model to local dir, download data, find checkpoint
 
-    if [ -d "${CKPT_PATH}/tokenizer" ]; then
-        mkdir -p "${LOCAL_DIR}/tokenizer"
-        cp "${CKPT_PATH}/tokenizer/"* "${LOCAL_DIR}/tokenizer/"
-        echo "Copied tokenizer to ${LOCAL_DIR}/tokenizer/"
+    # ============================================================
+    # Step 1: Copy tokenizer
+    # ============================================================
+    echo ""
+    echo "Step 1: Copying tokenizer..."
+
+    if [ ! -d "${CKPT_PATH}/tokenizer" ]; then
+        echo "Error: No tokenizer directory found at ${CKPT_PATH}/tokenizer"
+        exit 1
     fi
 
-    # Copy checkpoints
-    if [ -d "${CKPT_PATH}/base_checkpoints" ]; then
-        if [ ! -d "${LOCAL_DIR}/base_checkpoints" ]; then
-            cp -r "${CKPT_PATH}/base_checkpoints" "${LOCAL_DIR}/"
-            echo "Copied base_checkpoints to ${LOCAL_DIR}/"
-        fi
+    mkdir -p "${LOCAL_DIR}/tokenizer"
+    cp "${CKPT_PATH}/tokenizer/"* "${LOCAL_DIR}/tokenizer/"
+    echo "  Copied tokenizer to ${LOCAL_DIR}/tokenizer/"
+
+    # ============================================================
+    # Step 2: Copy checkpoints
+    # ============================================================
+    echo ""
+    echo "Step 2: Copying checkpoints..."
+
+    if [ ! -d "${CKPT_PATH}/base_checkpoints" ]; then
+        echo "Error: No base_checkpoints directory found at ${CKPT_PATH}/base_checkpoints"
+        exit 1
     fi
 
-    # Download validation data
+    if [ ! -d "${LOCAL_DIR}/base_checkpoints" ]; then
+        cp -r "${CKPT_PATH}/base_checkpoints" "${LOCAL_DIR}/"
+    fi
+    echo "  Copied base_checkpoints to ${LOCAL_DIR}/base_checkpoints/"
+
+    # ============================================================
+    # Step 3: Download dataset
+    # ============================================================
+    echo ""
+    echo "Step 3: Downloading dataset..."
+
     export NANOCHAT_BASE_DIR="${LOCAL_DIR}"
     python -m nanochat.dataset --split=${CACHE_SPLIT}
 
@@ -171,18 +210,30 @@ if [ -n "${CKPT_PATH}" ]; then
         exit 1
     fi
 
-    # Find inner checkpoint directory
+    echo "  Downloaded data to ${LOCAL_DIR}/simple_story_data/"
+
+    # ============================================================
+    # Step 4: Find checkpoint directory
+    # ============================================================
+    echo ""
+    echo "Step 4: Finding checkpoint directory..."
+
+    # Find the directory containing model_*.pt files (handles nested structures)
     INNER_CKPT_DIR=$(find "${LOCAL_DIR}/base_checkpoints" -name "model_*.pt" -printf '%h\n' 2>/dev/null | sort -u | head -1)
 
     if [ -z "${INNER_CKPT_DIR}" ]; then
         echo "Error: No checkpoints found in ${LOCAL_DIR}/base_checkpoints"
+        echo "Available directories:"
+        ls -la "${LOCAL_DIR}/base_checkpoints/"
         exit 1
     fi
 
+    echo "  Found checkpoint dir: ${INNER_CKPT_DIR}"
+
     CKPT_DIR_ARG="--ckpt_dir=${INNER_CKPT_DIR}"
 else
+    # --cache_dir mode: no model copy needed, just set NANOCHAT_BASE_DIR
     CKPT_DIR_ARG=""
-    # If using cache_dir, still need NANOCHAT_BASE_DIR for tokenizer
     export NANOCHAT_BASE_DIR="${LOCAL_DIR}"
 fi
 
@@ -194,10 +245,10 @@ else
 fi
 
 # ============================================================
-# Run training
+# Step 5: Run training
 # ============================================================
 echo ""
-echo "Starting training..."
+echo "Step 5: Starting training..."
 
 python -m scripts.train_group_mapping \
     ${CKPT_DIR_ARG} \
@@ -227,7 +278,7 @@ if [ $TRAIN_STATUS -ne 0 ]; then
 fi
 
 # ============================================================
-# Summary
+# Step 6: Summary
 # ============================================================
 echo ""
 echo "============================================================"
