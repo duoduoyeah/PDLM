@@ -166,6 +166,64 @@ def plot_top_bottom_groups(results, output_dir, n=20):
     print(f"Saved {path}")
 
 
+def plot_precision_recall(results, output_dir):
+    """Precision vs recall scatter and prediction count distribution."""
+    groups = results["per_group_accuracy"]
+
+    # Check if new fields exist
+    sample = next(iter(groups.values()))
+    if "predicted" not in sample:
+        print("Skipping precision/recall plot — no 'predicted' field in data (re-run eval)")
+        return
+
+    accs = []       # recall
+    precs = []      # precision
+    predicted = []  # prediction count
+    group_ids = []
+    for g, d in groups.items():
+        if d["total"] > 0 and d.get("predicted", 0) > 0:
+            accs.append(d["accuracy"])
+            precs.append(d["precision"])
+            predicted.append(d["predicted"])
+            group_ids.append(int(g))
+
+    accs = np.array(accs)
+    precs = np.array(precs)
+    predicted = np.array(predicted)
+
+    fig, axes = plt.subplots(1, 3, figsize=(16, 4.5))
+
+    # Precision vs Recall scatter
+    axes[0].scatter(accs, precs, alpha=0.4, s=12, color="#4C72B0")
+    axes[0].plot([0, 1], [0, 1], color="gray", linestyle=":", linewidth=0.8)
+    axes[0].set_title("Precision vs Recall per Group")
+    axes[0].set_xlabel("Recall (accuracy)")
+    axes[0].set_ylabel("Precision")
+    axes[0].set_xlim(-0.02, 1.02)
+    axes[0].set_ylim(-0.02, 1.02)
+
+    # Prediction count distribution (log scale)
+    axes[1].hist(np.log10(predicted + 1), bins=30, color="#DD8452", edgecolor="white", alpha=0.85)
+    axes[1].set_title("Distribution of Prediction Counts")
+    axes[1].set_xlabel("log10(predicted)")
+    axes[1].set_ylabel("Number of Groups")
+
+    # Precision vs prediction count
+    axes[2].scatter(predicted, precs, alpha=0.4, s=12, color="#55A868")
+    axes[2].set_title("Precision vs Prediction Count")
+    axes[2].set_xlabel("Times predicted")
+    axes[2].set_ylabel("Precision")
+    axes[2].set_xscale("log")
+    axes[2].set_ylim(-0.02, 1.02)
+
+    fig.suptitle(f"Precision & Prediction Analysis — {len(accs)} groups", fontsize=11)
+    fig.tight_layout()
+    path = f"{output_dir}/precision_recall.png"
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    print(f"Saved {path}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Plot MTP eval results")
     parser.add_argument("json_path", help="Path to eval_result.json")
@@ -178,8 +236,9 @@ def main():
     plot_position_metrics(results, args.output_dir)
     plot_group_accuracy_distribution(results, args.output_dir)
     plot_top_bottom_groups(results, args.output_dir)
+    plot_precision_recall(results, args.output_dir)
 
-    print("\nDone. Generated 3 plots.")
+    print("\nDone.")
 
 
 if __name__ == "__main__":
