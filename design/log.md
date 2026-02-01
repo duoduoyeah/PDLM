@@ -1,6 +1,7 @@
 01/31
 1. I guess make the group level almost equal by adjust the overlap and sub-group level?-> new tokenizer, run new exp_c model 
 2. eval mtp pure and group one. think about this question
+3. later for mtp-gpt, we could make the mtp_loss_beta to 1, i.e. do not weighted it.
 
 01/28
 1. read flow matching stuff, read how they solve the token dependencies stuff.
