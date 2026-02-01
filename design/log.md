@@ -1,5 +1,5 @@
 02/01
-1. 
+1. how many tokens we used to train this lgm?   
 
 01/31
 1. I guess make the group level almost equal by adjust the overlap and sub-group level?-> new tokenizer, run new exp_c model 

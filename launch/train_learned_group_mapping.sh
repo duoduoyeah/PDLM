@@ -216,14 +216,27 @@ if [ -n "${CKPT_PATH}" ]; then
     echo "Step 3: Downloading dataset..."
 
     export NANOCHAT_BASE_DIR="${LOCAL_DIR}"
-    python -m nanochat.dataset --split=${CACHE_SPLIT}
 
-    if [ $? -ne 0 ]; then
-        echo "Error: Failed to download dataset"
-        exit 1
+    # Skip download if shards already exist
+    DATA_DIR="${LOCAL_DIR}/simple_story_data"
+    if [ "${CACHE_SPLIT}" = "val" ]; then
+        SHARD_PATTERN="${DATA_DIR}/validation_*.parquet"
+    else
+        SHARD_PATTERN="${DATA_DIR}/shard_*.parquet"
     fi
 
-    echo "  Downloaded data to ${LOCAL_DIR}/simple_story_data/"
+    if ls ${SHARD_PATTERN} 1>/dev/null 2>&1; then
+        echo "  Shards already exist in ${DATA_DIR}, skipping download."
+    else
+        python -m nanochat.dataset --split=${CACHE_SPLIT}
+
+        if [ $? -ne 0 ]; then
+            echo "Error: Failed to download dataset"
+            exit 1
+        fi
+
+        echo "  Downloaded data to ${DATA_DIR}/"
+    fi
 
     # ============================================================
     # Step 4: Find checkpoint directory
