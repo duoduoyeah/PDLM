@@ -7,6 +7,7 @@ Usage:
 """
 
 import json
+import os
 import argparse
 import numpy as np
 
@@ -172,6 +173,7 @@ def main():
     args = parser.parse_args()
 
     results = load_results(args.json_path)
+    os.makedirs(args.output_dir, exist_ok=True)
 
     plot_position_metrics(results, args.output_dir)
     plot_group_accuracy_distribution(results, args.output_dir)
