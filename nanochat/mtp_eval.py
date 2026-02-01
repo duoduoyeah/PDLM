@@ -72,7 +72,7 @@ def eval_mtp(
     stats_by_pos = {k: {"nll": 0.0, "correct": 0, "tokens": 0} for k in range(K)}
 
     # Accumulators per group (for transition accuracy)
-    stats_by_group = {g: {"correct": 0, "total": 0} for g in range(num_groups)}
+    stats_by_group = {g: {"correct": 0, "total": 0, "predicted": 0, "predicted_correct": 0} for g in range(num_groups)}
 
     with torch.no_grad():
         for batch_idx in range(num_batches):
@@ -199,6 +199,7 @@ def _update_position_stats_pure(pos_stats, group_stats, logits, targets,
     # For each position, distribute 1/num_valid to each valid target group.
     # If the prediction is correct (any valid group), also distribute 1/num_valid to correct.
     # This measures: "when group G's tokens appear as targets, how often is the model correct?"
+    pred_group_flat = pred_group.reshape(-1)  # (B*T,)
     target_groups_flat = target_groups.reshape(-1, target_groups.shape[-1])  # (B*T, overlap_k)
     valid_flat = target_groups_flat >= 0  # (B*T, overlap_k)
     num_valid = valid_flat.sum(dim=-1).float()  # (B*T,)
@@ -212,6 +213,10 @@ def _update_position_stats_pure(pos_stats, group_stats, logits, targets,
         has_g_f = has_g.float()
         group_stats[g]["total"] += (weight * has_g_f).sum().item()
         group_stats[g]["correct"] += (correct_weight * has_g_f).sum().item()
+        # Prediction-side stats: how often the model picks this group, and how often that's correct
+        pred_is_g = (pred_group_flat == g)  # (B*T,)
+        group_stats[g]["predicted"] += pred_is_g.sum().item()
+        group_stats[g]["predicted_correct"] += (pred_is_g & correct_flat).sum().item()
 
 
 def _update_position_stats_group(pos_stats, group_stats, logits, targets):
@@ -264,6 +269,7 @@ def _update_position_stats_group(pos_stats, group_stats, logits, targets):
     # For each position, distribute 1/num_valid to each valid target group.
     # If the prediction is correct (any valid group), also distribute 1/num_valid to correct.
     # This measures: "when group G's tokens appear as targets, how often is the model correct?"
+    pred_flat = preds.reshape(-1)  # (B*T,)
     target_groups_flat = targets.reshape(-1, targets.shape[-1])  # (B*T, overlap_k)
     valid_flat = target_groups_flat >= 0  # (B*T, overlap_k)
     num_valid = valid_flat.sum(dim=-1).float()  # (B*T,)
@@ -276,6 +282,10 @@ def _update_position_stats_group(pos_stats, group_stats, logits, targets):
         has_g_f = has_g.float()
         group_stats[g]["total"] += (weight * has_g_f).sum().item()
         group_stats[g]["correct"] += (correct_weight * has_g_f).sum().item()
+        # Prediction-side stats: how often the model picks this group, and how often that's correct
+        pred_is_g = (pred_flat == g)  # (B*T,)
+        group_stats[g]["predicted"] += pred_is_g.sum().item()
+        group_stats[g]["predicted_correct"] += (pred_is_g & correct_flat).sum().item()
 
 
 def _build_result(stats_by_pos, stats_by_group, K, num_groups):
@@ -314,10 +324,15 @@ def _build_result(stats_by_pos, stats_by_group, K, num_groups):
     for g in range(num_groups):
         correct = stats_by_group[g]["correct"]
         total = stats_by_group[g]["total"]
+        predicted = stats_by_group[g]["predicted"]
+        predicted_correct = stats_by_group[g]["predicted_correct"]
         result["per_group_accuracy"][g] = {
             "accuracy": correct / total if total > 0 else 0.0,
             "correct": correct,
             "total": total,
+            "predicted": predicted,
+            "predicted_correct": predicted_correct,
+            "precision": predicted_correct / predicted if predicted > 0 else 0.0,
         }
 
     return result
