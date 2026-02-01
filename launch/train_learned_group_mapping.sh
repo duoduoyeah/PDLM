@@ -124,6 +124,19 @@ for arg in "$@"; do
     esac
 done
 
+# Load secrets from .env file (for wandb API key)
+if [ -f "launch/.env" ]; then
+    source launch/.env
+    echo "Loaded secrets from launch/.env"
+else
+    echo "Warning: launch/.env not found. Run '%run launch/setup_secrets.py' first"
+fi
+
+# Wandb login
+if [ -n "${WANDB_API_KEY}" ]; then
+    wandb login --relogin "${WANDB_API_KEY}"
+fi
+
 # ============================================================
 # Step 0: Validate and setup
 # ============================================================
