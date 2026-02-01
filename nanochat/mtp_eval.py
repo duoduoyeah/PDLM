@@ -195,17 +195,27 @@ def _update_position_stats_pure(pos_stats, group_stats, logits, targets,
     pos_stats["correct"] += correct.sum().item()
     pos_stats["tokens"] += B * T
 
-    # Update per-group stats using first valid target group
-    first_target_group = target_groups[:, :, 0]  # (B, T)
-    targets_flat = first_target_group.reshape(-1)
-    correct_flat = correct.reshape(-1)
-    valid_flat = first_target_group.reshape(-1) >= 0
+    # Update per-group stats:
+    # - Correct: only the matched group gets correct += 1, total += 1
+    # - Wrong: each valid target group gets total += 1/num_valid_groups
+    pred_group_flat = pred_group.reshape(-1)  # (B*T,)
+    target_groups_flat = target_groups.reshape(-1, target_groups.shape[-1])  # (B*T, overlap_k)
+    valid_flat = target_groups_flat >= 0  # (B*T, overlap_k)
+    num_valid = valid_flat.sum(dim=-1).float()  # (B*T,)
+    correct_flat = correct.reshape(-1)  # (B*T,)
+    wrong_flat = ~correct_flat & (num_valid > 0)
+    wrong_weight = torch.where(num_valid > 0, 1.0 / num_valid, torch.zeros_like(num_valid))
+    wrong_weight = wrong_weight * wrong_flat.float()  # (B*T,)
 
     num_groups = len(group_stats)
     for g in range(num_groups):
-        group_mask = (targets_flat == g) & valid_flat
-        group_stats[g]["total"] += group_mask.sum().item()
-        group_stats[g]["correct"] += (group_mask & correct_flat).sum().item()
+        # Correct: predicted group was g and prediction was correct
+        correct_g = (pred_group_flat == g) & correct_flat
+        group_stats[g]["correct"] += correct_g.sum().item()
+        group_stats[g]["total"] += correct_g.sum().item()
+        # Wrong: g was a valid target group but prediction was wrong
+        has_g = (target_groups_flat == g).any(dim=-1)  # (B*T,)
+        group_stats[g]["total"] += (wrong_weight * has_g.float()).sum().item()
 
 
 def _update_position_stats_group(pos_stats, group_stats, logits, targets):
@@ -254,16 +264,27 @@ def _update_position_stats_group(pos_stats, group_stats, logits, targets):
     pos_stats["correct"] += correct_masked.sum().item()
     pos_stats["tokens"] += position_valid.sum().item()
 
-    # Update per-group stats using first valid target for group tracking
-    first_target = targets[:, :, 0]  # (B, T)
-    targets_flat = first_target.reshape(-1)
-    correct_flat = correct_masked.reshape(-1)
-    valid_flat = position_valid.reshape(-1)
+    # Update per-group stats:
+    # - Correct: only the matched group gets correct += 1, total += 1
+    # - Wrong: each valid target group gets total += 1/num_valid_groups
+    pred_flat = preds.reshape(-1)  # (B*T,)
+    target_groups_flat = targets.reshape(-1, targets.shape[-1])  # (B*T, overlap_k)
+    valid_flat = target_groups_flat >= 0  # (B*T, overlap_k)
+    num_valid = valid_flat.sum(dim=-1).float()  # (B*T,)
+    correct_flat = correct_masked.reshape(-1)  # (B*T,)
+    position_valid_flat = position_valid.reshape(-1)
+    wrong_flat = ~correct_flat & position_valid_flat
+    wrong_weight = torch.where(num_valid > 0, 1.0 / num_valid, torch.zeros_like(num_valid))
+    wrong_weight = wrong_weight * wrong_flat.float()  # (B*T,)
 
     for g in range(V):
-        group_mask = (targets_flat == g) & valid_flat
-        group_stats[g]["total"] += group_mask.sum().item()
-        group_stats[g]["correct"] += (group_mask & correct_flat).sum().item()
+        # Correct: predicted group was g and prediction was correct
+        correct_g = (pred_flat == g) & correct_flat
+        group_stats[g]["correct"] += correct_g.sum().item()
+        group_stats[g]["total"] += correct_g.sum().item()
+        # Wrong: g was a valid target group but prediction was wrong
+        has_g = (target_groups_flat == g).any(dim=-1)  # (B*T,)
+        group_stats[g]["total"] += (wrong_weight * has_g.float()).sum().item()
 
 
 def _build_result(stats_by_pos, stats_by_group, K, num_groups):
