@@ -31,7 +31,7 @@ ckpt_step = -1         # checkpoint step (-1 = last)
 # Logit cache
 cache_dir = ""         # path to pre-cached logits (if empty, will cache first)
 cache_num_batches = 200
-cache_split = "val"
+cache_split = "train"
 skip_pos0 = False      # mask out pos 0 within each block
 
 # Assignment matrix
