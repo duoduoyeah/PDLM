@@ -42,7 +42,7 @@ final_eval_batches = 225    # batches for final eval (fresh data)
 
 # Assignment matrix
 num_groups = 256       # number of groups (G)
-max_size_soft_multiplier = 4  # max_size_soft = (V / G) * multiplier
+max_size_soft_multiplier = 2  # max_size_soft = expected_group_size * multiplier (overlap-aware)
 min_overlap_soft = 4   # soft lower bound on groups per token
 
 # Loss weights
@@ -192,7 +192,12 @@ for chunk_idx in range(num_chunks):
         print0(f"  epochs_per_chunk={epochs_per_chunk}, final_eval_batches={final_eval_batches}")
         print0(f"  pure_vocab_size={pure_vocab_size}, B={meta['batch_size']}, T={meta['seq_len']}")
 
-        max_size_soft = (pure_vocab_size / num_groups) * max_size_soft_multiplier
+        # Overlap-aware expected group size: V * overlap_k / G
+        # If binarize_topk not set, fall back to no-overlap estimate V / G
+        effective_overlap = binarize_topk if binarize_topk > 0 else 1
+        expected_group_size = pure_vocab_size * effective_overlap / num_groups
+        max_size_soft = expected_group_size * max_size_soft_multiplier
+        print0(f"  expected_group_size={expected_group_size:.1f} (V={pure_vocab_size}, overlap_k={effective_overlap}, G={num_groups})")
         assign_model = AssignmentMatrix(
             pure_vocab_size=pure_vocab_size,
             num_groups=num_groups,
