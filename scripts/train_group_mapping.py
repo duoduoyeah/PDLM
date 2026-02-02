@@ -18,7 +18,7 @@ import torch
 
 from nanochat.common import print0, DummyWandb
 from nanochat.learned_group_mapping import AssignmentMatrix
-from nanochat.learned_group_mapping.cache_logits import cache_logits, CachedLogitDataset
+from nanochat.learned_group_mapping.cache_logits import cache_logits, cache_logits_to_gpu, CachedLogitDataset
 
 # -----------------------------------------------------------------------------
 # Config defaults (Poor Man's Configurator style)
@@ -80,17 +80,30 @@ wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(
 )
 
 # ============================================================
-# Step 1: Ensure logit cache exists
+# Step 1: Cache logits (GPU-direct or disk)
 # ============================================================
-if not cache_dir:
-    assert ckpt_dir, "Must provide --ckpt_dir or --cache_dir"
-    cache_dir = os.path.join(output_dir or ".", "logit_cache")
-    print0(f"No cache_dir provided, will cache logits to {cache_dir}")
+gpu_batches = None
 
-if not os.path.exists(os.path.join(cache_dir, "cache_meta.json")):
+if not cache_dir:
+    # No cache_dir: cache directly to GPU memory (skip disk entirely)
+    assert ckpt_dir, "Must provide --ckpt_dir or --cache_dir"
+    step_arg = None if ckpt_step == -1 else ckpt_step
+    print0(f"Caching logits from {ckpt_dir} (step={step_arg}) directly to GPU...")
+    gpu_batches, meta = cache_logits_to_gpu(
+        ckpt_dir=ckpt_dir,
+        step=step_arg,
+        split=cache_split,
+        num_batches=cache_num_batches,
+        device_type=device_type,
+        skip_pos0=skip_pos0,
+    )
+    pure_vocab_size = meta["pure_vocab_size"]
+    total_batches = len(gpu_batches)
+elif not os.path.exists(os.path.join(cache_dir, "cache_meta.json")):
+    # cache_dir specified but doesn't exist yet: write to disk first
     assert ckpt_dir, "Cache does not exist and no --ckpt_dir provided to create it"
     step_arg = None if ckpt_step == -1 else ckpt_step
-    print0(f"Caching logits from {ckpt_dir} (step={step_arg})...")
+    print0(f"Caching logits from {ckpt_dir} (step={step_arg}) to {cache_dir}...")
     cache_logits(
         ckpt_dir=ckpt_dir,
         step=step_arg,
@@ -100,16 +113,28 @@ if not os.path.exists(os.path.join(cache_dir, "cache_meta.json")):
         device_type=device_type,
         skip_pos0=skip_pos0,
     )
-else:
-    print0(f"Using existing logit cache at {cache_dir}")
 
 # ============================================================
-# Step 2: Load cached data
+# Step 2: Load cached data (from disk if not already in GPU)
 # ============================================================
-dataset = CachedLogitDataset(cache_dir)
-meta = dataset.meta
-pure_vocab_size = meta["pure_vocab_size"]
-total_batches = len(dataset)
+if gpu_batches is None:
+    print0(f"Loading logit cache from {cache_dir}")
+    dataset = CachedLogitDataset(cache_dir)
+    meta = dataset.meta
+    pure_vocab_size = meta["pure_vocab_size"]
+    total_batches = len(dataset)
+
+    # Preload all batches to GPU (bf16) to avoid per-step disk I/O
+    print0("Preloading all batches to GPU (bf16)...")
+    gpu_batches = []
+    for i in range(total_batches):
+        pure_logits, pure_targets, loss_mask = dataset[i]
+        gpu_batches.append((
+            pure_logits.to(device=device),
+            pure_targets.to(device=device),
+            loss_mask.to(device=device),
+        ))
+    print0(f"  preloaded {total_batches} batches to GPU")
 
 # Train/eval split
 num_eval = max(1, int(total_batches * eval_frac))
@@ -119,18 +144,6 @@ eval_indices = list(range(num_train, total_batches))
 
 print0(f"Dataset: {total_batches} batches, {num_train} train / {num_eval} eval")
 print0(f"  pure_vocab_size={pure_vocab_size}, B={meta['batch_size']}, T={meta['seq_len']}")
-
-# Preload all batches to GPU (bf16) to avoid per-step disk I/O
-print0("Preloading all batches to GPU (bf16)...")
-gpu_batches = []
-for i in range(total_batches):
-    pure_logits, pure_targets, loss_mask = dataset[i]
-    gpu_batches.append((
-        pure_logits.to(device=device),   # keep bf16 on GPU
-        pure_targets.to(device=device),
-        loss_mask.to(device=device),
-    ))
-print0(f"  preloaded {total_batches} batches to GPU")
 
 # ============================================================
 # Step 3: Create assignment matrix
