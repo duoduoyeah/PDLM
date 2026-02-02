@@ -41,7 +41,7 @@ min_overlap_soft = 4   # soft lower bound on groups per token
 
 # Loss weights
 lambda_noise = 0.1     # weight for group size penalty
-lambda_overlap = 0.0   # weight for overlap penalty
+lambda_overlap = 0.1   # weight for overlap penalty
 lambda_sharp = 1.0     # final weight for sharpening penalty
 sharp_ramp_start = 0.7 # fraction of total steps before sharpening starts ramping
 
@@ -239,21 +239,17 @@ for epoch in range(num_epochs):
                 )
                 eval_task_loss += loss_dict["loss_task"]
 
-                # Group accuracy: does argmax group contain the target token?
+                # Group accuracy: does argmax group match target's best group?
                 group_logits = pure_logits @ soft_assign  # (B, T, G)
                 pred_groups = group_logits.argmax(dim=-1)  # (B, T)
 
-                # Binary membership for target tokens: soft_assign[target] > 0.5
+                # Use argmax-based check instead of binary threshold
                 target_membership = soft_assign[pure_targets]  # (B, T, G)
-                target_binary = target_membership > 0.5
-
-                # Check if predicted group is in target's groups
-                B, T = pred_groups.shape
-                pred_g_expanded = pred_groups.unsqueeze(-1)  # (B, T, 1)
-                target_in_pred = target_binary.gather(-1, pred_g_expanded).squeeze(-1)  # (B, T)
+                target_best_group = target_membership.argmax(dim=-1)  # (B, T)
+                correct = (pred_groups == target_best_group)  # (B, T)
 
                 mask_float = loss_mask.float()
-                eval_group_correct += (target_in_pred.float() * mask_float).sum().item()
+                eval_group_correct += (correct.float() * mask_float).sum().item()
                 eval_group_total += mask_float.sum().item()
 
         eval_task_loss /= num_eval

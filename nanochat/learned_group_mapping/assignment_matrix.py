@@ -34,7 +34,7 @@ class AssignmentMatrix(nn.Module):
         self.min_overlap_soft = min_overlap_soft
 
         # The only trainable parameter
-        self.A = nn.Parameter(torch.randn(pure_vocab_size, num_groups))
+        self.A = nn.Parameter(torch.randn(pure_vocab_size, num_groups) * 0.01 + 0.5)
 
     def get_soft_assign(self):
         """Returns soft assignment matrix: sigmoid(A), shape (V, G)."""
