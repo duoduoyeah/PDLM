@@ -45,6 +45,9 @@ lambda_overlap = 0.1   # weight for overlap penalty
 lambda_sharp = 1.0     # final weight for sharpening penalty
 sharp_ramp_start = 0.7 # fraction of total steps before sharpening starts ramping
 
+# Binarization
+binarize_topk = 0      # if > 0, use top-k per token instead of threshold (sets overlap_k = topk)
+
 # Optimization
 lr = 0.1               # learning rate (high is ok for single matrix)
 num_epochs = 50        # number of training epochs
@@ -276,7 +279,7 @@ if output_dir:
     print0(f"Saved raw assignment to {raw_path}")
 
     # Binarize and save TokenMap-compatible dict
-    token_maps = model.binarize(threshold=0.5)
+    token_maps = model.binarize(threshold=0.5, topk=binarize_topk)
     maps_path = os.path.join(output_dir, "token_maps.pt")
     torch.save(token_maps, maps_path)
     print0(f"Saved token_maps.pt to {maps_path}")
@@ -287,7 +290,7 @@ if output_dir:
     print0(f"Verification: TokenMap loaded successfully")
     print0(f"  pure_vocab_size={tm.pure_vocab_size}, num_groups={tm.num_groups}, overlap_k={tm.overlap_k}")
 else:
-    token_maps = model.binarize(threshold=0.5)
+    token_maps = model.binarize(threshold=0.5, topk=binarize_topk)
     print0("Warning: no --output_dir specified, results not saved")
 
 # ============================================================
@@ -307,13 +310,19 @@ groups_per_token = (pure_to_group >= 0).sum(dim=1).float()  # (V,)
 # Group sizes: how many tokens in each group
 tokens_per_group = group_to_pure_mask.sum(dim=1).float()  # (G,)
 
+gpt_pct = torch.quantile(groups_per_token, torch.tensor([0.1, 0.25, 0.75, 0.9]))
+tpg_pct = torch.quantile(tokens_per_group, torch.tensor([0.1, 0.25, 0.75, 0.9]))
 print0(f"\nMapping stats (V={pure_vocab_size}, G={num_groups}):")
 print0(f"  overlap_k:        {token_maps['overlap_k']}")
 print0(f"  groups/token:     min={groups_per_token.min().item():.0f}, "
+       f"p10={gpt_pct[0].item():.0f}, p25={gpt_pct[1].item():.0f}, "
        f"mean={groups_per_token.mean().item():.2f}, "
+       f"p75={gpt_pct[2].item():.0f}, p90={gpt_pct[3].item():.0f}, "
        f"max={groups_per_token.max().item():.0f}")
 print0(f"  tokens/group:     min={tokens_per_group.min().item():.0f}, "
+       f"p10={tpg_pct[0].item():.0f}, p25={tpg_pct[1].item():.0f}, "
        f"mean={tokens_per_group.mean().item():.2f}, "
+       f"p75={tpg_pct[2].item():.0f}, p90={tpg_pct[3].item():.0f}, "
        f"max={tokens_per_group.max().item():.0f}")
 print0(f"  ideal tokens/grp: {pure_vocab_size / num_groups:.1f}")
 

@@ -111,33 +111,45 @@ class AssignmentMatrix(nn.Module):
         return total_loss, loss_dict
 
     @torch.no_grad()
-    def binarize(self, threshold=0.5):
+    def binarize(self, threshold=0.5, topk=0):
         """
         Convert soft assignment to binary and produce a TokenMap-compatible dict.
 
         Args:
-            threshold: Binarization threshold for soft assignments.
+            threshold: Binarization threshold for soft assignments (used when topk=0).
+            topk: If > 0, each token is assigned to its top-k groups by soft value,
+                  ignoring the threshold. This guarantees overlap_k = topk.
 
         Returns:
             Dict with keys: pure_to_group, group_to_pure_mask, pure_vocab_size,
             num_groups, overlap_k, mask_token_id. Compatible with TokenMap.__init__.
         """
         soft = self.get_soft_assign()  # (V, G)
-        binary = (soft >= threshold).bool()  # (V, G)
+
+        if topk > 0:
+            # Top-k mode: each token gets assigned to its top-k groups
+            _, top_indices = soft.topk(topk, dim=1)  # (V, topk)
+            binary = torch.zeros_like(soft, dtype=torch.bool)
+            binary.scatter_(1, top_indices, True)
+            num_orphans = 0
+            print(f"Binarize mode: top-k (k={topk})")
+        else:
+            binary = (soft >= threshold).bool()  # (V, G)
+
+            # Handle tokens with no group assignment (below threshold everywhere)
+            row_sums = binary.sum(dim=1)
+            orphan_mask = row_sums == 0
+            num_orphans = orphan_mask.sum().item()
+            if num_orphans > 0:
+                # Assign orphans to their highest-scoring group
+                orphan_groups = soft[orphan_mask].argmax(dim=-1)
+                binary[orphan_mask, :] = False
+                binary[orphan_mask, orphan_groups] = True
+            print(f"Binarize mode: threshold ({threshold})")
 
         # Stats
-        row_sums = binary.sum(dim=1)  # how many groups per token
-        col_sums = binary.sum(dim=0)  # how many tokens per group
-
-        # Handle tokens with no group assignment (below threshold everywhere)
-        orphan_mask = row_sums == 0
-        num_orphans = orphan_mask.sum().item()
-        if num_orphans > 0:
-            # Assign orphans to their highest-scoring group
-            orphan_groups = soft[orphan_mask].argmax(dim=-1)
-            binary[orphan_mask, :] = False
-            binary[orphan_mask, orphan_groups] = True
-            row_sums = binary.sum(dim=1)
+        row_sums = binary.sum(dim=1)
+        col_sums = binary.sum(dim=0)
 
         # Build pure_to_group: (V, overlap_k) where overlap_k = max groups per token
         overlap_k = row_sums.max().item()
@@ -152,14 +164,22 @@ class AssignmentMatrix(nn.Module):
         group_to_pure_mask = binary.T.contiguous()  # (G, V)
 
         # Report stats
-        col_sums = binary.sum(dim=0)
-        print(f"Binarize stats (threshold={threshold}):")
+        row_pct = torch.quantile(row_sums.float(), torch.tensor([0.1, 0.25, 0.75, 0.9]))
+        col_pct = torch.quantile(col_sums.float(), torch.tensor([0.1, 0.25, 0.75, 0.9]))
+        mode_str = f"topk={topk}" if topk > 0 else f"threshold={threshold}"
+        print(f"Binarize stats ({mode_str}):")
         print(f"  orphans rescued: {num_orphans}")
         print(f"  overlap_k: {overlap_k}")
         print(f"  row_sums (groups/token): min={row_sums.min().item()}, "
-              f"mean={row_sums.float().mean().item():.1f}, max={row_sums.max().item()}")
+              f"p10={row_pct[0].item():.0f}, p25={row_pct[1].item():.0f}, "
+              f"mean={row_sums.float().mean().item():.1f}, "
+              f"p75={row_pct[2].item():.0f}, p90={row_pct[3].item():.0f}, "
+              f"max={row_sums.max().item()}")
         print(f"  col_sums (tokens/group): min={col_sums.min().item()}, "
-              f"mean={col_sums.float().mean().item():.1f}, max={col_sums.max().item()}")
+              f"p10={col_pct[0].item():.0f}, p25={col_pct[1].item():.0f}, "
+              f"mean={col_sums.float().mean().item():.1f}, "
+              f"p75={col_pct[2].item():.0f}, p90={col_pct[3].item():.0f}, "
+              f"max={col_sums.max().item()}")
 
         # Ambiguous entries: soft values close to threshold
         ambiguous = ((soft - threshold).abs() < 0.1).sum().item()

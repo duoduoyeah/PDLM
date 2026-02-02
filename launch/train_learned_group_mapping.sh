@@ -53,6 +53,7 @@ LOCAL_DIR="/content/learned_group_mapping"
 RUN="dummy"
 WANDB_GROUP=""
 EVAL_EVERY="5"
+BINARIZE_TOPK="0"
 GPU_CACHE="False"
 
 # Parse named arguments
@@ -114,6 +115,9 @@ for arg in "$@"; do
             ;;
         --eval_every=*)
             EVAL_EVERY="${arg#*=}"
+            ;;
+        --binarize_topk=*)
+            BINARIZE_TOPK="${arg#*=}"
             ;;
         --gpu_cache)
             GPU_CACHE="True"
@@ -308,7 +312,8 @@ python -m scripts.train_group_mapping \
     --output_dir=${OUTPUT_DIR} \
     --run=${RUN} \
     --wandb_group=${WANDB_GROUP} \
-    --eval_every_epoch=${EVAL_EVERY}
+    --eval_every_epoch=${EVAL_EVERY} \
+    --binarize_topk=${BINARIZE_TOPK}
 
 TRAIN_STATUS=$?
 
