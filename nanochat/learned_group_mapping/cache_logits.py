@@ -228,6 +228,104 @@ def cache_logits_to_gpu(
     return gpu_batches, meta
 
 
+class LogitCacher:
+    """Keeps frozen model loaded, caches batches on demand."""
+
+    def __init__(self, ckpt_dir, step, split, device_type, skip_pos0):
+        from scripts.pdlm_eval import load_pdlm_model
+        from nanochat.dataloader import get_data_loader
+        from nanochat.attn_masks import gen_block_causal_mask
+
+        # Load frozen model
+        model, meta_data, device, autocast_ctx, model_config = load_pdlm_model(
+            model_tag=None, step=step, device_type=device_type, ckpt_dir=ckpt_dir
+        )
+        self.model = model
+        self.device = device
+        self.autocast_ctx = autocast_ctx
+
+        # Extract config
+        model_config_dict = meta_data["model_config"]
+        user_config = meta_data.get("user_config", {})
+        self.max_seq_len = model_config_dict["sequence_len"]
+        self.block_size = model_config_dict.get("bucket_size", user_config.get("block_size", 4))
+        is_causal = model_config_dict.get("is_causal", True)
+        self.device_batch_size = user_config.get("device_batch_size", 32)
+        self.skip_pos0 = skip_pos0
+        self.pure_vocab_size = None
+
+        assert model_config_dict.get("stage") == "stage1_block", (
+            f"Expected stage1_block model, got {model_config_dict.get('stage')}"
+        )
+
+        # Create dataloader (kept alive across chunks)
+        self.loader = get_data_loader(
+            self.device_batch_size, self.max_seq_len, split=split, device=device,
+            model_config=model_config, resume_state_dict=None,
+        )
+
+        # Generate block-causal attention mask
+        self.attn_mask = gen_block_causal_mask(
+            self.max_seq_len, self.block_size, attn_backend="sdpa", is_causal=is_causal
+        ).to(device=device)
+
+        self.batches_consumed = 0
+
+    def cache_batches(self, num_batches, device):
+        """Cache next N batches to GPU. Returns list of (logits, targets, mask)."""
+        print(f"Caching {num_batches} batches to GPU memory")
+        print(f"  B={self.device_batch_size}, T={self.max_seq_len}, block_size={self.block_size}")
+
+        gpu_batches = []
+
+        with torch.no_grad():
+            for batch_idx in range(num_batches):
+                inputs, targets, loss_extras, state = next(self.loader)
+                loss_mask = loss_extras["loss_mask"]
+                pure_targets = loss_extras["pure_targets"]
+
+                if self.skip_pos0:
+                    B, T = inputs.shape
+                    num_blocks = T // self.block_size
+                    for blk in range(num_blocks):
+                        loss_mask[:, blk * self.block_size] = False
+
+                with self.autocast_ctx:
+                    logits = self.model(inputs, attn_mask=self.attn_mask)
+
+                if self.pure_vocab_size is None:
+                    self.pure_vocab_size = logits.shape[-1]
+
+                gpu_batches.append((
+                    logits.to(torch.bfloat16),
+                    pure_targets,
+                    loss_mask,
+                ))
+
+                if (batch_idx + 1) % 10 == 0 or batch_idx == 0:
+                    print(f"  cached batch {batch_idx + 1}/{num_batches}")
+
+        self.batches_consumed += num_batches
+        print(f"Done. {num_batches} batches cached (total consumed: {self.batches_consumed})")
+        return gpu_batches
+
+    def get_meta(self):
+        """Return metadata dict."""
+        return {
+            "batch_size": self.device_batch_size,
+            "seq_len": self.max_seq_len,
+            "block_size": self.block_size,
+            "pure_vocab_size": self.pure_vocab_size,
+        }
+
+    def cleanup(self):
+        """Delete model, free GPU memory."""
+        del self.model
+        del self.attn_mask
+        torch.cuda.empty_cache()
+        print("LogitCacher: cleaned up frozen model")
+
+
 class CachedLogitDataset(torch.utils.data.Dataset):
     """
     Lazily loads cached logit batches from disk.

@@ -164,23 +164,23 @@ class AssignmentMatrix(nn.Module):
         group_to_pure_mask = binary.T.contiguous()  # (G, V)
 
         # Report stats
-        q = torch.tensor([0.1, 0.25, 0.75, 0.9], device=soft.device)
+        q = torch.tensor([0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0], device=soft.device)
         row_pct = torch.quantile(row_sums.float(), q)
         col_pct = torch.quantile(col_sums.float(), q)
         mode_str = f"topk={topk}" if topk > 0 else f"threshold={threshold}"
         print(f"Binarize stats ({mode_str}):")
         print(f"  orphans rescued: {num_orphans}")
         print(f"  overlap_k: {overlap_k}")
-        print(f"  row_sums (groups/token): min={row_sums.min().item()}, "
-              f"p10={row_pct[0].item():.0f}, p25={row_pct[1].item():.0f}, "
-              f"mean={row_sums.float().mean().item():.1f}, "
-              f"p75={row_pct[2].item():.0f}, p90={row_pct[3].item():.0f}, "
-              f"max={row_sums.max().item()}")
-        print(f"  col_sums (tokens/group): min={col_sums.min().item()}, "
-              f"p10={col_pct[0].item():.0f}, p25={col_pct[1].item():.0f}, "
-              f"mean={col_sums.float().mean().item():.1f}, "
-              f"p75={col_pct[2].item():.0f}, p90={col_pct[3].item():.0f}, "
-              f"max={col_sums.max().item()}")
+        print(f"  row_sums (groups/token): "
+              f"p0={row_pct[0].item():.0f}, p10={row_pct[1].item():.0f}, "
+              f"p25={row_pct[2].item():.0f}, p50={row_pct[3].item():.0f}, "
+              f"p75={row_pct[4].item():.0f}, p90={row_pct[5].item():.0f}, "
+              f"p100={row_pct[6].item():.0f}")
+        print(f"  col_sums (tokens/group): "
+              f"p0={col_pct[0].item():.0f}, p10={col_pct[1].item():.0f}, "
+              f"p25={col_pct[2].item():.0f}, p50={col_pct[3].item():.0f}, "
+              f"p75={col_pct[4].item():.0f}, p90={col_pct[5].item():.0f}, "
+              f"p100={col_pct[6].item():.0f}")
 
         # Ambiguous entries: soft values close to threshold
         ambiguous = ((soft - threshold).abs() < 0.1).sum().item()

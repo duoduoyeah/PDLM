@@ -1,8 +1,9 @@
 #!/bin/bash
 
-## Train Learned Group Mapping
-## Caches logits from a frozen stage1_block model, then trains a group assignment
-## matrix to optimize group-level accuracy.
+## Train Learned Group Mapping (Chunked Streaming)
+## Loads a frozen stage1_block model, then trains a group assignment matrix
+## using chunked streaming: batches are cached to GPU in chunks, trained on
+## for several epochs each, then freed to bound GPU memory.
 ##
 ## Usage:
 ##   bash launch/train_learned_group_mapping.sh --ckpt_path=/path/to/model
@@ -25,9 +26,6 @@
 ##   ├── simple_story_data/      # downloaded by nanochat.dataset
 ##   │   └── val/
 ##   └── output_g<G>/            # OUTPUT_DIR
-##       ├── logit_cache/        # cached pure logits
-##       │   ├── batch_0000.pt .. batch_NNNN.pt
-##       │   └── cache_meta.json
 ##       ├── token_maps.pt       # final binarized output (TokenMap-compatible)
 ##       └── assignment_raw.pt   # raw soft assignment matrix
 
@@ -37,7 +35,6 @@
 CKPT_PATH=""
 CACHE_DIR=""
 NUM_GROUPS="256"
-NUM_EPOCHS="50"
 LR="0.1"
 LAMBDA_NOISE="0.1"
 LAMBDA_OVERLAP="0.1"
@@ -45,7 +42,6 @@ LAMBDA_SHARP="1.0"
 SHARP_RAMP_START="0.7"
 MAX_SIZE_MULT="4"
 MIN_OVERLAP_SOFT="4"
-CACHE_NUM_BATCHES="200"
 CACHE_SPLIT="train"
 SKIP_POS0="False"
 OUTPUT_DIR=""
@@ -54,7 +50,13 @@ RUN="dummy"
 WANDB_GROUP=""
 EVAL_EVERY="5"
 BINARIZE_TOPK="0"
-GPU_CACHE="False"
+
+# Chunked training params
+CHUNK_TRAIN_BATCHES="200"
+CHUNK_EVAL_BATCHES="25"
+EPOCHS_PER_CHUNK="30"
+NUM_CHUNKS="3"
+FINAL_EVAL_BATCHES="225"
 
 # Parse named arguments
 for arg in "$@"; do
@@ -67,9 +69,6 @@ for arg in "$@"; do
             ;;
         --num_groups=*)
             NUM_GROUPS="${arg#*=}"
-            ;;
-        --num_epochs=*)
-            NUM_EPOCHS="${arg#*=}"
             ;;
         --lr=*)
             LR="${arg#*=}"
@@ -91,9 +90,6 @@ for arg in "$@"; do
             ;;
         --min_overlap_soft=*)
             MIN_OVERLAP_SOFT="${arg#*=}"
-            ;;
-        --cache_num_batches=*)
-            CACHE_NUM_BATCHES="${arg#*=}"
             ;;
         --cache_split=*)
             CACHE_SPLIT="${arg#*=}"
@@ -119,13 +115,25 @@ for arg in "$@"; do
         --binarize_topk=*)
             BINARIZE_TOPK="${arg#*=}"
             ;;
-        --gpu_cache)
-            GPU_CACHE="True"
+        --chunk_train_batches=*)
+            CHUNK_TRAIN_BATCHES="${arg#*=}"
+            ;;
+        --chunk_eval_batches=*)
+            CHUNK_EVAL_BATCHES="${arg#*=}"
+            ;;
+        --epochs_per_chunk=*)
+            EPOCHS_PER_CHUNK="${arg#*=}"
+            ;;
+        --num_chunks=*)
+            NUM_CHUNKS="${arg#*=}"
+            ;;
+        --final_eval_batches=*)
+            FINAL_EVAL_BATCHES="${arg#*=}"
             ;;
         *)
             echo "Unknown argument: $arg"
             echo "Usage: bash launch/train_learned_group_mapping.sh --ckpt_path=/path/to/model"
-            echo "       [--num_groups=256] [--num_epochs=50] [--lr=0.1]"
+            echo "       [--num_groups=256] [--epochs_per_chunk=30] [--num_chunks=3] [--lr=0.1]"
             echo "       [--cache_dir=...] [--output_dir=...] [--run=wandb_name]"
             exit 1
             ;;
@@ -162,23 +170,30 @@ if [ -n "${CKPT_PATH}" ] && [ ! -d "${CKPT_PATH}" ]; then
     exit 1
 fi
 
+TOTAL_BATCHES_PER_CHUNK=$((CHUNK_TRAIN_BATCHES + CHUNK_EVAL_BATCHES))
+TOTAL_BATCHES=$((TOTAL_BATCHES_PER_CHUNK * NUM_CHUNKS + FINAL_EVAL_BATCHES))
+
 echo "============================================================"
-echo "Train Learned Group Mapping"
+echo "Train Learned Group Mapping (Chunked Streaming)"
 echo "============================================================"
-echo "Checkpoint:       ${CKPT_PATH:-N/A}"
-echo "Cache Dir:        ${CACHE_DIR:-will create}"
-echo "Num Groups:       ${NUM_GROUPS}"
-echo "Num Epochs:       ${NUM_EPOCHS}"
-echo "LR:               ${LR}"
-echo "Lambda Noise:     ${LAMBDA_NOISE}"
-echo "Lambda Overlap:   ${LAMBDA_OVERLAP}"
-echo "Lambda Sharp:     ${LAMBDA_SHARP}"
-echo "Sharp Ramp Start: ${SHARP_RAMP_START}"
-echo "Max Size Mult:    ${MAX_SIZE_MULT}"
-echo "Min Overlap Soft: ${MIN_OVERLAP_SOFT}"
-echo "Output Dir:       ${OUTPUT_DIR}"
-echo "Local Dir:        ${LOCAL_DIR}"
-echo "Run:              ${RUN}"
+echo "Checkpoint:         ${CKPT_PATH:-N/A}"
+echo "Cache Dir:          ${CACHE_DIR:-streaming (no disk cache)}"
+echo "Num Groups:         ${NUM_GROUPS}"
+echo "Chunks:             ${NUM_CHUNKS} x ${EPOCHS_PER_CHUNK} epochs"
+echo "  Train batches:    ${CHUNK_TRAIN_BATCHES}/chunk"
+echo "  Eval batches:     ${CHUNK_EVAL_BATCHES}/chunk"
+echo "  Final eval:       ${FINAL_EVAL_BATCHES} batches"
+echo "  Total dataloader: ~${TOTAL_BATCHES} batches"
+echo "LR:                 ${LR}"
+echo "Lambda Noise:       ${LAMBDA_NOISE}"
+echo "Lambda Overlap:     ${LAMBDA_OVERLAP}"
+echo "Lambda Sharp:       ${LAMBDA_SHARP}"
+echo "Sharp Ramp Start:   ${SHARP_RAMP_START}"
+echo "Max Size Mult:      ${MAX_SIZE_MULT}"
+echo "Min Overlap Soft:   ${MIN_OVERLAP_SOFT}"
+echo "Output Dir:         ${OUTPUT_DIR}"
+echo "Local Dir:          ${LOCAL_DIR}"
+echo "Run:                ${RUN}"
 echo "============================================================"
 
 mkdir -p "${OUTPUT_DIR}"
@@ -272,33 +287,24 @@ else
 fi
 
 # Build cache_dir arg
-# If a disk cache already exists, use it (even if --gpu_cache was requested)
-DEFAULT_CACHE_DIR="${OUTPUT_DIR}/logit_cache"
-if [ "${GPU_CACHE}" = "True" ] && [ ! -f "${DEFAULT_CACHE_DIR}/cache_meta.json" ] && [ -z "${CACHE_DIR}" ]; then
-    # GPU-direct mode: no existing disk cache, don't pass cache_dir
-    CACHE_DIR_ARG=""
-    echo "Using GPU-direct caching (no disk cache found)"
-elif [ -n "${CACHE_DIR}" ]; then
+if [ -n "${CACHE_DIR}" ]; then
     CACHE_DIR_ARG="--cache_dir=${CACHE_DIR}"
-    echo "Using cache_dir: ${CACHE_DIR}"
+    echo "Using disk cache: ${CACHE_DIR}"
 else
-    CACHE_DIR_ARG="--cache_dir=${DEFAULT_CACHE_DIR}"
-    if [ -f "${DEFAULT_CACHE_DIR}/cache_meta.json" ]; then
-        echo "Found existing disk cache at ${DEFAULT_CACHE_DIR}, reusing it"
-    fi
+    CACHE_DIR_ARG=""
+    echo "Using chunked GPU streaming (no disk cache)"
 fi
 
 # ============================================================
 # Step 5: Run training
 # ============================================================
 echo ""
-echo "Step 5: Starting training..."
+echo "Step 5: Starting chunked training..."
 
 python -m scripts.train_group_mapping \
     ${CKPT_DIR_ARG} \
     ${CACHE_DIR_ARG} \
     --num_groups=${NUM_GROUPS} \
-    --num_epochs=${NUM_EPOCHS} \
     --lr=${LR} \
     --lambda_noise=${LAMBDA_NOISE} \
     --lambda_overlap=${LAMBDA_OVERLAP} \
@@ -306,14 +312,18 @@ python -m scripts.train_group_mapping \
     --sharp_ramp_start=${SHARP_RAMP_START} \
     --max_size_soft_multiplier=${MAX_SIZE_MULT} \
     --min_overlap_soft=${MIN_OVERLAP_SOFT} \
-    --cache_num_batches=${CACHE_NUM_BATCHES} \
     --cache_split=${CACHE_SPLIT} \
     --skip_pos0=${SKIP_POS0} \
     --output_dir=${OUTPUT_DIR} \
     --run=${RUN} \
     --wandb_group=${WANDB_GROUP} \
     --eval_every_epoch=${EVAL_EVERY} \
-    --binarize_topk=${BINARIZE_TOPK}
+    --binarize_topk=${BINARIZE_TOPK} \
+    --chunk_train_batches=${CHUNK_TRAIN_BATCHES} \
+    --chunk_eval_batches=${CHUNK_EVAL_BATCHES} \
+    --epochs_per_chunk=${EPOCHS_PER_CHUNK} \
+    --num_chunks=${NUM_CHUNKS} \
+    --final_eval_batches=${FINAL_EVAL_BATCHES}
 
 TRAIN_STATUS=$?
 
