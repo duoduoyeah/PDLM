@@ -53,6 +53,7 @@ LOCAL_DIR="/content/learned_group_mapping"
 RUN="dummy"
 WANDB_GROUP=""
 EVAL_EVERY="5"
+GPU_CACHE="False"
 
 # Parse named arguments
 for arg in "$@"; do
@@ -113,6 +114,9 @@ for arg in "$@"; do
             ;;
         --eval_every=*)
             EVAL_EVERY="${arg#*=}"
+            ;;
+        --gpu_cache)
+            GPU_CACHE="True"
             ;;
         *)
             echo "Unknown argument: $arg"
@@ -264,10 +268,20 @@ else
 fi
 
 # Build cache_dir arg
-if [ -n "${CACHE_DIR}" ]; then
+# If a disk cache already exists, use it (even if --gpu_cache was requested)
+DEFAULT_CACHE_DIR="${OUTPUT_DIR}/logit_cache"
+if [ "${GPU_CACHE}" = "True" ] && [ ! -f "${DEFAULT_CACHE_DIR}/cache_meta.json" ] && [ -z "${CACHE_DIR}" ]; then
+    # GPU-direct mode: no existing disk cache, don't pass cache_dir
+    CACHE_DIR_ARG=""
+    echo "Using GPU-direct caching (no disk cache found)"
+elif [ -n "${CACHE_DIR}" ]; then
     CACHE_DIR_ARG="--cache_dir=${CACHE_DIR}"
+    echo "Using cache_dir: ${CACHE_DIR}"
 else
-    CACHE_DIR_ARG="--cache_dir=${OUTPUT_DIR}/logit_cache"
+    CACHE_DIR_ARG="--cache_dir=${DEFAULT_CACHE_DIR}"
+    if [ -f "${DEFAULT_CACHE_DIR}/cache_meta.json" ]; then
+        echo "Found existing disk cache at ${DEFAULT_CACHE_DIR}, reusing it"
+    fi
 fi
 
 # ============================================================
