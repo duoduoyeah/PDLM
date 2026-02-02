@@ -196,6 +196,13 @@ echo "Local Dir:          ${LOCAL_DIR}"
 echo "Run:                ${RUN}"
 echo "============================================================"
 
+# Handle existing output directory: rename by default
+if [ -d "${OUTPUT_DIR}" ]; then
+    TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+    RENAMED="${OUTPUT_DIR}_old_${TIMESTAMP}"
+    echo "Output dir already exists, renaming to ${RENAMED}"
+    mv "${OUTPUT_DIR}" "${RENAMED}"
+fi
 mkdir -p "${OUTPUT_DIR}"
 
 if [ -n "${CKPT_PATH}" ]; then
@@ -207,14 +214,18 @@ if [ -n "${CKPT_PATH}" ]; then
     echo ""
     echo "Step 1: Copying tokenizer..."
 
-    if [ ! -d "${CKPT_PATH}/tokenizer" ]; then
-        echo "Error: No tokenizer directory found at ${CKPT_PATH}/tokenizer"
-        exit 1
-    fi
+    if [ -d "${LOCAL_DIR}/tokenizer" ]; then
+        echo "  Tokenizer already exists at ${LOCAL_DIR}/tokenizer/, skipping copy."
+    else
+        if [ ! -d "${CKPT_PATH}/tokenizer" ]; then
+            echo "Error: No tokenizer directory found at ${CKPT_PATH}/tokenizer"
+            exit 1
+        fi
 
-    mkdir -p "${LOCAL_DIR}/tokenizer"
-    cp "${CKPT_PATH}/tokenizer/"* "${LOCAL_DIR}/tokenizer/"
-    echo "  Copied tokenizer to ${LOCAL_DIR}/tokenizer/"
+        mkdir -p "${LOCAL_DIR}/tokenizer"
+        cp "${CKPT_PATH}/tokenizer/"* "${LOCAL_DIR}/tokenizer/"
+        echo "  Copied tokenizer to ${LOCAL_DIR}/tokenizer/"
+    fi
 
     # ============================================================
     # Step 2: Copy checkpoints
@@ -222,15 +233,17 @@ if [ -n "${CKPT_PATH}" ]; then
     echo ""
     echo "Step 2: Copying checkpoints..."
 
-    if [ ! -d "${CKPT_PATH}/base_checkpoints" ]; then
-        echo "Error: No base_checkpoints directory found at ${CKPT_PATH}/base_checkpoints"
-        exit 1
-    fi
+    if [ -d "${LOCAL_DIR}/base_checkpoints" ]; then
+        echo "  Checkpoints already exist at ${LOCAL_DIR}/base_checkpoints/, skipping copy."
+    else
+        if [ ! -d "${CKPT_PATH}/base_checkpoints" ]; then
+            echo "Error: No base_checkpoints directory found at ${CKPT_PATH}/base_checkpoints"
+            exit 1
+        fi
 
-    if [ ! -d "${LOCAL_DIR}/base_checkpoints" ]; then
         cp -r "${CKPT_PATH}/base_checkpoints" "${LOCAL_DIR}/"
+        echo "  Copied base_checkpoints to ${LOCAL_DIR}/base_checkpoints/"
     fi
-    echo "  Copied base_checkpoints to ${LOCAL_DIR}/base_checkpoints/"
 
     # ============================================================
     # Step 3: Download dataset
