@@ -120,6 +120,18 @@ eval_indices = list(range(num_train, total_batches))
 print0(f"Dataset: {total_batches} batches, {num_train} train / {num_eval} eval")
 print0(f"  pure_vocab_size={pure_vocab_size}, B={meta['batch_size']}, T={meta['seq_len']}")
 
+# Preload all batches to GPU (bf16) to avoid per-step disk I/O
+print0("Preloading all batches to GPU (bf16)...")
+gpu_batches = []
+for i in range(total_batches):
+    pure_logits, pure_targets, loss_mask = dataset[i]
+    gpu_batches.append((
+        pure_logits.to(device=device),   # keep bf16 on GPU
+        pure_targets.to(device=device),
+        loss_mask.to(device=device),
+    ))
+print0(f"  preloaded {total_batches} batches to GPU")
+
 # ============================================================
 # Step 3: Create assignment matrix
 # ============================================================
@@ -169,11 +181,9 @@ for epoch in range(num_epochs):
         else:
             sharp_weight = lambda_sharp * (frac - sharp_ramp_start) / (1.0 - sharp_ramp_start)
 
-        # Load batch
-        pure_logits, pure_targets, loss_mask = dataset[train_indices[batch_idx]]
-        pure_logits = pure_logits.to(device=device, dtype=torch.float32)
-        pure_targets = pure_targets.to(device=device)
-        loss_mask = loss_mask.to(device=device)
+        # Load batch from GPU cache (bf16 -> float32 cast is fast on GPU)
+        pure_logits, pure_targets, loss_mask = gpu_batches[train_indices[batch_idx]]
+        pure_logits = pure_logits.float()
 
         # Forward + backward
         optimizer.zero_grad()
@@ -206,10 +216,8 @@ for epoch in range(num_epochs):
             soft_assign = model.get_soft_assign()  # (V, G)
 
             for eval_idx in eval_indices:
-                pure_logits, pure_targets, loss_mask = dataset[eval_idx]
-                pure_logits = pure_logits.to(device=device, dtype=torch.float32)
-                pure_targets = pure_targets.to(device=device)
-                loss_mask = loss_mask.to(device=device)
+                pure_logits, pure_targets, loss_mask = gpu_batches[eval_idx]
+                pure_logits = pure_logits.float()
 
                 # Task loss
                 _, loss_dict = model(
@@ -315,10 +323,8 @@ eval_group_total = 0
 model.eval()
 with torch.no_grad():
     for eval_idx in eval_indices:
-        pure_logits, pure_targets, loss_mask = dataset[eval_idx]
-        pure_logits = pure_logits.to(device=device, dtype=torch.float32)
-        pure_targets = pure_targets.to(device=device)
-        loss_mask = loss_mask.to(device=device)
+        pure_logits, pure_targets, loss_mask = gpu_batches[eval_idx]
+        pure_logits = pure_logits.float()
 
         # Group logits using binarized assignment
         group_logits = pure_logits @ binary_assign  # (B, T, G)
