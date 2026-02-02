@@ -310,8 +310,9 @@ groups_per_token = (pure_to_group >= 0).sum(dim=1).float()  # (V,)
 # Group sizes: how many tokens in each group
 tokens_per_group = group_to_pure_mask.sum(dim=1).float()  # (G,)
 
-gpt_pct = torch.quantile(groups_per_token, torch.tensor([0.1, 0.25, 0.75, 0.9]))
-tpg_pct = torch.quantile(tokens_per_group, torch.tensor([0.1, 0.25, 0.75, 0.9]))
+q = torch.tensor([0.1, 0.25, 0.75, 0.9], device=device)
+gpt_pct = torch.quantile(groups_per_token.to(device), q)
+tpg_pct = torch.quantile(tokens_per_group.to(device), q)
 print0(f"\nMapping stats (V={pure_vocab_size}, G={num_groups}):")
 print0(f"  overlap_k:        {token_maps['overlap_k']}")
 print0(f"  groups/token:     min={groups_per_token.min().item():.0f}, "

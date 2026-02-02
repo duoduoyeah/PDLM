@@ -164,8 +164,9 @@ class AssignmentMatrix(nn.Module):
         group_to_pure_mask = binary.T.contiguous()  # (G, V)
 
         # Report stats
-        row_pct = torch.quantile(row_sums.float(), torch.tensor([0.1, 0.25, 0.75, 0.9]))
-        col_pct = torch.quantile(col_sums.float(), torch.tensor([0.1, 0.25, 0.75, 0.9]))
+        q = torch.tensor([0.1, 0.25, 0.75, 0.9], device=soft.device)
+        row_pct = torch.quantile(row_sums.float(), q)
+        col_pct = torch.quantile(col_sums.float(), q)
         mode_str = f"topk={topk}" if topk > 0 else f"threshold={threshold}"
         print(f"Binarize stats ({mode_str}):")
         print(f"  orphans rescued: {num_orphans}")
