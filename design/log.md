@@ -1,5 +1,14 @@
+02/03
+1. image token on which dimension of space?
+2. continuous space language model
+3. the loss distribution of CV diffusion model
+4. for one specifyc position, input noisy token, target clean token, input clean,  target noisy token on future position
+5. what does the wte look like for DiT then
+6. dump wte and lm_head to see for each token, the mean and var is what
+
 02/01
 1. how many tokens we used to train this lgm?   trying speed is not correct.
+2. latent space paper about the loss, mtp, mdm
 
 01/31
 1. I guess make the group level almost equal by adjust the overlap and sub-group level?-> new tokenizer, run new exp_c model 
@@ -16,7 +25,6 @@
 6. continue analyze the result from experiment_d, task new method and mask method 
 7. I feel our method has advatage compared to fast-mtp: we use 
 indenpdent input x so the input-output is one2one; compared with apple-mtp, mask is inefficient, in train and this mask token is meaningless and lead to extra-cost when inference;
-
 8. when we compare expertiment_c with the normal gpt, remember we need to give a weight for gpt to make it loss smaller since stage-2 pdlm only need to do the loss stuff on a partial of vocab; also we need to make sure the stage-2 pdlm also adjust its weight
 
 01/27

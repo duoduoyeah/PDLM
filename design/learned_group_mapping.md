@@ -55,7 +55,9 @@ loss_task = BCE(sigmoid(group_logits), target_membership)
 
 Key properties:
 - **Frozen model:** No backprop through the LM. Can pre-compute and cache pure logits for the whole dataset, then train the assignment matrix on cached logits. This makes sweeping `num_groups` very cheap.
-- **Float training, binary inference:** During training `soft_assign` is continuous — each entry is "how strongly does token v belong to group g". After training, threshold to 0/1.
+- **Inference mode (two options):**
+  - **(C1) Float training → binary inference:** During training `soft_assign` is continuous. After training, threshold to 0/1. Simpler downstream logic, cleaner group boundaries.
+  - **(C2) Float training → float inference:** Keep `soft_assign` continuous at inference time. Each token contributes fractionally to multiple groups. Potentially better accuracy since no information is discarded, but requires downstream code to handle soft memberships (e.g., weighted sampling, soft group logits).
 - **BCE loss:** Each group is an independent binary question — "does the target token belong to this group?" No mutual exclusivity assumption, naturally handles overlap.
 - **Target depends on assignment:** As `A` learns, target membership shifts. Handled naturally since both group_logits and target_membership derive from the same `soft_assign`.
 
@@ -68,7 +70,7 @@ loss = loss_task + λ_noise * loss_noise + λ_overlap * loss_overlap + sharp_sch
 - **Task loss (BCE):** Primary objective. Per-group binary prediction against soft membership target.
 - **Noise penalty (column constraint):** `relu(col_sums - max_size_soft).mean()` — discourages groups from being too large.
 - **Overlap penalty (row constraint):** `relu(min_overlap_soft - row_sums).mean()` — encourages tokens to appear in multiple groups.
-- **Sharpening (annealed):** `(soft_assign * (1 - soft_assign)).mean()` — pushes values toward 0 or 1. Weight starts at 0 (free exploration), ramps up during training (force commitment). Ensures clean binarization at the end.
+- **Sharpening (annealed, C1 only):** `(soft_assign * (1 - soft_assign)).mean()` — pushes values toward 0 or 1. Weight starts at 0 (free exploration), ramps up during training (force commitment). Ensures clean binarization at the end. For C2 (float inference), set `λ_sharp = 0` to preserve soft memberships.
 
 All penalties are soft — the model can violate them if the task loss benefits enough.
 
@@ -78,7 +80,7 @@ All penalties are soft — the model can violate them if the task loss benefits 
 - `max_size_soft`: Soft upper bound on group size (column sum). Controls noise level.
 - `min_overlap_soft`: Soft lower bound on token overlap (row sum). Controls how many groups a token belongs to.
 - `λ_noise, λ_overlap`: Weights for size/overlap penalties.
-- `sharp_schedule`: Annealing schedule for sharpening penalty (e.g., linear ramp from 0 to λ_sharp over training).
+- `sharp_schedule`: Annealing schedule for sharpening penalty (e.g., linear ramp from 0 to λ_sharp over training). Only used for C1 (binary inference); set to 0 for C2 (float inference).
 
 ### Coarse Hyperparameter Sweep
 

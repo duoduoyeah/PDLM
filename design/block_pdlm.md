@@ -30,7 +30,7 @@ combined_loss = mtp_loss_weight * stage1_loss + stage2_loss
 - Stage 1 loss: CE against **pure token targets** (blocks 1..N-1)
 - At inference: pre-compute `group_head = group_to_pure_mask @ lm_head.weight` to predict groups
 
-**Group-target mode (legacy, `--stage1_target_mode=group`):**
+**Group-target mode (`--stage1_target_mode=group`):**
 - `lm_head` shape: `(num_groups, n_embd)` - group vocabulary only
 - Stage 1 loss: any-correct CE against **group token targets** (blocks 1..N-1)
 
@@ -72,6 +72,15 @@ Two steps per block:
 - **Uncertainty Weighting**: Learn σ per task, `L = L1/σ1² + L2/σ2² + log(σ1) + log(σ2)`. Principled, auto-balances.
 - **GradNorm**: Directly balance gradient magnitudes across tasks. Medium cost.
 - **Fixed ratio**: Compute initial L2/L1 ratio, use as constant w1. Simplest baseline.
+
+**RoPE should not be adjusted for prediction offset:** Stage 1 (position i → predict i+B) and Stage 2 (position i → predict i) have different target offsets. However, RoPE encodes **relative position for attention** (`q_m^T k_n` depends on `m-n`), not prediction target. Adjusting RoPE to match "target position" would break attention patterns. Keep RoPE as actual sequence positions; the model learns prediction offsets through lm_head and embeddings.
+
+**Stage disambiguation:** Currently the model must disambiguate Stage 1 vs Stage 2 behavior purely from input embedding type (pure vs group token). This is unverified — the model might conflate them. If implicit disambiguation fails, consider explicit stage embedding (similar to timestep embedding in diffusion/flow matching models):
+
+- **Option A (simple):** Add learned stage embedding to input embeddings: `input_emb + stage_emb[stage_id]`
+- **Option B (per-block, preferred):** Inject stage embedding into every transformer block via AdaLN (Adaptive LayerNorm) — timestep/stage modulates layernorm scale & shift. Stronger conditioning, less signal washout through layers.
+
+When trying stage embedding, start with Option B (per-block AdaLN).
 
 ## References
 

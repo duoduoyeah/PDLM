@@ -273,8 +273,7 @@ class LogitCacher:
 
     def cache_batches(self, num_batches, device):
         """Cache next N batches to GPU. Returns list of (logits, targets, mask)."""
-        print(f"Caching {num_batches} batches to GPU memory")
-        print(f"  B={self.device_batch_size}, T={self.max_seq_len}, block_size={self.block_size}")
+        print(f"Caching {num_batches} batches to GPU...", end=" ", flush=True)
 
         gpu_batches = []
 
@@ -302,11 +301,8 @@ class LogitCacher:
                     loss_mask,
                 ))
 
-                if (batch_idx + 1) % 10 == 0 or batch_idx == 0:
-                    print(f"  cached batch {batch_idx + 1}/{num_batches}")
-
         self.batches_consumed += num_batches
-        print(f"Done. {num_batches} batches cached (total consumed: {self.batches_consumed})")
+        print(f"done. (total consumed: {self.batches_consumed})")
         return gpu_batches
 
     def get_meta(self):
