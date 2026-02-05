@@ -13,13 +13,14 @@ LOCAL_BASE="${LOCAL_BASE:-/content/temp/group_tokenizer_test}"
 LOCAL_OUTPUT="${LOCAL_BASE}/output"
 
 # Test configurations: num_groups overlap_k
+# Output naming: n{noise}_k{overlap_k}_g{num_groups} where noise = 4096 / num_groups
 CONFIGS=(
-    "32 1"
-    "64 1"
-    "128 1"
-    "64 2"
-    "64 3"
-    "128 2"
+    "32 1"    # n128_k1_g32
+    "64 1"    # n64_k1_g64
+    "128 1"   # n32_k1_g128
+    "64 2"    # n64_k2_g64
+    "64 3"    # n64_k3_g64
+    "128 2"   # n32_k2_g128
 )
 
 echo "============================================"
@@ -62,7 +63,9 @@ echo ""
 for config in "${CONFIGS[@]}"; do
     read -r num_groups overlap_k <<< "$config"
 
-    output_dir="${LOCAL_OUTPUT}/g${num_groups}_k${overlap_k}"
+    # Calculate noise_level = 4096 / num_groups (assuming vocab_size=4096)
+    noise_level=$((4096 / num_groups))
+    output_dir="${LOCAL_OUTPUT}/n${noise_level}_k${overlap_k}_g${num_groups}"
 
     echo "--------------------------------------------"
     echo "Building: num-groups=$num_groups, overlap-k=$overlap_k"

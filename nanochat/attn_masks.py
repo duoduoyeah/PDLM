@@ -220,6 +220,45 @@ def block_diff_mask_causal(b, h, q_idx, kv_idx, block_size=None, n=None, prefix_
     return sliding_prefix_mask | block_to_prefix_mask | block_diagonal | offset_block_causal | block_causal
 
 
+def gen_block_causal_mask(seqlen, block_size, attn_backend="sdpa", is_causal=False):
+    """
+    Builds an L x L block-causal mask (standalone, no 2L structure).
+
+    This is the bottom-right quadrant (M_BC) of the 2L mask, used for stage1_block
+    where position k in block i predicts the group token at position k in block i+1.
+
+    block_q >= block_kv: each block can attend to itself and all previous blocks.
+    If is_causal=True, also enforce within-block causality (pos_q >= pos_kv).
+
+    Args:
+        seqlen: Sequence length L (mask is L x L).
+        block_size: Size of each block.
+        attn_backend: "sdpa" or "flex".
+        is_causal: If True, add within-block causality.
+
+    Returns:
+        Attention mask of shape (L, L) for sdpa.
+    """
+    if attn_backend == "sdpa":
+        q_idx = torch.arange(seqlen)[:, None]
+        kv_idx = torch.arange(seqlen)[None, :]
+
+        block_q = q_idx // block_size
+        block_kv = kv_idx // block_size
+
+        mask = block_q >= block_kv  # block-causal
+
+        if is_causal:
+            pos_in_block_q = q_idx % block_size
+            pos_in_block_kv = kv_idx % block_size
+            same_block = block_q == block_kv
+            # Within same block: enforce causality; across blocks: already allowed
+            mask = mask & (~same_block | (pos_in_block_q >= pos_in_block_kv))
+
+        return mask
+    raise ValueError("Unknown attention backend")
+
+
 def gen_mask(seqlen, block_size, attn_backend="sdpa", is_causal=False, prefix_sliding_tokens=0):
     """
     Builds a 2L x 2L mask for xt || x0.

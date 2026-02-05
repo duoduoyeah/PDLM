@@ -1,32 +1,37 @@
 #!/bin/bash
 
-## Experiment C Training Script (PDLM Stage 2: Group → Pure)
-## Test mode: data_ratio=10
-## Production mode: data_ratio=20 (or user specified)
+## PDLM Stage 1 Block Training Script (Pure → Group, block-to-block)
+## Position k in block i predicts the group token at position k in block i+1.
+## No MASK tokens, no MTP head — just direct prediction via lm_head with
+## an L×L block-causal attention mask.
+##
+## Tokenizer naming: n{noise}_k{overlap_k}_g{num_groups}
+##   - noise_level: tokens per final group (e.g., 64, 1024)
+##   - overlap_k: how many groups each token appears in
+##   - num_groups: number of final groups
 ##
 ## Usage:
-##   bash launch/run_expc.sh --noise_level=64 --num_groups=64
-##   bash launch/run_expc.sh --noise_level=256 --num_groups=16 --depth=8 --test_mode=false --data_ratio=30
-##   bash launch/run_expc.sh --noise_level=16 --num_groups=256 --block_size=8
+##   bash launch/run_pdlm_stage1_block.sh --noise_level=64 --overlap_k=1 --num_groups=64
+##   bash launch/run_pdlm_stage1_block.sh --noise_level=1024 --overlap_k=7 --num_groups=28 --depth=8
+##   bash launch/run_pdlm_stage1_block.sh --noise_level=64 --num_groups=64 --test_mode=false --data_ratio=20
 
 # ============================================================
 # Default values
 # ============================================================
-# Tokenizer naming: n{noise}_k{overlap_k}_g{num_groups}
-NOISE_LEVEL="64"        # tokens per final group (e.g., 64, 256, 16)
+NOISE_LEVEL="64"        # tokens per final group
 OVERLAP_K="1"           # how many groups each token appears in
 NUM_GROUPS="64"         # number of final groups
 TEST_MODE="true"
-DATA_RATIO="10"  # default 10 for test mode
-DEPTH="4"  # model depth
-BLOCK_SIZE="4"  # block size
+DATA_RATIO="10"         # default 10 for test mode
+DEPTH="4"               # model depth
+BLOCK_SIZE="4"          # bucket size (parallel block prediction)
+PREFIX_PURE_TOKENS="0"  # pure prefix tokens for conditioning
+IS_CAUSAL="False"       # bidirectional attention within blocks
 DRIVE_OUTPUT_FOLDER=""  # subfolder under DRIVE_BASE for outputs (empty = save directly under DRIVE_BASE)
 
 # Common training arguments
-PREFIX_PURE_TOKENS="1"
-IS_CAUSAL="False"
 MAX_SEQ_LEN="512"
-DEVICE_BATCH_SIZE="128"
+DEVICE_BATCH_SIZE="64"
 EVAL_EVERY="2500"
 EVAL_NUM_BATCHES="20"
 EVAL_NUM_BATCHES_FINAL="100"
@@ -81,13 +86,10 @@ for arg in "$@"; do
             ;;
         *)
             echo "Unknown argument: $arg"
-            echo "Usage: bash launch/run_expc.sh [--noise_level=64] [--overlap_k=1] [--num_groups=64]"
-            echo "       [--depth=4] [--block_size=4] [--test_mode=true] [--data_ratio=10]"
-            echo "       [--prefix_pure_tokens=1] [--is_causal=False] [--max_seq_len=512]"
-            echo "       [--device_batch_size=128] [--eval_every=2500] [--drive_output_folder=<folder>]"
-            echo ""
-            echo "Tokenizer naming: n{noise}_k{overlap_k}_g{num_groups}"
-            echo "Examples: n64_k1_g64, n256_k1_g16, n16_k1_g256"
+            echo "Usage: bash launch/run_pdlm_stage1_block.sh [--noise_level=64] [--overlap_k=1] [--num_groups=64]"
+            echo "       [--depth=4] [--block_size=8] [--prefix_pure_tokens=0] [--is_causal=False]"
+            echo "       [--test_mode=true] [--data_ratio=10]"
+            echo "       [--max_seq_len=512] [--device_batch_size=64] [--drive_output_folder=<folder>]"
             echo ""
             echo "Use --drive_output_folder to save outputs to a subfolder under DRIVE_BASE"
             exit 1
@@ -99,18 +101,15 @@ done
 TOKENIZER_VARIANT="n${NOISE_LEVEL}_k${OVERLAP_K}_g${NUM_GROUPS}"
 
 # Build model name
-BASE_MODEL_NAME="expc_d${DEPTH}_b${BLOCK_SIZE}_${TOKENIZER_VARIANT}"
+BASE_MODEL_NAME="pdlm_s1b_d${DEPTH}_b${BLOCK_SIZE}_${TOKENIZER_VARIANT}"
 
-WANDB_GROUP="expc_d${DEPTH}"
-MODEL_REPO="duoduoyeah/expc_d${DEPTH}"
+WANDB_GROUP="pdlm_s1b_d${DEPTH}"
 DRIVE_BASE="/content/drive/MyDrive/nanochat"
 
 # Local training base (faster than Drive)
-LOCAL_TRAIN_BASE="/content/pdlm_temp_train"
+LOCAL_TRAIN_BASE="/content/pdlm_s1b_temp_train"
 
-# Group tokenizer path on Drive (built by build_group_tokenizer.sh)
-# Contains: tokenizer.pkl, token_maps.pt (self-contained, no need for base tokenizer)
-# Naming convention: n{noise}_k{overlap_k}_g{num_groups}
+# Group tokenizer path on Drive
 GROUP_TOKENIZER_PATH="${DRIVE_BASE}/group_tokenizers/${TOKENIZER_VARIANT}"
 
 # Load secrets from .env file
@@ -138,10 +137,9 @@ export MODEL_NAME
 export DATA_RATIO
 export DEPTH
 export WANDB_GROUP
-export MODEL_REPO
 export NANOCHAT_BASE_DIR="${LOCAL_TRAIN_BASE}/${MODEL_NAME}"
 
-echo "=== Running Experiment C: ${MODEL_NAME} ==="
+echo "=== Running PDLM Stage 1 Block: ${MODEL_NAME} ==="
 echo "=== Local base dir: ${NANOCHAT_BASE_DIR} ==="
 echo "=== Drive base: ${DRIVE_BASE} ==="
 echo "=== Drive output folder: ${DRIVE_OUTPUT_FOLDER:-<root>} ==="
@@ -149,6 +147,8 @@ echo "=== Test mode: ${TEST_MODE} ==="
 echo "=== Data ratio: ${DATA_RATIO} ==="
 echo "=== Depth: ${DEPTH} ==="
 echo "=== Block size: ${BLOCK_SIZE} ==="
+echo "=== Prefix pure tokens: ${PREFIX_PURE_TOKENS} ==="
+echo "=== Is causal: ${IS_CAUSAL} ==="
 echo "=== Tokenizer: ${TOKENIZER_VARIANT} (noise=${NOISE_LEVEL}, overlap_k=${OVERLAP_K}, num_groups=${NUM_GROUPS}) ==="
 echo "=== Group tokenizer path: ${GROUP_TOKENIZER_PATH} ==="
 
@@ -206,15 +206,15 @@ python -m nanochat.dataset -n 10 --split both
 echo "Dataset download complete."
 
 # ============================================================
-# Training - PDLM Stage 2 (Group → Pure)
+# Training - PDLM Stage 1 Block (Pure → Group, block-to-block)
 # ============================================================
 
-echo "Starting PDLM Stage 2 training..."
+echo "Starting PDLM Stage 1 Block training..."
 python -m scripts.base_train \
     --run="${MODEL_NAME}" \
     --wandb_group="${WANDB_GROUP}" \
     --model_type=pdlm \
-    --pdlm_stage=stage2 \
+    --pdlm_stage=stage1_block \
     --depth=${DEPTH} \
     --block_size=${BLOCK_SIZE} \
     --prefix_pure_tokens=${PREFIX_PURE_TOKENS} \
@@ -227,7 +227,7 @@ python -m scripts.base_train \
     --eval_num_batches_final=${EVAL_NUM_BATCHES_FINAL}
 
 # ============================================================
-# Post-training: copy to Drive and upload
+# Post-training: copy to Drive
 # ============================================================
 
 echo "=== Training complete for ${MODEL_NAME} ==="
@@ -257,35 +257,6 @@ echo "Copying results to Drive: ${DRIVE_OUTPUT_DIR}"
 mkdir -p "${DRIVE_OUTPUT_DIR}"
 cp -r "${NANOCHAT_BASE_DIR}"/* "${DRIVE_OUTPUT_DIR}/"
 echo "Results saved to Drive."
-
-# Skip HuggingFace upload (keeping results on Google Drive only)
-echo "Skipping HuggingFace upload (disabled for now, results saved to Drive)"
-
-# TODO: Re-enable HuggingFace upload when ready
-# if [ "${TEST_MODE}" = "true" ]; then
-#     echo "Test mode: Skipping HuggingFace upload"
-# else
-#     # Upload to HuggingFace
-#     python -c "
-# import os
-# from huggingface_hub import HfApi
-#
-# token = os.environ.get('HF_TOKEN', '')
-# if not token:
-#     print('Warning: HF_TOKEN not set, skipping upload')
-# else:
-#     api = HfApi(token=token)
-#     model_repo = os.environ['MODEL_REPO']
-#     drive_output = '${DRIVE_OUTPUT_DIR}'
-#     print(f'Uploading {drive_output} to {model_repo}...')
-#     api.upload_large_folder(
-#         folder_path=drive_output,
-#         repo_id=model_repo,
-#         repo_type='model',
-#     )
-#     print('Upload complete!')
-# "
-# fi
 
 # Cleanup local training dir
 echo "Cleaning up local training dir..."

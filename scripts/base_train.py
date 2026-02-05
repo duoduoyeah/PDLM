@@ -16,13 +16,13 @@ from nanochat.bd3lm import BDLM, BDLMConfig
 from nanochat.gpt_mtp import GPTMTP, GPTMTPConfig
 from nanochat.dataloader import get_data_loader
 from nanochat.bd3lm_eval import eval_bd3lm
-from nanochat.pdlm_eval import eval_pdlm
+from nanochat.pdlm_eval import eval_pdlm, eval_pdlm_stage1_mask, eval_pdlm_stage1_block, eval_pdlm_both_block, eval_pdlm_full
 from nanochat.mtp_eval import eval_mtp
 from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, print_banner, get_base_dir, autodetect_device_type
 from nanochat.tokenizer import get_tokenizer
 from nanochat.group_tokenizer.token_map import get_token_map
 from nanochat.checkpoint_manager import save_checkpoint, load_checkpoint
-from nanochat.attn_masks import gen_mask
+from nanochat.attn_masks import gen_mask, gen_block_causal_mask
 print_banner()
 
 # -----------------------------------------------------------------------------
@@ -47,6 +47,11 @@ pdlm_stage = "stage2" # pdlm stage: stage1_mtp, stage1_mask, stage2, both_mtp, b
 bd3lm_effective_ratio = None # For bd3lm: auto-computed if None, or override with explicit value
 bd3lm_compute_matched = True # If True, don't adjust iterations for BD3LM (compute-matched). If False, adjust to match loss tokens (supervision-matched).
 mtp_loss_beta = 0.8 # MTP: exponential decay factor for loss weighting (β^k)
+n_future_tokens = 4 # MTP/both_mtp: number of future group tokens to predict (K)
+mtp_loss_weight = 1.0 # both_mtp: Stage 1 MTP loss weight relative to Stage 2
+loss_weight_mode = "manual" # "manual" or "fixed" - fixed computes weight from warmup batches
+loss_weight_warmup_steps = 10 # number of batches for estimating loss ratio (used when loss_weight_mode="fixed")
+stage1_target_mode = "pure" # MTP: "pure" (default) or "group" (legacy) - determines target format and loss
 # Debug
 debug = False
 # Training horizon. Only one of these 3 will be used, in this order of precedence.
@@ -197,18 +202,28 @@ elif model_type == "pdlm":
         bucket_size=block_size,
         model_name=run,
     )
+    # Add loss weight for combined stages
+    if pdlm_stage in ("both_mtp", "both_block"):
+        model_config_kwargs["mtp_loss_weight"] = mtp_loss_weight
+    # Add MTP-specific params for both_mtp stage
+    if pdlm_stage == "both_mtp":
+        model_config_kwargs.update(
+            n_future_tokens=n_future_tokens,
+            mtp_loss_beta=mtp_loss_beta,
+        )
 elif model_type == "mtp":
     ModelConfig, Model = GPTMTPConfig, GPTMTP
     model_config_kwargs = dict(
         sequence_len=max_seq_len,
         pure_vocab_size=pure_vocab_size,
         num_groups=num_groups,
-        n_future_tokens=block_size,  # predict block_size group tokens
+        n_future_tokens=block_size,  # predict block_size tokens
         mtp_loss_beta=mtp_loss_beta,
         n_layer=num_layers,
         n_head=num_heads,
         n_kv_head=num_kv_heads,
         n_embd=model_dim,
+        stage1_target_mode=stage1_target_mode,
     )
 else:
     raise ValueError(f"Unknown model_type: {model_type}")
@@ -217,6 +232,16 @@ with torch.device("meta"):
     model = Model(model_config)
 model.to_empty(device=device)
 model.init_weights()
+
+# Register group mask for MTP pure mode (needed for inference collapse)
+if model_type == "mtp" and stage1_target_mode == "pure":
+    model.register_group_mask(token_map.group_to_pure_mask.to(device=device))
+    print0(f"Registered group_to_pure_mask for MTP pure mode ({token_map.num_groups} groups × {token_map.pure_vocab_size} pure tokens)")
+
+# Register group mask for stage1_block pure mode (needed for eval group collapse)
+if model_type == "pdlm" and pdlm_stage == "stage1_block":
+    model.register_group_mask(token_map.group_to_pure_mask.to(device=device))
+    print0(f"Registered group_to_pure_mask for stage1_block ({token_map.num_groups} groups × {token_map.pure_vocab_size} pure tokens)")
 
 # Generate attention masks
 # For BD3LM: pre-generate block_size masks for prefix_sliding_tokens cycling (both normal and target_shift modes)
@@ -229,6 +254,9 @@ if model_type == "bd3lm":
         for i in range(block_size)
     ]
     print0(f"Pre-generated {block_size} attention masks for prefix_sliding_tokens cycling")
+elif model_type == "pdlm" and pdlm_stage == "stage1_block":
+    # stage1_block uses L×L block-causal mask (no 2L structure)
+    block_diff_masks = [gen_block_causal_mask(max_seq_len, block_size, attn_backend="sdpa", is_causal=is_causal).to(device=device)]
 else:
     # Single mask with prefix_sliding_tokens = 0
     block_diff_masks = [gen_mask(max_seq_len, block_size, attn_backend="sdpa", is_causal=is_causal, prefix_sliding_tokens=0).to(device=device)]
@@ -343,8 +371,11 @@ if eval_every > 0:
             model_config=model_config,
             resume_state_dict=None,  # always start fresh for validation
         )
-        # Eval uses prefix_sliding_tokens=0 (no sliding prefix for eval)
-        eval_attn_mask = gen_mask(max_seq_len, block_size, attn_backend="sdpa", is_causal=is_causal, prefix_sliding_tokens=0).to(device=device)
+        # Eval mask: L×L for stage1_block, 2L×2L for other stages
+        if pdlm_stage == "stage1_block":
+            eval_attn_mask = gen_block_causal_mask(max_seq_len, block_size, attn_backend="sdpa", is_causal=is_causal).to(device=device)
+        else:
+            eval_attn_mask = gen_mask(max_seq_len, block_size, attn_backend="sdpa", is_causal=is_causal, prefix_sliding_tokens=0).to(device=device)
         print0(f"Initialized validation dataloader and eval attention mask for PDLM evaluation")
     elif model_type == "next_token_ar":
         pass  # TODO: AR validation setup
@@ -365,6 +396,30 @@ if debug:
     debug_dir = os.path.join(os.getcwd(), "temp")
     os.makedirs(debug_dir, exist_ok=True)
     debug_dump_path = os.path.join(debug_dir, "pdlm_debug_xy.txt")
+
+# -----------------------------------------------------------------------------
+# Compute fixed loss weight if requested (for both_block stage)
+if model_type == "pdlm" and pdlm_stage == "both_block" and loss_weight_mode == "fixed":
+    print0(f"Computing fixed loss weight from {loss_weight_warmup_steps} warmup batches...")
+    total_s1, total_s2, count = 0.0, 0.0, 0
+
+    with torch.no_grad():
+        for _ in range(loss_weight_warmup_steps):
+            with autocast_ctx:
+                _, s1_loss, s2_loss = model(x, y, attn_mask=block_diff_masks[0],
+                                            loss_extras=loss_extras, return_separate_losses=True)
+            total_s1 += s1_loss.item()
+            total_s2 += s2_loss.item()
+            count += 1
+            x, y, loss_extras, dataloader_state_dict = next(train_loader)
+
+    avg_s1 = total_s1 / count
+    avg_s2 = total_s2 / count
+    computed_weight = avg_s2 / avg_s1
+    orig_model.config.mtp_loss_weight = computed_weight
+    print0(f"  Stage 1 avg loss: {avg_s1:.4f}")
+    print0(f"  Stage 2 avg loss: {avg_s2:.4f}")
+    print0(f"  Computed mtp_loss_weight: {computed_weight:.4f}")
 
 # -----------------------------------------------------------------------------
 # Set up hyperparameter schedulers
@@ -479,34 +534,183 @@ while True:
                     log_data[f"eval/suffix_{s}_overall_ppl"] = suffix_data["overall_ppl"]
                 wandb_run.log(log_data)
         elif model_type == "pdlm":
-            print0(f"Running PDLM Stage 2 evaluation at step {step} ({current_eval_batches} batches)...")
-            eval_result = eval_pdlm(
-                model=orig_model,  # use uncompiled model
-                val_loader=val_loader,
-                block_size=block_size,
-                num_batches=current_eval_batches,
-                attn_mask=eval_attn_mask,
-                device=device,
-                autocast_ctx=autocast_ctx,
-                prefix_pure_tokens=prefix_pure_tokens,
-            )
-            # Log eval results
-            print0(f"  [pdlm stage2] overall_loss: {eval_result['overall_loss']:.4f}, overall_ppl: {eval_result['overall_ppl']:.2f}")
-            # Per-position metrics
-            for pos in range(block_size):
-                pos_data = eval_result["positions"][pos]
-                print0(f"    pos {pos}: loss={pos_data['loss']:.4f}, ppl={pos_data['ppl']:.2f}")
-            # Build log data for wandb
-            log_data = {
-                "step": step,
-                "eval/overall_loss": eval_result["overall_loss"],
-                "eval/overall_ppl": eval_result["overall_ppl"],
-            }
-            for pos in range(block_size):
-                pos_data = eval_result["positions"][pos]
-                log_data[f"eval/pos_{pos}_loss"] = pos_data["loss"]
-                log_data[f"eval/pos_{pos}_ppl"] = pos_data["ppl"]
-            wandb_run.log(log_data)
+            if pdlm_stage == "stage1_mask":
+                print0(f"Running PDLM Stage 1 MASK evaluation at step {step} ({current_eval_batches} batches)...")
+                eval_result = eval_pdlm_stage1_mask(
+                    model=orig_model,  # use uncompiled model
+                    val_loader=val_loader,
+                    block_size=block_size,
+                    num_batches=current_eval_batches,
+                    attn_mask=eval_attn_mask,
+                    device=device,
+                    autocast_ctx=autocast_ctx,
+                    prefix_pure_tokens=prefix_pure_tokens,
+                )
+                # Log eval results
+                print0(f"  [pdlm stage1_mask] overall_loss: {eval_result['overall_loss']:.4f}, overall_ppl: {eval_result['overall_ppl']:.2f}, overall_accuracy: {eval_result['overall_accuracy']:.2%}")
+                # Per-position metrics
+                for pos in range(block_size):
+                    pos_data = eval_result["positions"][pos]
+                    print0(f"    pos {pos}: loss={pos_data['loss']:.4f}, ppl={pos_data['ppl']:.2f}, accuracy={pos_data['accuracy']:.2%}")
+                # Build log data for wandb
+                log_data = {
+                    "step": step,
+                    "eval/overall_loss": eval_result["overall_loss"],
+                    "eval/overall_ppl": eval_result["overall_ppl"],
+                    "eval/overall_accuracy": eval_result["overall_accuracy"],
+                }
+                for pos in range(block_size):
+                    pos_data = eval_result["positions"][pos]
+                    log_data[f"eval/pos_{pos}_loss"] = pos_data["loss"]
+                    log_data[f"eval/pos_{pos}_ppl"] = pos_data["ppl"]
+                    log_data[f"eval/pos_{pos}_accuracy"] = pos_data["accuracy"]
+                wandb_run.log(log_data)
+            elif pdlm_stage == "stage1_block":
+                print0(f"Running PDLM Stage 1 Block evaluation at step {step} ({current_eval_batches} batches)...")
+                eval_result = eval_pdlm_stage1_block(
+                    model=orig_model,
+                    val_loader=val_loader,
+                    block_size=block_size,
+                    num_batches=current_eval_batches,
+                    attn_mask=eval_attn_mask,
+                    device=device,
+                    autocast_ctx=autocast_ctx,
+                    prefix_pure_tokens=prefix_pure_tokens,
+                )
+                print0(f"  [pdlm stage1_block] overall_loss: {eval_result['overall_loss']:.4f}, overall_ppl: {eval_result['overall_ppl']:.2f}, overall_accuracy: {eval_result['overall_accuracy']:.2%}")
+                for pos in range(block_size):
+                    pos_data = eval_result["positions"][pos]
+                    print0(f"    pos {pos}: loss={pos_data['loss']:.4f}, ppl={pos_data['ppl']:.2f}, accuracy={pos_data['accuracy']:.2%}")
+                log_data = {
+                    "step": step,
+                    "eval/overall_loss": eval_result["overall_loss"],
+                    "eval/overall_ppl": eval_result["overall_ppl"],
+                    "eval/overall_accuracy": eval_result["overall_accuracy"],
+                }
+                for pos in range(block_size):
+                    pos_data = eval_result["positions"][pos]
+                    log_data[f"eval/pos_{pos}_loss"] = pos_data["loss"]
+                    log_data[f"eval/pos_{pos}_ppl"] = pos_data["ppl"]
+                    log_data[f"eval/pos_{pos}_accuracy"] = pos_data["accuracy"]
+                wandb_run.log(log_data)
+            elif pdlm_stage == "both_block":
+                print0(f"Running PDLM both_block evaluation at step {step} ({current_eval_batches} batches)...")
+                eval_result = eval_pdlm_both_block(
+                    model=orig_model,
+                    val_loader=val_loader,
+                    block_size=block_size,
+                    num_batches=current_eval_batches,
+                    attn_mask=eval_attn_mask,
+                    device=device,
+                    autocast_ctx=autocast_ctx,
+                    prefix_pure_tokens=prefix_pure_tokens,
+                    mtp_loss_weight=mtp_loss_weight,
+                    run_compatibility=False,
+                    run_oracle_accuracy=False,
+                )
+                s1 = eval_result["stage1"]
+                s2 = eval_result["stage2"]
+                print0(f"  [block_pdlm] combined_loss: {eval_result['combined_loss']:.4f}, end2end_loss: {eval_result['end2end_loss']:.4f}")
+                print0(f"    mtp_loss_weight: {eval_result['mtp_loss_weight']}, stage1_loss: {s1['overall_loss']:.4f}, stage2_loss: {s2['overall_loss']:.4f}")
+                print0(f"    Stage 1 (Block→Block): loss={s1['overall_loss']:.4f}, ppl={s1['overall_ppl']:.2f}, accuracy={s1['overall_accuracy']:.2%}")
+                for pos in range(block_size):
+                    pos_data = s1["positions"][pos]
+                    print0(f"      pos {pos}: loss={pos_data['loss']:.4f}, ppl={pos_data['ppl']:.2f}, accuracy={pos_data['accuracy']:.2%}")
+                print0(f"    Stage 2 (Denoise): loss={s2['overall_loss']:.4f}, ppl={s2['overall_ppl']:.2f}")
+                for pos in range(block_size):
+                    pos_data = s2["positions"][pos]
+                    print0(f"      pos {pos}: loss={pos_data['loss']:.4f}, ppl={pos_data['ppl']:.2f}")
+                log_data = {
+                    "step": step,
+                    "eval/combined_loss": eval_result["combined_loss"],
+                    "eval/end2end_loss": eval_result["end2end_loss"],
+                    "eval/stage1_loss": s1["overall_loss"],
+                    "eval/stage1_ppl": s1["overall_ppl"],
+                    "eval/stage1_accuracy": s1["overall_accuracy"],
+                    "eval/stage2_loss": s2["overall_loss"],
+                    "eval/stage2_ppl": s2["overall_ppl"],
+                }
+                for pos in range(block_size):
+                    s1p = s1["positions"][pos]
+                    log_data[f"eval/stage1_pos_{pos}_loss"] = s1p["loss"]
+                    log_data[f"eval/stage1_pos_{pos}_ppl"] = s1p["ppl"]
+                    log_data[f"eval/stage1_pos_{pos}_accuracy"] = s1p["accuracy"]
+                    s2p = s2["positions"][pos]
+                    log_data[f"eval/stage2_pos_{pos}_loss"] = s2p["loss"]
+                    log_data[f"eval/stage2_pos_{pos}_ppl"] = s2p["ppl"]
+                wandb_run.log(log_data)
+            else:
+                # Stage 2 evaluation
+                # Use full eval (with compatibility + oracle accuracy) for final step
+                run_full_eval = last_step
+                if run_full_eval:
+                    print0(f"Running PDLM Stage 2 full evaluation at step {step} ({current_eval_batches} batches)...")
+                    eval_result = eval_pdlm_full(
+                        model=orig_model,
+                        val_loader=val_loader,
+                        block_size=block_size,
+                        num_batches=current_eval_batches,
+                        attn_mask=eval_attn_mask,
+                        device=device,
+                        autocast_ctx=autocast_ctx,
+                        prefix_pure_tokens=prefix_pure_tokens,
+                        run_compatibility=True,
+                        compatibility_batches=max(1, current_eval_batches // 4),
+                        run_oracle_accuracy=True,
+                        oracle_accuracy_batches=max(1, current_eval_batches // 4),
+                    )
+                else:
+                    print0(f"Running PDLM Stage 2 evaluation at step {step} ({current_eval_batches} batches)...")
+                    eval_result = eval_pdlm(
+                        model=orig_model,  # use uncompiled model
+                        val_loader=val_loader,
+                        block_size=block_size,
+                        num_batches=current_eval_batches,
+                        attn_mask=eval_attn_mask,
+                        device=device,
+                        autocast_ctx=autocast_ctx,
+                        prefix_pure_tokens=prefix_pure_tokens,
+                    )
+                # Log eval results
+                print0(f"  [pdlm stage2] overall_loss: {eval_result['overall_loss']:.4f}, overall_ppl: {eval_result['overall_ppl']:.2f}")
+                # Per-position metrics
+                for pos in range(block_size):
+                    pos_data = eval_result["positions"][pos]
+                    print0(f"    pos {pos}: loss={pos_data['loss']:.4f}, ppl={pos_data['ppl']:.2f}")
+                # Compatibility metrics (final eval only)
+                if "compatibility" in eval_result:
+                    compat = eval_result["compatibility"]
+                    print0(f"  Compatibility: {compat['overall_compatibility']:.2%}")
+                    for pos in range(block_size):
+                        pos_data = compat["positions"][pos]
+                        print0(f"    pos {pos}: {pos_data['compatibility']:.2%} ({pos_data['matched']}/{pos_data['total']})")
+                # Oracle accuracy metrics (final eval only)
+                if "oracle_accuracy" in eval_result:
+                    oracle = eval_result["oracle_accuracy"]
+                    print0(f"  Oracle accuracy: {oracle['overall_accuracy']:.2%}")
+                    for pos in range(block_size):
+                        pos_data = oracle["positions"][pos]
+                        print0(f"    pos {pos}: {pos_data['accuracy']:.2%} ({pos_data['matched']}/{pos_data['total']})")
+                # Build log data for wandb
+                log_data = {
+                    "step": step,
+                    "eval/overall_loss": eval_result["overall_loss"],
+                    "eval/overall_ppl": eval_result["overall_ppl"],
+                }
+                for pos in range(block_size):
+                    pos_data = eval_result["positions"][pos]
+                    log_data[f"eval/pos_{pos}_loss"] = pos_data["loss"]
+                    log_data[f"eval/pos_{pos}_ppl"] = pos_data["ppl"]
+                # Log compatibility and oracle accuracy (final eval only)
+                if "compatibility" in eval_result:
+                    log_data["eval/compatibility"] = eval_result["compatibility"]["overall_compatibility"]
+                    for pos in range(block_size):
+                        log_data[f"eval/pos_{pos}_compatibility"] = eval_result["compatibility"]["positions"][pos]["compatibility"]
+                if "oracle_accuracy" in eval_result:
+                    log_data["eval/oracle_accuracy"] = eval_result["oracle_accuracy"]["overall_accuracy"]
+                    for pos in range(block_size):
+                        log_data[f"eval/pos_{pos}_oracle_accuracy"] = eval_result["oracle_accuracy"]["positions"][pos]["accuracy"]
+                wandb_run.log(log_data)
         elif model_type == "next_token_ar":
             pass  # TODO: AR evaluation
         elif model_type == "mtp":
@@ -601,8 +805,10 @@ while True:
                     batch_effective_tokens = x.numel() * ddp_world_size
                 total_effective_tokens += batch_effective_tokens
             elif model_type == "mtp":
-                # MTP: x is (B, T) pure tokens, y is (B, T, K) group token targets
-                loss = model(x, y)
+                # MTP: x is (B, T) pure tokens, y is targets (format depends on stage1_target_mode)
+                # For pure mode: loss_extras contains pure_to_group mapping
+                pure_to_group = loss_extras.get("pure_to_group") if loss_extras else None
+                loss = model(x, y, pure_to_group=pure_to_group)
                 total_effective_tokens += x.numel() * ddp_world_size
             else:
                 # next_token_ar: GPT forward doesn't take attn_mask

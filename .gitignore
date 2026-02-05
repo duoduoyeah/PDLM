@@ -12,3 +12,5 @@ launch/.env
 learn.md
 run_claude_at_0530.sh
 experiment_d_temp/
+.claude/
+rope/

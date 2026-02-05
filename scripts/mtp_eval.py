@@ -19,8 +19,9 @@ import torch
 from nanochat.common import compute_init, autodetect_device_type, get_base_dir, print0
 from nanochat.checkpoint_manager import load_checkpoint, find_last_step, find_largest_model
 from nanochat.gpt_mtp import GPTMTP, GPTMTPConfig
-from nanochat.mtp_eval import eval_mtp
+from nanochat.mtp_eval import eval_mtp, dump_mtp_batch
 from nanochat.dataloader import get_data_loader
+from nanochat.group_tokenizer.token_map import get_token_map
 
 
 def load_mtp_model(model_tag=None, step=None, device_type="auto", ckpt_dir=None):
@@ -73,6 +74,8 @@ def load_mtp_model(model_tag=None, step=None, device_type="auto", ckpt_dir=None)
 
     # Build model
     model_config_kwargs = meta_data["model_config"]
+    # Old checkpoints don't have stage1_target_mode; they used group targets
+    model_config_kwargs.setdefault("stage1_target_mode", "group")
     model_config = GPTMTPConfig(**model_config_kwargs)
 
     with torch.device("meta"):
@@ -81,6 +84,14 @@ def load_mtp_model(model_tag=None, step=None, device_type="auto", ckpt_dir=None)
     model.to_empty(device=device)
     model.init_weights()
     model.load_state_dict(model_data, strict=True, assign=True)
+
+    # Register group mask for pure mode (needed for inference collapse)
+    stage1_target_mode = model_config_kwargs.get("stage1_target_mode", "group")
+    if stage1_target_mode == "pure":
+        token_map = get_token_map(device=device)
+        model.register_group_mask(token_map.group_to_pure_mask)
+        print0(f"Registered group_to_pure_mask for pure mode evaluation")
+
     model.eval()
 
     # Prepare autocast
@@ -121,8 +132,9 @@ def run_eval(
     max_seq_len = model_config_dict["sequence_len"]
     n_future_tokens = model_config_dict.get("n_future_tokens", 4)
     num_groups = model_config_dict["num_groups"]
+    stage1_target_mode = model_config_dict.get("stage1_target_mode", "pure")
 
-    print0(f"Config: max_seq_len={max_seq_len}, K={n_future_tokens}, num_groups={num_groups}")
+    print0(f"Config: max_seq_len={max_seq_len}, K={n_future_tokens}, num_groups={num_groups}, target_mode={stage1_target_mode}")
 
     # Create validation dataloader
     device_batch_size = user_config.get("device_batch_size", 32)
@@ -207,7 +219,34 @@ def main():
     parser.add_argument("--num_batches", type=int, default=20, help="Number of validation batches")
     parser.add_argument("--device", type=str, default="auto", help="Device type (cuda/cpu/mps/auto)")
     parser.add_argument("--output_json", type=str, default=None, help="Optional: save results to JSON file")
+    parser.add_argument("--dump_mtp", type=str, default=None, help="Dump MTP predictions to file (path to output txt)")
+    parser.add_argument("--dump_sequences", type=int, default=5, help="Number of sequences to dump (default: 5)")
     args = parser.parse_args()
+
+    # Handle dump_mtp mode (separate from normal eval)
+    if args.dump_mtp:
+        model, meta_data, device, autocast_ctx, model_config = load_mtp_model(
+            args.model_tag, args.step, args.device, ckpt_dir=args.ckpt_dir
+        )
+        model_config_dict = meta_data["model_config"]
+        user_config = meta_data.get("user_config", {})
+        max_seq_len = model_config_dict["sequence_len"]
+        device_batch_size = user_config.get("device_batch_size", 32)
+
+        val_loader = get_data_loader(
+            device_batch_size, max_seq_len, split="val", device=device,
+            model_config=model_config, resume_state_dict=None,
+        )
+
+        dump_mtp_batch(
+            model=model,
+            val_loader=val_loader,
+            device=device,
+            autocast_ctx=autocast_ctx,
+            output_path=args.dump_mtp,
+            num_sequences=args.dump_sequences,
+        )
+        return
 
     # Run evaluation
     eval_result = run_eval(

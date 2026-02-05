@@ -1,26 +1,23 @@
 #!/bin/bash
 
-## PDLM Stage 2 Evaluation Script
-## Downloads models from HuggingFace and runs evaluation locally.
+## PDLM Stage 1 MASK Evaluation Script
+## Downloads models from HuggingFace or uses local checkpoints and runs evaluation.
 ##
 ## Usage:
-##   bash launch/eval_pdlm.sh --depth=8
-##   bash launch/eval_pdlm.sh --depth=8 --num_batches=50
-##   bash launch/eval_pdlm.sh --ckpt_dir=/path/to/model
+##   bash launch/eval_pdlm_stage1_mask.sh --ckpt_dir=/path/to/model
+##   bash launch/eval_pdlm_stage1_mask.sh --ckpt_dir=/path/to/model --num_batches=50
+##   bash launch/eval_pdlm_stage1_mask.sh --repo=duoduoyeah/pdlm_s1m_d8
 
 # ============================================================
 # Default values
 # ============================================================
 DEPTH="8"
-DATA_RATIO="20"
-BLOCK_SIZE="4"
+DATA_RATIO="10"
+BLOCK_SIZE="8"
 NUM_BATCHES="20"
-LOCAL_DIR="/tmp/pdlm_eval"
-HF_REPO=""  # Empty = use default pattern (duoduoyeah/pdlm_d${DEPTH})
+LOCAL_DIR="/tmp/pdlm_s1m_eval"
+HF_REPO=""  # Empty = use default pattern
 CKPT_DIR=""  # Direct checkpoint path (overrides HF download)
-RUN_COMPATIBILITY="true"
-RUN_ORACLE_ACCURACY="true"
-DUMP_BATCH=""  # Path to dump batch output file
 
 # Parse named arguments
 for arg in "$@"; do
@@ -46,37 +43,24 @@ for arg in "$@"; do
         --ckpt_dir=*)
             CKPT_DIR="${arg#*=}"
             ;;
-        --run_compatibility)
-            RUN_COMPATIBILITY="true"
-            ;;
-        --run_oracle_accuracy)
-            RUN_ORACLE_ACCURACY="true"
-            ;;
-        --dump_batch=*)
-            DUMP_BATCH="${arg#*=}"
-            ;;
         *)
             echo "Unknown argument: $arg"
-            echo "Usage: bash launch/eval_pdlm.sh --depth=8 [--data_ratio=20]"
-            echo "       [--block_size=4] [--num_batches=20] [--local_dir=/tmp/pdlm_eval]"
-            echo "       [--repo=duoduoyeah/pdlm_d8] [--ckpt_dir=/path/to/ckpt]"
-            echo "       [--run_compatibility] [--run_oracle_accuracy]"
-            echo "       [--dump_batch=/path/to/output.txt]"
+            echo "Usage: bash launch/eval_pdlm_stage1_mask.sh [--depth=8] [--data_ratio=10]"
+            echo "       [--block_size=8] [--num_batches=20] [--local_dir=/tmp/pdlm_s1m_eval]"
+            echo "       [--repo=duoduoyeah/pdlm_s1m_d8] [--ckpt_dir=/path/to/ckpt]"
             exit 1
             ;;
     esac
 done
 
 echo "============================================================"
-echo "PDLM Stage 2 Evaluation"
+echo "PDLM Stage 1 MASK Evaluation"
 echo "============================================================"
-echo "Depth:          ${DEPTH}"
-echo "Data Ratio:     ${DATA_RATIO}"
-echo "Block Size:     ${BLOCK_SIZE}"
-echo "Num Batches:    ${NUM_BATCHES}"
-echo "Local Dir:      ${LOCAL_DIR}"
-echo "Compatibility:  ${RUN_COMPATIBILITY}"
-echo "Oracle Accuracy: ${RUN_ORACLE_ACCURACY}"
+echo "Depth:        ${DEPTH}"
+echo "Data Ratio:   ${DATA_RATIO}"
+echo "Block Size:   ${BLOCK_SIZE}"
+echo "Num Batches:  ${NUM_BATCHES}"
+echo "Local Dir:    ${LOCAL_DIR}"
 echo "============================================================"
 
 # ============================================================
@@ -150,39 +134,10 @@ if [ -n "${CKPT_DIR}" ]; then
     ACTUAL_CKPT_DIR="$ACTUAL_CKPT_DIRS"
     echo "Checkpoint dir: ${ACTUAL_CKPT_DIR}"
 
-    COMPAT_FLAG=""
-    if [ "${RUN_COMPATIBILITY}" = "true" ]; then
-        COMPAT_FLAG="--run_compatibility"
-    fi
-
-    ORACLE_FLAG=""
-    if [ "${RUN_ORACLE_ACCURACY}" = "true" ]; then
-        ORACLE_FLAG="--run_oracle_accuracy"
-    fi
-
-    DUMP_FLAG=""
-    if [ -n "${DUMP_BATCH}" ]; then
-        DUMP_FLAG="--dump_batch=${DUMP_BATCH}"
-    fi
-
-    # If dump_batch is specified, just run that and exit
-    if [ -n "${DUMP_BATCH}" ]; then
-        # Create output directory if it doesn't exist
-        DUMP_DIR=$(dirname "${DUMP_BATCH}")
-        mkdir -p "${DUMP_DIR}"
-
-        python -m scripts.pdlm_eval \
-            --ckpt_dir="${ACTUAL_CKPT_DIR}" \
-            ${DUMP_FLAG}
-        exit 0
-    fi
-
     python -m scripts.pdlm_eval \
         --ckpt_dir="${ACTUAL_CKPT_DIR}" \
         --num_batches=${NUM_BATCHES} \
-        --output_json="${CKPT_DIR}/eval_result.json" \
-        ${COMPAT_FLAG} \
-        ${ORACLE_FLAG}
+        --output_json="${CKPT_DIR}/eval_result.json"
 
     echo ""
     echo "============================================================"
@@ -196,7 +151,7 @@ fi
 # ============================================================
 # Build HF repo name
 if [ -z "${HF_REPO}" ]; then
-    HF_REPO="duoduoyeah/pdlm_d${DEPTH}"
+    HF_REPO="duoduoyeah/pdlm_s1m_d${DEPTH}"
 fi
 
 echo ""
@@ -230,8 +185,8 @@ fi
 echo ""
 echo "Step 2: Discovering models..."
 
-# Build pattern for model directories
-BASE_PATTERN="pdlm_d${DEPTH}_b${BLOCK_SIZE}"
+# Build pattern for model directories (stage 1 mask uses pdlm_s1m prefix)
+BASE_PATTERN="pdlm_s1m_d${DEPTH}_b${BLOCK_SIZE}"
 
 # Find all matching model directories
 MODELS=()
@@ -262,16 +217,6 @@ echo "Step 3: Running evaluation..."
 # Store results for summary
 declare -a RESULTS
 
-COMPAT_FLAG=""
-if [ "${RUN_COMPATIBILITY}" = "true" ]; then
-    COMPAT_FLAG="--run_compatibility"
-fi
-
-ORACLE_FLAG=""
-if [ "${RUN_ORACLE_ACCURACY}" = "true" ]; then
-    ORACLE_FLAG="--run_oracle_accuracy"
-fi
-
 for MODEL_DIR in "${MODELS[@]}"; do
     MODEL_NAME=$(basename "$MODEL_DIR")
 
@@ -297,13 +242,13 @@ for MODEL_DIR in "${MODELS[@]}"; do
 
     if [ "$CKPT_COUNT" -eq 0 ]; then
         echo "Error: No checkpoints found in ${MODEL_DIR}/base_checkpoints"
-        RESULTS+=("${MODEL_NAME}|-,-|NO CKPT")
+        RESULTS+=("${MODEL_NAME}|-,-,-|NO CKPT")
         continue
     elif [ "$CKPT_COUNT" -gt 1 ]; then
         echo "Warning: Multiple checkpoint directories found:"
         echo "$CKPT_DIRS"
         echo "Skipping - please specify which one to use."
-        RESULTS+=("${MODEL_NAME}|-,-|MULTI CKPT")
+        RESULTS+=("${MODEL_NAME}|-,-,-|MULTI CKPT")
         continue
     fi
 
@@ -314,28 +259,27 @@ for MODEL_DIR in "${MODELS[@]}"; do
     OUTPUT=$(python -m scripts.pdlm_eval \
         --ckpt_dir="${CKPT_DIR}" \
         --num_batches=${NUM_BATCHES} \
-        --output_json="${MODEL_DIR}/eval_result.json" \
-        ${COMPAT_FLAG} \
-        ${ORACLE_FLAG} 2>&1)
+        --output_json="${MODEL_DIR}/eval_result.json" 2>&1)
 
     EVAL_STATUS=$?
     echo "$OUTPUT"
 
     if [ $EVAL_STATUS -eq 0 ]; then
-        # Extract key metrics from JSON
+        # Extract key metrics from JSON (including accuracy for Stage 1)
         if [ -f "${MODEL_DIR}/eval_result.json" ]; then
             METRICS=$(python -c "
 import json
 with open('${MODEL_DIR}/eval_result.json', 'r') as f:
     result = json.load(f)
-print(f\"{result['overall_loss']:.4f},{result['overall_ppl']:.2f}\")
+acc = result.get('overall_accuracy', 0.0)
+print(f\"{result['overall_loss']:.4f},{result['overall_ppl']:.2f},{acc:.2%}\")
 " 2>/dev/null)
             RESULTS+=("${MODEL_NAME}|${METRICS}|OK")
         else
-            RESULTS+=("${MODEL_NAME}|-,-|OK (no JSON)")
+            RESULTS+=("${MODEL_NAME}|-,-,-|OK (no JSON)")
         fi
     else
-        RESULTS+=("${MODEL_NAME}|-,-|FAILED")
+        RESULTS+=("${MODEL_NAME}|-,-,-|FAILED")
     fi
 done
 
@@ -344,16 +288,16 @@ done
 # ============================================================
 echo ""
 echo "============================================================"
-echo "EVALUATION SUMMARY"
+echo "EVALUATION SUMMARY (Stage 1 MASK)"
 echo "============================================================"
 echo ""
-printf "%-40s | %-10s | %-10s | %-10s\n" "Model" "Loss" "PPL" "Status"
-printf "%s\n" "-------------------------------------------------------------------------"
+printf "%-50s | %-10s | %-10s | %-10s | %-10s\n" "Model" "Loss" "PPL" "Accuracy" "Status"
+printf "%s\n" "---------------------------------------------------------------------------------------------"
 
 for result in "${RESULTS[@]}"; do
     IFS='|' read -r model metrics status <<< "$result"
-    IFS=',' read -r loss ppl <<< "$metrics"
-    printf "%-40s | %-10s | %-10s | %-10s\n" "$model" "$loss" "$ppl" "$status"
+    IFS=',' read -r loss ppl acc <<< "$metrics"
+    printf "%-50s | %-10s | %-10s | %-10s | %-10s\n" "$model" "$loss" "$ppl" "$acc" "$status"
 done
 
 echo ""

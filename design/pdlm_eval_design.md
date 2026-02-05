@@ -37,16 +37,44 @@ loss_pos_4: loss at position i+4
 
 ### 3. Compatibility Eval (New for Experiment C)
 
-Test if parallel predictions are mutually consistent.
+Test if parallel predictions are mutually consistent (self-consistency).
 
 ```python
 # Step 1: Generate x1, x2, x3, x4 in parallel from G1, G2, G3, G4
-# Step 2: For each position i, re-predict x_i given OTHER pure tokens
+# Step 2: For each position i, re-predict x_i given OTHER model predictions
 #         e.g., predict x4' given [prefix, x1, x2, x3, G4]
 # Step 3: Check if x_i == x_i'
 
 compatibility_score = % positions where prediction unchanged
 ```
+
+**Note**: This measures self-consistency, NOT accuracy. A model could be consistently wrong.
+
+### 3b. Oracle Accuracy Eval (New)
+
+Test if model can predict correctly given **ground truth** context.
+
+```python
+# For each position i in block:
+# Step 1: Create input with ground truth pure tokens at OTHER positions
+#         e.g., [prefix, p1, p2, p3, G4] where p1-p3 are from validation set
+# Step 2: Predict x4'
+# Step 3: Check if x4' == p4 (ground truth)
+
+oracle_accuracy = % positions where prediction matches ground truth
+```
+
+**Why this matters**: Compatibility eval has a limitation - when `x4 ≠ x4'`, we don't know if:
+1. **True incompatibility**: x4' conflicts with [x1, x2, x3] (bad)
+2. **Valid alternative**: x4' is perfectly fine with [x1, x2, x3], just a different valid choice
+
+Oracle accuracy helps interpret compatibility results:
+- **High oracle accuracy + low compatibility** → Model explores valid alternatives, not broken
+- **Low oracle accuracy** → Model fundamentally struggles even with perfect context
+
+**Relationship**:
+- Compatibility = self-consistency (does model agree with itself?)
+- Oracle accuracy = capability (can model get correct answer given perfect context?)
 
 ### 4. Per-Group Accuracy (Analysis)
 
@@ -101,16 +129,19 @@ scripts/pdlm_eval/
 
 ```bash
 # Basic loss eval
-python -m scripts.pdlm_eval.run_eval --ckpt_dir path/to/ckpt --mode loss
+python -m scripts.pdlm_eval --ckpt_dir path/to/ckpt
 
-# Compatibility eval
-python -m scripts.pdlm_eval.run_eval --ckpt_dir path/to/ckpt --mode compatibility
+# With compatibility eval (self-consistency)
+python -m scripts.pdlm_eval --ckpt_dir path/to/ckpt --run_compatibility
 
-# Per-group analysis
-python -m scripts.pdlm_eval.run_eval --ckpt_dir path/to/ckpt --mode per_group
+# With oracle accuracy eval (capability)
+python -m scripts.pdlm_eval --ckpt_dir path/to/ckpt --run_oracle_accuracy
 
-# Full eval (all metrics)
-python -m scripts.pdlm_eval.run_eval --ckpt_dir path/to/ckpt --mode all
+# Full eval (both compatibility and oracle accuracy)
+python -m scripts.pdlm_eval --ckpt_dir path/to/ckpt --run_compatibility --run_oracle_accuracy
+
+# Via shell script (defaults: both compatibility and oracle accuracy enabled)
+bash launch/eval_pdlm.sh --ckpt_dir=/path/to/ckpt
 ```
 
 ---
@@ -118,16 +149,20 @@ python -m scripts.pdlm_eval.run_eval --ckpt_dir path/to/ckpt --mode all
 ## Priority
 
 For Experiment C first model:
-1. [Must] Standard loss eval with per-position breakdown
-2. [Must] Compatibility eval
-3. [Later] Per-group accuracy
-4. [Later] Logit leakage
+1. [Done] Standard loss eval with per-position breakdown
+2. [Done] Compatibility eval (self-consistency)
+3. [Done] Oracle accuracy eval (capability given perfect context)
+4. [Later] Per-group accuracy
+5. [Later] Logit leakage
 
 ---
 
 ## TODO
 
-- [ ] Create basic loss_eval.py with per-position support
-- [ ] Create compatibility.py
-- [ ] Create run_eval.py entry point
+- [x] Create basic loss_eval.py with per-position support
+- [x] Create compatibility.py
+- [x] Create oracle accuracy eval
+- [x] Create run_eval.py entry point
 - [ ] Test on first Experiment C model
+- [ ] Per-group accuracy analysis
+- [ ] Logit leakage analysis

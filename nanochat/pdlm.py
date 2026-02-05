@@ -17,8 +17,55 @@ from nanochat.muon import Muon, DistMuon
 from nanochat.adamw import DistAdamW
 from nanochat.group_tokenizer.token_map import get_token_map
 
+
+def any_correct_ce_loss(logits, valid_targets, loss_mask=None):
+    """
+    Cross-entropy loss where ANY of the valid targets is considered correct.
+
+    Loss = -log(Σ P(g) for g in valid_groups)
+
+    This allows the model to predict any of the valid group assignments
+    when overlap_k > 1.
+
+    Args:
+        logits: (N, num_groups) - logits over group vocabulary (flattened)
+        valid_targets: (N, overlap_k) - ALL valid group indices for each position
+                       Use -1 for padding (will be masked out)
+        loss_mask: optional (N,) bool - True for positions to include in loss
+
+    Returns:
+        loss: scalar mean loss
+    """
+    # Compute log probabilities
+    log_probs = F.log_softmax(logits, dim=-1)
+
+    # Mask invalid targets (where valid_targets == -1)
+    valid_mask = valid_targets >= 0  # (N, overlap_k)
+
+    # Clamp to valid indices for gather (masked positions will be ignored)
+    safe_targets = valid_targets.clamp(min=0)
+
+    # Gather log probs for valid targets
+    valid_log_probs = torch.gather(log_probs, dim=-1, index=safe_targets)  # (N, overlap_k)
+
+    # Mask out invalid positions with -inf before logsumexp
+    valid_log_probs = valid_log_probs.masked_fill(~valid_mask, float('-inf'))
+
+    # Log-sum-exp over valid groups: log(Σ P(valid_g))
+    log_valid_prob = torch.logsumexp(valid_log_probs, dim=-1)  # (N,)
+
+    # Negative log likelihood
+    nll = -log_valid_prob
+
+    # Apply loss_mask if provided
+    if loss_mask is not None:
+        nll = nll * loss_mask.float()
+        return nll.sum() / loss_mask.sum().clamp(min=1)
+    else:
+        return nll.mean()
+
 # Stage types for PDLM
-PDLMStage = Literal["stage1_mtp", "stage1_mask", "stage2", "both_mtp", "both_mask"]
+PDLMStage = Literal["stage1_mtp", "stage1_mask", "stage1_block", "stage2", "both_mtp", "both_mask", "both_block"]
 
 @dataclass
 class PDLMConfig:
@@ -39,8 +86,13 @@ class PDLMConfig:
     prefix_pure_tokens: int = 0
     mask_token_id: int = -1  # only needed for stage1_mask and both_mask
 
+    # MTP (Multi-Token Prediction) config for both_mtp stage
+    n_future_tokens: int = 4       # K: number of group tokens to predict for Stage 1
+    mtp_loss_beta: float = 0.8     # Exponential decay factor for MTP loss weights
+    mtp_loss_weight: float = 1.0   # Stage 1 MTP loss weight relative to Stage 2 (which is 1.0)
+
     def __post_init__(self):
-        valid_stages = {"stage1_mtp", "stage1_mask", "stage2", "both_mtp", "both_mask"}
+        valid_stages = {"stage1_mtp", "stage1_mask", "stage1_block", "stage2", "both_mtp", "both_mask", "both_block"}
         if self.stage not in valid_stages:
             raise ValueError(f"Invalid stage: {self.stage}. Must be one of {valid_stages}")
 
@@ -53,10 +105,16 @@ class PDLMConfig:
             assert self.mask_token_id != -1, "stage1_mask requires mask_token_id"
             wte_size = self.pure_vocab_size + 1  # pure + MASK
             lm_head_size = self.num_groups
+        elif self.stage == "stage1_block":
+            wte_size = self.pure_vocab_size
+            lm_head_size = self.pure_vocab_size  # Full vocab for pure-target mode
         elif self.stage == "stage2":
             wte_size = self.pure_vocab_size + self.num_groups
             lm_head_size = self.pure_vocab_size
         elif self.stage == "both_mtp":
+            wte_size = self.pure_vocab_size + self.num_groups
+            lm_head_size = self.pure_vocab_size + self.num_groups
+        elif self.stage == "both_block":
             wte_size = self.pure_vocab_size + self.num_groups
             lm_head_size = self.pure_vocab_size + self.num_groups
         elif self.stage == "both_mask":
@@ -187,8 +245,46 @@ class PDLM(nn.Module):
         self.register_buffer("sin", sin, persistent=False)
         self._token_map = None
         self._is_causal = self.config.is_causal
+        self.register_buffer("group_to_pure_mask", None, persistent=False)
         self.inference_mask = None
         self.bucket_size = config.bucket_size
+
+        # MTP components for both_mtp stage
+        if config.stage == "both_mtp":
+            from nanochat.mtp_head import MTPHead
+
+            # Group embeddings for MTP teacher forcing
+            self.group_wte = nn.Embedding(config.num_groups, config.n_embd)
+
+            # Wrapper to slice lm_head output to only group logits
+            # MTPHead expects lm_head to output num_groups logits
+            class _GroupLogitHead(nn.Module):
+                def __init__(self, lm_head, pure_vocab_size):
+                    super().__init__()
+                    self.lm_head = lm_head
+                    self.offset = pure_vocab_size
+
+                def forward(self, x):
+                    return self.lm_head(x)[:, :, self.offset:]
+
+            self._group_logit_head = _GroupLogitHead(self.lm_head, config.pure_vocab_size)
+
+            # MTP head (uses wrapper that slices to group logits)
+            self.mtp_head = MTPHead(
+                n_embd=config.n_embd,
+                n_head=config.n_head,
+                n_future_tokens=config.n_future_tokens,
+                group_wte=self.group_wte,
+                lm_head=self._group_logit_head,
+            )
+
+    def register_group_mask(self, group_to_pure_mask):
+        """Register group mask for stage1_block inference collapse."""
+        self.register_buffer("group_to_pure_mask", group_to_pure_mask.float())
+
+    def get_group_head_weight(self):
+        """Get collapsed group head: (num_groups, n_embd)"""
+        return self.group_to_pure_mask @ self.lm_head.weight
 
     def init_weights(self):
         self.apply(self._init_weights)
@@ -205,6 +301,13 @@ class PDLM(nn.Module):
         # Cast the embeddings from fp32 to bf16: optim can tolerate it and it saves memory: both in the model and the activations
         if self.transformer.wte.weight.device.type == "cuda":
             self.transformer.wte.to(dtype=torch.bfloat16)
+
+        # Init MTP components for both_mtp stage
+        if self.config.stage == "both_mtp":
+            self.mtp_head.init_weights()
+            # Cast group_wte to bf16
+            if self.group_wte.weight.device.type == "cuda":
+                self.group_wte.to(dtype=torch.bfloat16)
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -255,7 +358,19 @@ class PDLM(nn.Module):
         matrix_params = list(self.transformer.h.parameters())
         embedding_params = list(self.transformer.wte.parameters())
         lm_head_params = list(self.lm_head.parameters())
-        assert len(list(self.parameters())) == len(matrix_params) + len(embedding_params) + len(lm_head_params)
+
+        # For both_mtp stage, also include MTP head parameters
+        if self.config.stage == "both_mtp":
+            # MTP block parameters go to matrix optimizer (Muon)
+            mtp_matrix_params = list(self.mtp_head.block.parameters()) + list(self.mtp_head.proj.parameters())
+            matrix_params = matrix_params + mtp_matrix_params
+            # Group embeddings go to AdamW like other embeddings
+            group_wte_params = list(self.group_wte.parameters())
+            embedding_params = embedding_params + group_wte_params
+            assert len(list(self.parameters())) == len(matrix_params) + len(embedding_params) + len(lm_head_params)
+        else:
+            assert len(list(self.parameters())) == len(matrix_params) + len(embedding_params) + len(lm_head_params)
+
         # Create the AdamW optimizer for the embedding and lm_head
         # Scale the LR for the AdamW parameters by ∝1/√dmodel (having tuned the LRs for 768 dim model)
         dmodel_lr_scale = (model_dim / 768) ** -0.5
@@ -279,8 +394,16 @@ class PDLM(nn.Module):
                 group["initial_lr"] = group["lr"]
         return optimizers
 
-    def forward(self, idx, targets=None, kv_cache=None, attn_mask=None, loss_extras=None):
+    def forward(self, idx, targets=None, kv_cache=None, attn_mask=None, loss_extras=None, return_separate_losses=False):
         """Training: idx/targets are length L; we concat to 2L inside this and apply block mask."""
+        # Dispatch to specialized forward methods for certain stages
+        if self.config.stage == "stage1_block" and targets is not None:
+            return self._forward_stage1_block(idx, targets, attn_mask, loss_extras)
+        if self.config.stage == "both_block" and targets is not None:
+            return self._forward_both_block(idx, targets, attn_mask, loss_extras, return_separate_losses)
+        if self.config.stage == "both_mtp" and targets is not None:
+            return self._forward_both_mtp(idx, targets, attn_mask, loss_extras)
+
         if targets is not None:
             B, T = idx.size()
             assert attn_mask is not None, "Train should has attn mask"
@@ -320,8 +443,25 @@ class PDLM(nn.Module):
         if targets is not None:
             # training: given the targets, compute and return the loss
             logits = logits[:, :T, :]  # first T positions (xt half)
+            V = logits.size(-1)
 
-            if loss_extras is not None and "loss_mask" in loss_extras:
+            if self.config.stage == "stage1_mask":
+                # Stage 1 MASK: predict group tokens from MASK positions
+                # logits: (B, T, num_groups)
+                # group_targets: (B, T, overlap_k) from loss_extras
+                # loss_mask: (B, T) from loss_extras
+                assert loss_extras is not None and "group_targets" in loss_extras
+                group_targets = loss_extras["group_targets"]
+                loss_mask = loss_extras["loss_mask"]
+                overlap_k = group_targets.size(-1)
+
+                # Compute any-correct loss at MASK positions
+                loss = any_correct_ce_loss(
+                    logits.reshape(-1, V),
+                    group_targets.reshape(-1, overlap_k),
+                    loss_mask.reshape(-1)
+                )
+            elif loss_extras is not None and "loss_mask" in loss_extras:
                 # Stage2: use loss_mask to compute loss only on block positions
                 loss_mask = loss_extras["loss_mask"]
                 # Compute per-token cross-entropy
@@ -329,7 +469,7 @@ class PDLM(nn.Module):
                 target_log_probs = torch.gather(log_probs, dim=-1, index=targets.unsqueeze(-1))
                 nll = -target_log_probs.squeeze(-1)  # (B, T)
                 # Apply mask and compute mean
-                loss = (nll * loss_mask).sum() / loss_mask.sum()
+                loss = (nll * loss_mask).sum() / loss_mask.sum().clamp(min=1)
             else:
                 # Legacy mode: use ignore_index for prefix_pure_tokens
                 loss_targets = targets
@@ -347,6 +487,236 @@ class PDLM(nn.Module):
         else:
             # inference: just return the logits directly
             return logits
+
+    def _forward_both_mtp(self, idx, targets, attn_mask, loss_extras):
+        """
+        Forward pass for both_mtp stage: combines Stage 1 (MTP) and Stage 2 (denoising) in one pass.
+
+        Input structure (2L total):
+        - First L (idx/xt): group tokens at block positions -> Stage 2 predicts pure tokens
+        - Second L (targets/x0): pure tokens -> Stage 1 predicts K future group tokens via MTP
+
+        Args:
+            idx: (B, L) input tokens (xt: group tokens at block positions)
+            targets: (B, L) target tokens (x0: pure tokens)
+            attn_mask: (2L, 2L) block diffusion attention mask
+            loss_extras: dict with "loss_mask" (B, L) and "mtp_targets" (B, L, K, overlap_k)
+
+        Returns:
+            combined_loss: scalar loss = mtp_loss_weight * stage1_loss + stage2_loss
+        """
+        from nanochat.mtp_head import compute_mtp_loss
+
+        B, T = idx.size()
+        assert attn_mask is not None, "Train should have attn mask"
+        assert self.config.sequence_len == T, "use double seq length when train"
+        assert targets.size(1) == T, "Targets should match the base sequence length"
+
+        # Concatenate [xt | x0] to form (B, 2L) input
+        combined_idx = torch.cat((idx, targets), dim=1)  # (B, 2L)
+
+        # Get rotary embeddings for 2L sequence (same positions for both halves)
+        cos = self.cos[:, :T]
+        sin = self.sin[:, :T]
+        cos_sin = (torch.cat((cos, cos), dim=1), torch.cat((sin, sin), dim=1))
+
+        # Forward through transformer
+        x = self.transformer.wte(combined_idx)
+        x = norm(x)
+        for block in self.transformer.h:
+            x = block(x, cos_sin, kv_cache=None, attn_mask=attn_mask)
+        x = norm(x)
+
+        # Compute logits
+        softcap = 15
+        logits = self.lm_head(x)  # (B, 2L, pure_vocab_size + num_groups)
+        logits = logits.float()
+        logits = softcap * torch.tanh(logits / softcap)
+
+        # Split logits for Stage 1 and Stage 2
+        pure_vocab_size = self.config.pure_vocab_size
+
+        # Stage 2 Loss: Group → Pure denoising (first L positions, pure vocab logits)
+        stage2_logits = logits[:, :T, :pure_vocab_size]  # (B, T, pure_vocab_size)
+        loss_mask = loss_extras["loss_mask"]  # (B, T)
+
+        log_probs = F.log_softmax(stage2_logits, dim=-1)
+        target_log_probs = torch.gather(log_probs, dim=-1, index=targets.unsqueeze(-1))
+        nll = -target_log_probs.squeeze(-1)  # (B, T)
+        stage2_loss = (nll * loss_mask).sum() / loss_mask.sum().clamp(min=1)
+
+        # Stage 1 Loss: Pure → Group MTP (second L positions, group vocab logits)
+        # Main model's group logits for first token prediction
+        main_group_logits = logits[:, T:, pure_vocab_size:]  # (B, T, num_groups)
+
+        # Get hidden states from x0 portion for MTP head
+        x0_hidden = x[:, T:, :]  # (B, T, D)
+
+        # MTP targets: (B, T, K, overlap_k) - all K future group tokens
+        mtp_targets = loss_extras["mtp_targets"]  # (B, T, K, overlap_k)
+        K = mtp_targets.size(2)
+
+        # First group token for teacher forcing (use ground truth from mtp_targets[:,:,0,:])
+        # Take the first valid group (index 0) for teacher forcing
+        first_group_tok = mtp_targets[:, :, 0, 0]  # (B, T)
+
+        # MTP head predicts K-1 additional tokens (2nd through Kth)
+        # Rotary embeddings: [1, T, 1, head_dim//2] broadcasts with [B, T, n_head, head_dim]
+        mtp_cos = cos
+        mtp_sin = sin
+
+        # Teacher forcing targets for MTP: use ground truth for k=0..K-2 to predict k=1..K-1
+        # mtp_targets[:, :, k, 0] gives the k-th future group token (using first overlap option)
+        mtp_teacher_targets = mtp_targets[:, :, :-1, 0]  # (B, T, K-1) - targets for teacher forcing
+
+        mtp_logits = self.mtp_head(
+            h=x0_hidden,
+            cos=mtp_cos,
+            sin=mtp_sin,
+            first_group_tok=first_group_tok,
+            targets=mtp_teacher_targets,
+        )  # (B, T, K-1, num_groups)
+
+        # Compute MTP loss using any-correct loss
+        stage1_loss = compute_mtp_loss(
+            main_logits=main_group_logits,
+            mtp_logits=mtp_logits,
+            targets=mtp_targets,
+            mtp_loss_beta=self.config.mtp_loss_beta,
+        )
+
+        # Combine losses
+        combined_loss = self.config.mtp_loss_weight * stage1_loss + stage2_loss
+
+        return combined_loss
+
+    def _forward_stage1_block(self, idx, targets, attn_mask, loss_extras):
+        """
+        Forward pass for stage1_block (pure-target mode): L pure tokens in, L×L block-causal mask.
+        Position k in block i predicts the pure token at position k in block i+1.
+        No 2L concatenation — just direct forward through transformer with block-causal mask.
+
+        Training: Standard CE loss against pure tokens.
+        Inference: Collapse lm_head to groups via group_to_pure_mask @ lm_head.weight.
+
+        Args:
+            idx: (B, L) pure token inputs
+            targets: (B, L) pure tokens (unused directly, kept for API consistency)
+            attn_mask: (L, L) block-causal mask
+            loss_extras: dict with "pure_targets" (B, T) and "loss_mask" (B, T)
+
+        Returns:
+            loss: scalar loss
+        """
+        B, T = idx.size()
+        assert attn_mask is not None, "stage1_block requires attention mask"
+
+        # Rotary embeddings for L tokens
+        cos_sin = self.cos[:, :T], self.sin[:, :T]
+
+        # Forward through transformer (no 2L concatenation)
+        x = self.transformer.wte(idx)
+        x = norm(x)
+        for block in self.transformer.h:
+            x = block(x, cos_sin, kv_cache=None, attn_mask=attn_mask)
+        x = norm(x)
+
+        # Compute logits: (B, T, pure_vocab_size)
+        softcap = 15
+        logits = self.lm_head(x)
+        logits = logits.float()
+        logits = softcap * torch.tanh(logits / softcap)
+
+        # Standard CE loss against pure targets
+        assert loss_extras is not None and "pure_targets" in loss_extras
+        pure_targets = loss_extras["pure_targets"]  # (B, T)
+        loss_mask = loss_extras["loss_mask"]  # (B, T)
+
+        log_probs = F.log_softmax(logits, dim=-1)
+        target_log_probs = torch.gather(log_probs, dim=-1, index=pure_targets.unsqueeze(-1))
+        nll = -target_log_probs.squeeze(-1)
+        loss = (nll * loss_mask).sum() / loss_mask.sum().clamp(min=1)
+
+        return loss
+
+    def _forward_both_block(self, idx, targets, attn_mask, loss_extras, return_separate_losses=False):
+        """
+        Forward pass for both_block stage: combines Stage 1 (block→block) and Stage 2 (denoising).
+
+        Same 2L structure as both_mtp:
+        - First L (idx/xt): group tokens at block positions -> Stage 2 predicts pure tokens
+        - Second L (targets/x0): pure tokens -> Stage 1 predicts group tokens for next block
+
+        Stage 1 uses block→block prediction via lm_head (no MTP head).
+
+        Args:
+            idx: (B, L) input tokens (xt: group tokens at block positions)
+            targets: (B, L) target tokens (x0: pure tokens)
+            attn_mask: (2L, 2L) block diffusion attention mask
+            loss_extras: dict with "loss_mask" (B, L), "block_targets" (B, L, overlap_k),
+                         "block_loss_mask" (B, L)
+            return_separate_losses: if True, return (combined_loss, stage1_loss, stage2_loss)
+
+        Returns:
+            combined_loss: scalar loss = mtp_loss_weight * stage1_loss + stage2_loss
+            If return_separate_losses=True: (combined_loss, stage1_loss.detach(), stage2_loss.detach())
+        """
+        B, T = idx.size()
+        assert attn_mask is not None, "Train should have attn mask"
+        assert self.config.sequence_len == T, "use double seq length when train"
+        assert targets.size(1) == T, "Targets should match the base sequence length"
+
+        # Concatenate [xt | x0] to form (B, 2L) input
+        combined_idx = torch.cat((idx, targets), dim=1)  # (B, 2L)
+
+        # Get rotary embeddings for 2L sequence (same positions for both halves)
+        cos = self.cos[:, :T]
+        sin = self.sin[:, :T]
+        cos_sin = (torch.cat((cos, cos), dim=1), torch.cat((sin, sin), dim=1))
+
+        # Forward through transformer
+        x = self.transformer.wte(combined_idx)
+        x = norm(x)
+        for block in self.transformer.h:
+            x = block(x, cos_sin, kv_cache=None, attn_mask=attn_mask)
+        x = norm(x)
+
+        # Compute logits
+        softcap = 15
+        logits = self.lm_head(x)  # (B, 2L, pure_vocab_size + num_groups)
+        logits = logits.float()
+        logits = softcap * torch.tanh(logits / softcap)
+
+        pure_vocab_size = self.config.pure_vocab_size
+
+        # Stage 2 Loss: Group -> Pure denoising (first L positions, pure vocab logits)
+        stage2_logits = logits[:, :T, :pure_vocab_size]  # (B, T, pure_vocab_size)
+        loss_mask = loss_extras["loss_mask"]  # (B, T)
+
+        log_probs = F.log_softmax(stage2_logits, dim=-1)
+        target_log_probs = torch.gather(log_probs, dim=-1, index=targets.unsqueeze(-1))
+        nll = -target_log_probs.squeeze(-1)  # (B, T)
+        stage2_loss = (nll * loss_mask).sum() / loss_mask.sum().clamp(min=1)
+
+        # Stage 1 Loss: block->block on x0 half (second L positions, group logits)
+        group_logits = logits[:, T:, pure_vocab_size:]  # (B, T, num_groups)
+        block_targets = loss_extras["block_targets"]  # (B, T, overlap_k)
+        block_loss_mask = loss_extras["block_loss_mask"]  # (B, T)
+        V_group = group_logits.size(-1)
+        overlap_k = block_targets.size(-1)
+
+        stage1_loss = any_correct_ce_loss(
+            group_logits.reshape(-1, V_group),
+            block_targets.reshape(-1, overlap_k),
+            block_loss_mask.reshape(-1),
+        )
+
+        # Combine losses
+        combined_loss = self.config.mtp_loss_weight * stage1_loss + stage2_loss
+
+        if return_separate_losses:
+            return combined_loss, stage1_loss.detach(), stage2_loss.detach()
+        return combined_loss
 
     def forward_for_eval(self, idx, targets, attn_mask):
         """
@@ -385,226 +755,375 @@ class PDLM(nn.Module):
         logits = softcap * torch.tanh(logits / softcap)
 
         # Return logits for xt part (first L positions)
+        # For both_block: slice to pure_vocab_size so argmax works correctly
+        # (without this, argmax would incorrectly consider group logits)
+        if self.config.stage == "both_block":
+            return logits[:, :T, :self.config.pure_vocab_size]
         return logits[:, :T, :]
 
+    def forward_for_eval_both_block(self, idx, targets, attn_mask):
+        """
+        Forward pass for both_block evaluation that returns both stage logits.
+
+        Same transformer body as forward_for_eval, but splits the output into
+        stage2 (pure vocab) and stage1 (group vocab) logits.
+
+        Args:
+            idx: (B, L) input tokens (xt: group tokens at block positions)
+            targets: (B, L) clean target tokens (x0: pure tokens)
+            attn_mask: attention mask for block diffusion
+
+        Returns:
+            stage2_logits: (B, L, pure_vocab_size) logits for pure token prediction (xt half)
+            stage1_logits: (B, L, num_groups) logits for group token prediction (x0 half)
+        """
+        B, T = idx.size()
+        assert targets.size(1) == T, "Targets should match input length"
+
+        # Concatenate [xt | x0] = [idx | targets]
+        idx = torch.cat((idx, targets), dim=1)  # (B, 2L)
+
+        # Get rotary embeddings for 2L sequence
+        cos = self.cos[:, :T]
+        sin = self.sin[:, :T]
+        cos_sin = (torch.cat((cos, cos), dim=1), torch.cat((sin, sin), dim=1))
+
+        # Forward through transformer
+        x = self.transformer.wte(idx)
+        x = norm(x)
+        for block in self.transformer.h:
+            x = block(x, cos_sin, kv_cache=None, attn_mask=attn_mask)
+        x = norm(x)
+
+        # Compute logits
+        softcap = 15
+        logits = self.lm_head(x)  # (B, 2L, pure_vocab_size + num_groups)
+        logits = logits.float()
+        logits = softcap * torch.tanh(logits / softcap)
+
+        pure_vocab_size = self.config.pure_vocab_size
+
+        # Stage 2: pure vocab logits from xt half (first L positions)
+        stage2_logits = logits[:, :T, :pure_vocab_size]  # (B, L, pure_vocab_size)
+
+        # Stage 1: group logits from x0 half (second L positions)
+        stage1_logits = logits[:, T:, pure_vocab_size:]  # (B, L, num_groups)
+
+        return stage2_logits, stage1_logits
+
     @torch.inference_mode()
-    def generate_with_blocks(self, tokens, max_new_tokens, 
-                             attn_mask=None, 
-                             bucket_size=None, 
-                             topk=5, 
-                             temperature=0, 
-                             seed=42,
+    def generate_with_blocks(self, tokens, max_new_tokens,
+                             attn_mask=None, bucket_size=None,
+                             topk=5, temperature=0, seed=42,
                              transit_topk=10):
+        # outdated — use generate_both_block instead
+        pass
+
+    @torch.inference_mode()
+    def noisy_denoisy_by_model(self, tokens, attn_mask=None, bucket_size=None, noisy_level=1, topk=3, transit_topk=10):
+        # outdated — use generate_both_block instead
+        pass
+
+    @torch.inference_mode()
+    def generate_both_mtp(
+        self,
+        tokens,
+        max_new_tokens,
+        block_size=None,
+        temperature=0.0,
+        topk=0,
+        seed=42,
+        constrain_to_group=True,
+    ):
         """
-        Like generate(), but also returns per-step noisy/pure blocks.
-        If transit_topk > 0, it uses top-k pure token probabilities to transit to the next noisy token.
-        max_new_tokens: The number of new tokens to generate (excluding prompt).
+        Generate tokens using both_mtp model (two-step per block).
+
+        Each block is generated in two steps:
+        1. MTP (Pure → Group): predict K group tokens from pure context
+        2. Denoise (Group → Pure): predict K pure tokens from group tokens
+
+        Args:
+            tokens: list of pure token ids (prompt)
+            max_new_tokens: number of new pure tokens to generate
+            block_size: K, tokens per block (default from config.n_future_tokens)
+            temperature: sampling temperature (0 = greedy)
+            topk: top-k sampling (0 = disabled)
+            seed: random seed for sampling
+            constrain_to_group: if True, constrain pure predictions to tokens within predicted group
+
+        Returns:
+            generated_tokens: tensor of pure token ids (1, total_len)
+            debug_blocks: list of per-block generation details
         """
-        assert isinstance(tokens, list) # B == 1
-        assert self.config.mask_token_id != -1, "mask_token_id must be set for generate"
+        assert self.config.stage == "both_mtp", "generate_both_mtp requires both_mtp stage"
+        assert isinstance(tokens, list), "tokens must be a list"
+
         device = self.get_device()
-        
-        if bucket_size is None:
-            bucket_size = self.bucket_size
-        assert bucket_size > 0, "bucket_size must be set in config or passed as arg"
-        
+        if block_size is None:
+            block_size = self.config.n_future_tokens
+        K = block_size
+
+        # Setup token map (only needed if constraining to group)
+        if constrain_to_group:
+            if self._token_map is None or self._token_map.device != device:
+                self._token_map = get_token_map(device=device)
+
+        # Setup RNG for sampling
         rng = None
         if temperature > 0:
             rng = torch.Generator(device=device)
             rng.manual_seed(seed)
-            
-        if self._token_map is None or self._token_map.device != device:
-            self._token_map = get_token_map(device=device)
 
-        if not self._is_causal:
-            assert attn_mask is not None, "need attn-mask when the model is non-causal"
-        
-        ids = torch.tensor([tokens], dtype=torch.long, device=device) # add batch dim
-        prompt_ids = ids.clone()
+        pure_vocab_size = self.config.pure_vocab_size
+        group_offset = pure_vocab_size  # group tokens start after pure vocab
+
+        # Current sequence (pure tokens)
+        ids = torch.tensor([tokens], dtype=torch.long, device=device)  # (1, prompt_len)
         prompt_len = ids.size(1)
         target_len = prompt_len + max_new_tokens
-        
-        mask_id = self.config.mask_token_id
 
-        if self._is_causal:
-            ids = F.pad(ids, (0, bucket_size), value=mask_id) # add bucket
-            current_mask = None
-        else:
-            pad_len = bucket_size - (ids.size(1) % bucket_size)
-            ids = F.pad(ids, (0, pad_len), value=mask_id)
-            T = ids.size(1)
-            current_mask = attn_mask[:T, :T]
-
-        block_debug = []
+        debug_blocks = []
         step = 0
-        while True:
-            logits = self.forward(ids, attn_mask=current_mask) # (B, T, pure_vocab_size)
-            logits = logits[:, -bucket_size:, :] # (B, bucket_size, pure_vocab_size)
-            max_topk_logits = logits.size(-1)
-            
-            # Reporting/Sampling (topk)
-            k_report = min(topk, max_topk_logits)
-            if k_report < 1: raise ValueError("topk must be >= 1")
-            _, topk_ids_report = torch.topk(logits, k=k_report, dim=-1) # (B, bucket, k_report)
-            probs = torch.softmax(logits.float(), dim=-1)
-            topk_probs_report = torch.gather(probs, -1, topk_ids_report) # (B, bucket, k_report)
-            
-            noisy_ids = ids[:, -bucket_size:] # (B, bucket)
-            entry = {
+
+        while ids.size(1) < target_len:
+            current_len = ids.size(1)
+
+            # === Step 1: MTP (Pure → Group) ===
+            # Predict K group tokens from pure context
+            group_tokens = self._mtp_predict_block(ids, K)  # (1, K) group indices (0-based)
+
+            # === Step 2: Denoise (Group → Pure) ===
+            # Predict K pure tokens from group tokens
+            pure_tokens, pure_logits = self._denoise_predict_block(
+                ids, group_tokens, K,
+                temperature=temperature,
+                topk=topk,
+                rng=rng,
+                constrain_to_group=constrain_to_group,
+            )  # (1, K)
+
+            # Debug info
+            debug_blocks.append({
                 "step": step,
-                "noisy_ids": noisy_ids.detach().cpu(),
-                "pure_ids": topk_ids_report.detach().cpu(),
-                "pure_probs": topk_probs_report.detach().cpu(),
-            }
+                "context_len": current_len,
+                "group_tokens": group_tokens.cpu().tolist()[0],
+                "pure_tokens": pure_tokens.cpu().tolist()[0],
+            })
 
-            if transit_topk > 0:
-                k_transit = min(transit_topk, max_topk_logits)
-                _, topk_ids_transit = torch.topk(logits, k=k_transit, dim=-1)
-                topk_probs_transit = torch.gather(probs, -1, topk_ids_transit)
-                
-                next_ids = self._token_map.transit_noisy_tokens(
-                    topk_ids_transit, noisy_ids, pure_probs=topk_probs_transit
-                )
-                entry["sampled_ids"] = topk_ids_report[..., 0].detach().cpu()
-            else:
-                if topk > 0:
-                    v, _ = torch.topk(logits, min(topk, logits.size(-1)), dim=-1)
-                    logits[logits < v[:, :, [-1]]] = -float('Inf')
-                if temperature > 0:
-                    logits_temp = logits / temperature
-                    probs_temp = F.softmax(logits_temp, dim=-1)
-                    probs_2d = probs_temp.reshape(-1, probs_temp.size(-1))
-                    pure_ids = torch.multinomial(probs_2d, num_samples=1, generator=rng)
-                    pure_ids = pure_ids.reshape(probs.shape[:-1])
-                else:
-                    pure_ids = topk_ids_report[..., 0] # (B, bucket)
-                
-                entry["sampled_ids"] = pure_ids.detach().cpu()
-                
-                next_ids = self._token_map.transit_noisy_tokens(pure_ids, noisy_ids)
-            
-            next_is_pure = self._token_map.is_all_pure_tokens(next_ids)
-            if next_is_pure:
-                entry["next_ids"] = next_ids.detach().cpu()
-            block_debug.append(entry)
-            ids = torch.cat((ids[:, :-next_ids.size(1)], next_ids), dim=1)
-            
-            # Restore prompt
-            if ids.size(1) >= prompt_ids.size(1):
-                ids[:, :prompt_ids.size(1)] = prompt_ids
-            
-            if next_is_pure:
-                if ids.numel() >= target_len:
-                    # Truncate to exact target length
-                    ids = ids[:, :target_len]
-                    break
-                else:
-                    ids = F.pad(ids, (0, bucket_size), value=mask_id)
-                    if not self._is_causal:
-                        T = ids.size(1)
-                        current_mask = attn_mask[:T, :T]
+            # Append pure tokens to sequence
+            ids = torch.cat([ids, pure_tokens], dim=1)
             step += 1
-        return ids, block_debug
 
+            # Safety break
+            if step > 1000:
+                break
+
+        # Truncate to exact target length
+        ids = ids[:, :target_len]
+        return ids, debug_blocks
+
+    def _mtp_predict_block(self, context_ids, K):
+        """
+        Predict K group tokens using MTP from pure context.
+
+        Uses the x0 path of the model:
+        - Main lm_head predicts 1st group token
+        - MTP head predicts 2nd..Kth group tokens autoregressively
+
+        Args:
+            context_ids: (1, T) pure token context
+            K: number of group tokens to predict
+
+        Returns:
+            group_tokens: (1, K) group token indices (0-based, not offset)
+        """
+        device = context_ids.device
+        T = context_ids.size(1)
+        pure_vocab_size = self.config.pure_vocab_size
+
+        # For MTP, we need to forward through transformer with pure tokens
+        # This is similar to training x0 path, but inference only
+
+        # Get rotary embeddings
+        cos = self.cos[:, :T]
+        sin = self.sin[:, :T]
+        cos_sin = (cos, sin)
+
+        # Forward through transformer (x0 path - pure tokens)
+        x = self.transformer.wte(context_ids)
+        x = norm(x)
+        for block in self.transformer.h:
+            # Causal attention for pure context
+            x = block(x, cos_sin, kv_cache=None, attn_mask=None)
+        x = norm(x)
+
+        # Get hidden state at last position
+        h = x[:, -1:, :]  # (1, 1, D)
+
+        # Compute logits for group tokens
+        softcap = 15
+        logits = self.lm_head(h)  # (1, 1, pure_vocab + num_groups)
+        logits = logits.float()
+        logits = softcap * torch.tanh(logits / softcap)
+
+        # Main model predicts 1st group token
+        group_logits = logits[:, :, pure_vocab_size:]  # (1, 1, num_groups)
+        g1 = group_logits.argmax(dim=-1).squeeze(1)  # (1,)
+
+        group_tokens = [g1]
+
+        # MTP head predicts 2nd..Kth group tokens autoregressively
+        prev_h = h  # (1, 1, D)
+        prev_tok = g1  # (1,)
+
+        # Rotary for single position (use position T since we're predicting "future")
+        mtp_cos = self.cos[:, T:T+1]
+        mtp_sin = self.sin[:, T:T+1]
+
+        for k in range(K - 1):
+            # Get token embedding for previous group prediction
+            tok_emb = self.group_wte(prev_tok).unsqueeze(1)  # (1, 1, D)
+
+            # Combine: [norm(h), norm(embed)] -> project
+            combined = torch.cat([norm(prev_h), norm(tok_emb)], dim=-1)  # (1, 1, 2D)
+            x_mtp = self.mtp_head.proj(combined)  # (1, 1, D)
+
+            # Forward through MTP block
+            prev_h = self.mtp_head.block(x_mtp, mtp_cos, mtp_sin)
+            prev_h = norm(prev_h)
+
+            # Compute group logits
+            step_logits = self.mtp_head.lm_head(prev_h)  # (1, 1, num_groups)
+            g_next = step_logits.argmax(dim=-1).squeeze(1)  # (1,)
+
+            group_tokens.append(g_next)
+            prev_tok = g_next
+
+        return torch.stack(group_tokens, dim=1)  # (1, K)
+
+    def _denoise_predict_block(
+        self,
+        context_ids,
+        group_tokens,
+        K,
+        temperature=0.0,
+        topk=0,
+        rng=None,
+        constrain_to_group=True,
+    ):
+        """
+        Predict K pure tokens from group tokens using Stage 2 denoising.
+
+        Uses the xt path of the model with block diffusion attention.
+
+        Args:
+            context_ids: (1, T) pure token context
+            group_tokens: (1, K) group token indices (0-based)
+            K: block size
+            temperature: sampling temperature
+            topk: top-k sampling
+            rng: random generator
+            constrain_to_group: if True, mask logits to only tokens in each group
+
+        Returns:
+            pure_tokens: (1, K) predicted pure tokens
+            pure_logits: (1, K, pure_vocab) logits for debugging
+        """
+        device = context_ids.device
+        T = context_ids.size(1)
+        pure_vocab_size = self.config.pure_vocab_size
+        group_offset = pure_vocab_size
+
+        # Build xt: [pure context..., G1+offset, G2+offset, ...]
+        group_token_ids = group_tokens + group_offset  # (1, K) - add offset to get actual token ids
+        xt = torch.cat([context_ids, group_token_ids], dim=1)  # (1, T+K)
+
+        # Build x0: [pure context..., placeholder (zeros)]
+        # The x0 positions for the block will use placeholder - they provide context via mask
+        x0 = torch.cat([context_ids, torch.zeros(1, K, dtype=torch.long, device=device)], dim=1)
+
+        # Total length for attention
+        total_len = T + K
+
+        # Create attention mask for inference
+        # For Stage 2 inference: xt positions with group tokens attend to pure prefix
+        # We need a simplified mask since we're not doing full 2L training
+        attn_mask = self._create_inference_denoise_mask(T, K, device)
+
+        # Concatenate [xt | x0] for the forward pass
+        combined_idx = torch.cat([xt, x0], dim=1)  # (1, 2*(T+K))
+
+        # Get rotary embeddings
+        cos = self.cos[:, :total_len]
+        sin = self.sin[:, :total_len]
+        cos_sin = (torch.cat([cos, cos], dim=1), torch.cat([sin, sin], dim=1))
+
+        # Forward through transformer
+        x = self.transformer.wte(combined_idx)
+        x = norm(x)
+        for block in self.transformer.h:
+            x = block(x, cos_sin, kv_cache=None, attn_mask=attn_mask)
+        x = norm(x)
+
+        # Compute logits
+        softcap = 15
+        logits = self.lm_head(x)  # (1, 2*(T+K), pure_vocab + num_groups)
+        logits = logits.float()
+        logits = softcap * torch.tanh(logits / softcap)
+
+        # Extract pure vocab logits at group positions (xt path, positions T:T+K)
+        pure_logits = logits[:, T:T+K, :pure_vocab_size]  # (1, K, pure_vocab)
+
+        # Optionally constrain to tokens within each group
+        if constrain_to_group:
+            for i in range(K):
+                group_idx = group_tokens[0, i].item()
+                group_mask = self._token_map.group_to_pure_mask[group_idx]  # (pure_vocab,)
+                pure_logits[:, i, ~group_mask] = float('-inf')
+
+        # Sample or argmax
+        if temperature > 0:
+            if topk > 0:
+                # Top-k filtering
+                v, _ = torch.topk(pure_logits, min(topk, pure_logits.size(-1)), dim=-1)
+                pure_logits[pure_logits < v[:, :, [-1]]] = float('-inf')
+            probs = F.softmax(pure_logits / temperature, dim=-1)
+            probs_2d = probs.view(-1, probs.size(-1))
+            pure_tokens = torch.multinomial(probs_2d, num_samples=1, generator=rng)
+            pure_tokens = pure_tokens.view(1, K)
+        else:
+            pure_tokens = pure_logits.argmax(dim=-1)  # (1, K)
+
+        return pure_tokens, pure_logits
+
+    def _create_inference_denoise_mask(self, prefix_len, block_size, device):
+        # outdated — use generate_both_block instead
+        pass
 
     @torch.inference_mode()
-    def noisy_denoisy_by_model(self, tokens, attn_mask=None, bucket_size=None, noisy_level=1, topk=3, transit_topk=10):
+    def generate_both_block(self, tokens, max_new_tokens, block_size=None,
+                            temperature=0.0, topk=0, seed=42):
         """
-        This func is not for generate new tokens, but to add noisy to 
-        the last bucket_size of the sequence, and then denoise the
-        added noisy. So this func would be only several steps.
-        this func will also return a block_debug like generate_with_blocks,
-        there should be step, the original real pure token, the current noisy token,
-        and the predicted pure token by the model, with prob, topk,
-        If transit_topk > 0, it uses top-k pure token probabilities to transit to the next noisy token.
+        Generate tokens using both_block model (two-step per block).
+
+        Each block is generated in two steps:
+        1. Forward pure context through transformer with block-causal attention
+           → get group logits at x0 positions → argmax/sample group tokens
+        2. Build xt with predicted group tokens, forward through 2L path
+           → get pure vocab logits → argmax/sample K pure tokens
+
+        Args:
+            tokens: list of pure token ids (prompt)
+            max_new_tokens: number of new pure tokens to generate
+            block_size: K, tokens per block (default from config.bucket_size)
+            temperature: sampling temperature (0 = greedy)
+            topk: top-k sampling (0 = disabled)
+            seed: random seed for sampling
+
+        Returns:
+            generated_tokens: tensor of pure token ids (1, total_len)
+            debug_blocks: list of per-block generation details
         """
-        assert isinstance(tokens, list) # B == 1
-        device = self.get_device()
-        
-        if bucket_size is None:
-            bucket_size = self.bucket_size
-        assert bucket_size > 0, "bucket_size must be set in config or passed as arg"
-        
-        if self._token_map is None or self._token_map.device != device:
-            self._token_map = get_token_map(device=device)
+        # TODO: implement with block-causal mask for step 1 (see design/block_pdlm.md RoPE Position Analysis)
+        pass
 
-        # Prepare IDs
-        ids = torch.tensor([tokens], dtype=torch.long, device=device) # (1, L)
-        L = ids.size(1)
-        if L < bucket_size:
-             bucket_size = L
-        
-        # Split into prefix and target part
-        prefix_ids = ids[:, :-bucket_size]
-        target_pure_ids = ids[:, -bucket_size:] # (1, bucket)
-        
-        # Add noise
-        noisy_levels = torch.full_like(target_pure_ids, noisy_level)
-        noisy_ids = self._token_map.noise_tokens(target_pure_ids, noisy_levels)
-        
-        # Combine
-        ids = torch.cat([prefix_ids, noisy_ids], dim=1)
-        
-        current_mask = None
-        if not self._is_causal and attn_mask is not None:
-            current_mask = attn_mask[:ids.size(1), :ids.size(1)]
-
-        block_debug = []
-        step = 0
-        
-        # Denoising loop
-        while True:
-            logits = self.forward(ids, attn_mask=current_mask) # (1, L, pure_vocab)
-            logits = logits[:, -bucket_size:, :] # (1, bucket, pure_vocab)
-            max_topk_logits = logits.size(-1)
-            
-            # Get topk pure predictions for reporting
-            k_report = min(topk, max_topk_logits)
-            _, topk_ids_report = torch.topk(logits, k=k_report, dim=-1) # (1, bucket, topk)
-            probs = torch.softmax(logits.float(), dim=-1)
-            topk_probs_report = torch.gather(probs, -1, topk_ids_report) # (1, bucket, topk)
-            
-            predicted_pure_ids = topk_ids_report[..., 0] # Top 1 prediction
-            
-            # Record debug info
-            entry = {
-                "step": step,
-                "original_ids": target_pure_ids.detach().cpu(),
-                "noisy_ids": noisy_ids.detach().cpu(),
-                "pure_ids": topk_ids_report.detach().cpu(), # Predicted pure (topk)
-                "pure_probs": topk_probs_report.detach().cpu(), # Probs of predicted pure
-            }
-            
-            # Transit
-            if transit_topk > 0:
-                k_transit = min(transit_topk, max_topk_logits)
-                _, topk_ids_transit = torch.topk(logits, k=k_transit, dim=-1)
-                topk_probs_transit = torch.gather(probs, -1, topk_ids_transit)
-                
-                next_ids = self._token_map.transit_noisy_tokens(
-                    topk_ids_transit, noisy_ids, pure_probs=topk_probs_transit
-                )
-            else:
-                next_ids = self._token_map.transit_noisy_tokens(predicted_pure_ids, noisy_ids)
-            
-            # Check if converged (all pure)
-            next_is_pure = self._token_map.is_all_pure_tokens(next_ids)
-            if next_is_pure:
-                entry["next_ids"] = next_ids.detach().cpu()
-            
-            block_debug.append(entry)
-            
-            # Update loop vars
-            noisy_ids = next_ids
-            ids = torch.cat([prefix_ids, noisy_ids], dim=1)
-            step += 1
-            
-            if next_is_pure:
-                break
-                
-            # Safety break
-            if step > 100: 
-                break
-                
-        return ids, block_debug
-        

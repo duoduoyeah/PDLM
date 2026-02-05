@@ -6,21 +6,31 @@
 ## Test mode: data_ratio=10
 ## Production mode: data_ratio=20 (or user specified)
 ##
+## Tokenizer naming: n{noise}_k{overlap_k}_g{num_groups}
+##   - noise_level: tokens per final group (e.g., 64, 1024)
+##   - overlap_k: how many groups each token appears in
+##   - num_groups: number of final groups
+##
 ## Usage:
-##   bash launch/run_mtp.sh --variant=g64
-##   bash launch/run_mtp.sh --variant=g64 --overlap_k=2 --depth=8 --block_size=8
-##   bash launch/run_mtp.sh --variant=g64 --test_mode=false --data_ratio=20
+##   bash launch/run_mtp.sh --noise_level=64 --overlap_k=1 --num_groups=64
+##   bash launch/run_mtp.sh --noise_level=1024 --overlap_k=7 --num_groups=28 --depth=8
+##   bash launch/run_mtp.sh --noise_level=64 --num_groups=64 --test_mode=false --data_ratio=20
 
 # ============================================================
 # Default values
 # ============================================================
-VARIANT="g64"           # g16, g64, g256 (num_groups)
-OVERLAP_K="1"           # overlap_k for group tokenizer
+# Tokenizer naming: n{noise}_k{overlap_k}_g{num_groups}
+# Examples: n64_k1_g64, n1024_k7_g28, n1024_k55_g220
+NOISE_LEVEL="64"        # tokens per final group
+OVERLAP_K="1"           # how many groups each token appears in
+NUM_GROUPS="64"         # number of final groups
 TEST_MODE="true"
 DATA_RATIO="10"         # default 10 for test mode
 DEPTH="4"               # model depth
-BLOCK_SIZE="4"          # n_future_tokens (K group tokens to predict)
+BLOCK_SIZE="4"          # n_future_tokens (K tokens to predict)
 MTP_LOSS_BETA="0.8"     # exponential decay for loss weighting
+STAGE1_TARGET_MODE="pure"  # "pure" (default) or "group" (legacy)
+DRIVE_OUTPUT_FOLDER=""  # subfolder under DRIVE_BASE for outputs (empty = save directly under DRIVE_BASE)
 
 # Common training arguments
 MAX_SEQ_LEN="512"
@@ -32,11 +42,14 @@ EVAL_NUM_BATCHES_FINAL="100"
 # Parse named arguments
 for arg in "$@"; do
     case $arg in
-        --variant=*)
-            VARIANT="${arg#*=}"
+        --noise_level=*)
+            NOISE_LEVEL="${arg#*=}"
             ;;
         --overlap_k=*)
             OVERLAP_K="${arg#*=}"
+            ;;
+        --num_groups=*)
+            NUM_GROUPS="${arg#*=}"
             ;;
         --test_mode=*)
             TEST_MODE="${arg#*=}"
@@ -53,6 +66,9 @@ for arg in "$@"; do
         --mtp_loss_beta=*)
             MTP_LOSS_BETA="${arg#*=}"
             ;;
+        --stage1_target_mode=*)
+            STAGE1_TARGET_MODE="${arg#*=}"
+            ;;
         --max_seq_len=*)
             MAX_SEQ_LEN="${arg#*=}"
             ;;
@@ -68,31 +84,30 @@ for arg in "$@"; do
         --eval_num_batches_final=*)
             EVAL_NUM_BATCHES_FINAL="${arg#*=}"
             ;;
+        --drive_output_folder=*)
+            DRIVE_OUTPUT_FOLDER="${arg#*=}"
+            ;;
         *)
             echo "Unknown argument: $arg"
-            echo "Usage: bash launch/run_mtp.sh --variant=g64 [--overlap_k=1] [--depth=4] [--block_size=4]"
-            echo "       [--test_mode=true] [--data_ratio=10] [--mtp_loss_beta=0.8]"
-            echo "       [--max_seq_len=512] [--device_batch_size=128] [--eval_every=2500]"
+            echo "Usage: bash launch/run_mtp.sh [--noise_level=64] [--overlap_k=1] [--num_groups=64]"
+            echo "       [--depth=4] [--block_size=4] [--test_mode=true] [--data_ratio=10]"
+            echo "       [--mtp_loss_beta=0.8] [--stage1_target_mode=pure] [--max_seq_len=512]"
+            echo "       [--device_batch_size=128] [--eval_every=2500] [--drive_output_folder=<folder>]"
             echo ""
-            echo "Variants: g16, g64, g256 (num_groups for group tokenizer)"
+            echo "Tokenizer naming: n{noise}_k{overlap_k}_g{num_groups}"
+            echo "Examples: n64_k1_g64, n1024_k7_g28, n1024_k55_g220"
+            echo ""
+            echo "Use --drive_output_folder to save outputs to a subfolder under DRIVE_BASE"
             exit 1
             ;;
     esac
 done
 
-# Validate variant
-case "${VARIANT}" in
-    "g16"|"g64"|"g256")
-        ;;
-    *)
-        echo "Unknown variant: ${VARIANT}"
-        echo "Available: g16, g64, g256"
-        exit 1
-        ;;
-esac
+# Build tokenizer variant name (matches folder naming convention)
+TOKENIZER_VARIANT="n${NOISE_LEVEL}_k${OVERLAP_K}_g${NUM_GROUPS}"
 
 # Build model name
-BASE_MODEL_NAME="mtp_d${DEPTH}_b${BLOCK_SIZE}_${VARIANT}_k${OVERLAP_K}"
+BASE_MODEL_NAME="mtp_d${DEPTH}_b${BLOCK_SIZE}_${TOKENIZER_VARIANT}"
 
 WANDB_GROUP="mtp_d${DEPTH}"
 DRIVE_BASE="/content/drive/MyDrive/nanochat"
@@ -102,7 +117,8 @@ LOCAL_TRAIN_BASE="/content/mtp_temp_train"
 
 # Group tokenizer path on Drive (built by build_group_tokenizer.sh)
 # Contains: tokenizer.pkl, token_maps.pt (self-contained, no need for base tokenizer)
-GROUP_TOKENIZER_PATH="${DRIVE_BASE}/group_tokenizers/${VARIANT}_k${OVERLAP_K}"
+# Naming convention: n{noise}_k{overlap_k}_g{num_groups}
+GROUP_TOKENIZER_PATH="${DRIVE_BASE}/group_tokenizers/${TOKENIZER_VARIANT}"
 
 # Load secrets from .env file
 if [ -f "launch/.env" ]; then
@@ -134,13 +150,15 @@ export NANOCHAT_BASE_DIR="${LOCAL_TRAIN_BASE}/${MODEL_NAME}"
 echo "=== Running MTP Stage 1: ${MODEL_NAME} ==="
 echo "=== Local base dir: ${NANOCHAT_BASE_DIR} ==="
 echo "=== Drive base: ${DRIVE_BASE} ==="
+echo "=== Drive output folder: ${DRIVE_OUTPUT_FOLDER:-<root>} ==="
 echo "=== Test mode: ${TEST_MODE} ==="
 echo "=== Data ratio: ${DATA_RATIO} ==="
 echo "=== Depth: ${DEPTH} ==="
 echo "=== Block size (K): ${BLOCK_SIZE} ==="
 echo "=== MTP loss beta: ${MTP_LOSS_BETA} ==="
-echo "=== Variant: ${VARIANT} (overlap_k=${OVERLAP_K}) ==="
-echo "=== Group tokenizer: ${GROUP_TOKENIZER_PATH} ==="
+echo "=== Stage 1 target mode: ${STAGE1_TARGET_MODE} ==="
+echo "=== Tokenizer: ${TOKENIZER_VARIANT} (noise=${NOISE_LEVEL}, overlap_k=${OVERLAP_K}, num_groups=${NUM_GROUPS}) ==="
+echo "=== Group tokenizer path: ${GROUP_TOKENIZER_PATH} ==="
 
 # ============================================================
 # Setup (run once per model)
@@ -207,6 +225,7 @@ python -m scripts.base_train \
     --depth=${DEPTH} \
     --block_size=${BLOCK_SIZE} \
     --mtp_loss_beta=${MTP_LOSS_BETA} \
+    --stage1_target_mode=${STAGE1_TARGET_MODE} \
     --max_seq_len=${MAX_SEQ_LEN} \
     --device_batch_size=${DEVICE_BATCH_SIZE} \
     --target_param_data_ratio=${DATA_RATIO} \
@@ -225,7 +244,11 @@ rm -rf "${NANOCHAT_BASE_DIR}/simple_story_data"
 rm -rf "${NANOCHAT_BASE_DIR}/tokenized_data"
 
 # Copy results to Drive for persistence
-DRIVE_OUTPUT_DIR="${DRIVE_BASE}/${MODEL_NAME}"
+if [ -n "${DRIVE_OUTPUT_FOLDER}" ]; then
+    DRIVE_OUTPUT_DIR="${DRIVE_BASE}/${DRIVE_OUTPUT_FOLDER}/${MODEL_NAME}"
+else
+    DRIVE_OUTPUT_DIR="${DRIVE_BASE}/${MODEL_NAME}"
+fi
 if [ -d "${DRIVE_OUTPUT_DIR}" ]; then
     if [ "${TEST_MODE}" = "true" ]; then
         echo "Test mode: Removing old Drive output dir ${DRIVE_OUTPUT_DIR}"

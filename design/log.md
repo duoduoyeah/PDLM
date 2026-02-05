@@ -1,7 +1,36 @@
+02/03
+1. image token on which dimension of space?
+2. continuous space language model
+3. the loss distribution of CV diffusion model
+4. for one specifyc position, input noisy token, target clean token, input clean,  target noisy token on future position
+5. what does the wte look like for DiT then
+6. dump wte and lm_head to see for each token, the mean and var is what
+
+02/01
+1. how many tokens we used to train this lgm?   trying speed is not correct.
+2. latent space paper about the loss, mtp, mdm
+
+01/31
+1. I guess make the group level almost equal by adjust the overlap and sub-group level?-> new tokenizer, run new exp_c model 
+2. eval mtp pure and group one. think about this question
+3. later for mtp-gpt, we could make the mtp_loss_beta to 1, i.e. do not weighted it.
+4. let the model train a group stuff by itself from stage 1?
+
+01/28
+1. read flow matching stuff, read how they solve the token dependencies stuff.
+2. we need to later first specify the in-compatible issue, then think a way to solve it.
+3. eval for mtp-pdlm, and mask-pdlm, report seperate loss for two stages
+4. new stage-1 design that do not use mtp, do not use mask
+5. design eval/chat stuff for end2end model
+6. continue analyze the result from experiment_d, task new method and mask method 
+7. I feel our method has advatage compared to fast-mtp: we use 
+indenpdent input x so the input-output is one2one; compared with apple-mtp, mask is inefficient, in train and this mask token is meaningless and lead to extra-cost when inference;
+8. when we compare expertiment_c with the normal gpt, remember we need to give a weight for gpt to make it loss smaller since stage-2 pdlm only need to do the loss stuff on a partial of vocab; also we need to make sure the stage-2 pdlm also adjust its weight
+
 01/27
-1. new tokenizers
-2. start training gpt-mtp
-3. preparing for combined-pdlm 
+1. new tokenizers [Done]
+2. start training gpt-mtp [Done]
+3. preparing for combined-pdlm [Done]
 
 01/25
 - Add transition_accuracy metric to `nanochat/pdlm_eval.py` and `scripts/pdlm_eval.py` (per-position + per-group breakdown)
