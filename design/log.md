@@ -1,9 +1,9 @@
 02/03
-1. image token on which dimension of space?
-2. continuous space language model
-3. the loss distribution of CV diffusion model
-4. for one specifyc position, input noisy token, target clean token, input clean,  target noisy token on future position
-5. what does the wte look like for DiT then
+1. image token on which dimension of space? [Done]
+2. continuous space language model [Done] 
+3. the loss distribution of CV diffusion model 
+4. for one specifyc position, input noisy token, target clean token, input clean, target noisy token on future position [Done]
+5. what does the wte look like for DiT then [Done]
 6. dump wte and lm_head to see for each token, the mean and var is what
 
 02/01
