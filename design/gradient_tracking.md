@@ -100,6 +100,31 @@ If later positions are just harder due to task structure:
 - Both models should show gradient concentrated on later positions
 - Model B's later positions should get more gradient mass
 
+## Per-Group Gradient Direction Compatibility
+
+Beyond gradient **magnitude** (how much each group pushes), we can measure gradient **direction** (do groups push the same way or fight each other).
+
+**Setup:**
+- Use `loss_reduction='none'` to get per-token losses
+- Group tokens by kind (e.g., 4 kinds × 128 tokens each)
+- Mean loss per group, then 1 backward pass per group with `retain_graph=True`
+- Compare gradient vectors via cosine similarity
+
+**Cost:** 1 forward + K backward (K = number of groups). Cheap enough to run every N steps.
+
+**Which layers to check:**
+- lm_head: too shallow, only reflects output distribution agreement
+- Middle transformer block: most representative of overall optimization dynamics
+- Best: check early/middle/late + lm_head for a depth profile
+- Checking more layers is free — backward already computes all gradients, just snapshot more
+
+**Interpreting cosine similarity between group gradients:**
+- cos > 0: groups cooperate (training one helps the other)
+- cos ≈ 0: groups are orthogonal (independent, no conflict)
+- cos < 0: groups conflict (improving one hurts the other)
+
+**Key detail:** gradient compatibility can differ by depth. Two groups may agree in early layers but conflict in late layers (or vice versa). Always check the profile, not a single layer.
+
 ## Key Insight
 
 From multitask_learning.md: **gradient magnitude determines what drives optimization, not loss value.** A position with 2x higher loss might contribute 10x less to parameter updates if its gradients are smaller.
