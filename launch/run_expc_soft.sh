@@ -111,7 +111,7 @@ SOFT_INT=$(python3 -c "print(int(float('${SOFT_P_WITHIN}') * 100))")
 # Build model name (includes soft value)
 BASE_MODEL_NAME="expc_d${DEPTH}_b${BLOCK_SIZE}_${TOKENIZER_VARIANT}_soft${SOFT_INT}"
 
-WANDB_GROUP="expc_d${DEPTH}"
+WANDB_GROUP="expc_soft_d${DEPTH}"
 MODEL_REPO="duoduoyeah/expc_d${DEPTH}"
 DRIVE_BASE="/content/drive/MyDrive/nanochat"
 
