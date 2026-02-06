@@ -4,14 +4,14 @@
 
 Split text at punctuation and whitespace boundaries where cross-boundary dependency is weak. These are purely symbol-based, no word-level heuristics:
 
-| Boundary | Strength | Example |
-|---|---|---|
-| `\n\n+` | Strongest (paragraph) | Topic/scene shift |
-| `[.!?]+\s+` | Sentence end | New statement |
-| `[""]` | Quote boundary | Narrator vs. character voice |
-| `[;:]\s+` | Strong clause break | Independent clauses |
-| `—` | Em dash | Interruption/aside |
-| `,\s+` | Weakest (clause) | Dependent clause |
+| Boundary | Strength | Status | Example |
+|---|---|---|---|
+| `\n\n+` | Strongest (paragraph) | Active | Topic/scene shift |
+| `[.!?]+\s+` | Sentence end | Active | New statement |
+| `[;:]\s+` | Strong clause break | Active | Independent clauses |
+| `[""]` | Quote boundary | Not used | Mid-sentence quotes get messy, especially in dialogue-heavy data |
+| `—` | Em dash | Not used | Rare in children's stories |
+| `,\s+` | Weakest (clause) | Not used | Creates very short context-dependent fragments |
 
 This is analogous to how BPE uses a regex (GPT-4 pattern) to split text into token-level chunks — but one level up. BPE chunks are ~1 word; these segments are ~1 sentence/clause.
 
