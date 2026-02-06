@@ -49,6 +49,7 @@ bd3lm_compute_matched = True # If True, don't adjust iterations for BD3LM (compu
 mtp_loss_beta = 0.8 # MTP: exponential decay factor for loss weighting (β^k)
 n_future_tokens = 4 # MTP/both_mtp: number of future group tokens to predict (K)
 mtp_loss_weight = 1.0 # both_mtp: Stage 1 MTP loss weight relative to Stage 2
+soft_p_within = 1.0 # stage2: prob of correct group mapping (1.0 = hard, <1.0 = soft noise)
 loss_weight_mode = "manual" # "manual" or "fixed" - fixed computes weight from warmup batches
 loss_weight_warmup_steps = 10 # number of batches for estimating loss ratio (used when loss_weight_mode="fixed")
 stage1_target_mode = "pure" # MTP: "pure" (default) or "group" (legacy) - determines target format and loss
@@ -201,6 +202,7 @@ elif model_type == "pdlm":
         is_causal=is_causal,
         bucket_size=block_size,
         model_name=run,
+        soft_p_within=soft_p_within,
     )
     # Add loss weight for combined stages
     if pdlm_stage in ("both_mtp", "both_block"):

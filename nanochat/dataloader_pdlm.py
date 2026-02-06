@@ -101,18 +101,26 @@ def pdlm_data_loader(
             pure_to_group = token_map.pure_to_group  # (pure_vocab, k)
             overlap_k = token_map.overlap_k
             pure_vocab_size = token_map.pure_vocab_size
+            num_groups = token_map.num_groups
+            soft_p_within = model_config.soft_p_within
 
+            # Step 1: Get correct group (same as current hard mapping)
             if overlap_k == 1:
-                # Each token belongs to exactly one group
-                group_ids = pure_to_group[block_tokens, 0]  # (B, block_region_len)
+                correct_group_ids = pure_to_group[block_tokens, 0]  # (B, block_region_len)
             else:
-                # Random selection: pick one of k groups for each position
                 k_idx = torch.randint(0, overlap_k, block_tokens.shape)
-                # Gather group ids
                 flat_tokens = block_tokens.flatten()
                 flat_k_idx = k_idx.flatten()
-                group_ids = pure_to_group[flat_tokens, flat_k_idx]
-                group_ids = group_ids.view(block_tokens.shape)
+                correct_group_ids = pure_to_group[flat_tokens, flat_k_idx]
+                correct_group_ids = correct_group_ids.view(block_tokens.shape)
+
+            # Step 2: Apply soft noise
+            if soft_p_within >= 1.0:
+                group_ids = correct_group_ids
+            else:
+                wrong_group_ids = torch.randint(0, num_groups, block_tokens.shape)
+                within_mask = torch.rand(block_tokens.shape) < soft_p_within
+                group_ids = torch.where(within_mask, correct_group_ids, wrong_group_ids)
 
             # Convert group indices to group token ids (offset by pure_vocab_size)
             group_token_ids = pure_vocab_size + group_ids

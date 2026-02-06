@@ -85,6 +85,7 @@ class PDLMConfig:
     model_name: str = "pdlm"
     prefix_pure_tokens: int = 0
     mask_token_id: int = -1  # only needed for stage1_mask and both_mask
+    soft_p_within: float = 1.0  # 1.0 = hard mapping, <1.0 = soft (prob of correct group)
 
     # MTP (Multi-Token Prediction) config for both_mtp stage
     n_future_tokens: int = 4       # K: number of group tokens to predict for Stage 1
