@@ -23,4 +23,6 @@ python -m scripts.base_train \
     --save_every=6000 \
     --target_shift=1 \
     --mask_token=0 \
-    --target_param_data_ratio=40
+    --target_param_data_ratio=40 \
+    --gradient_track_every=500 \
+    --gradient_block_size=4

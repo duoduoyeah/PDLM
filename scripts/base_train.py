@@ -75,6 +75,9 @@ eval_every = -1 # evaluate every N steps (-1 = disable)
 eval_num_batches = 20 # number of batches for intermediate evaluation (quick)
 eval_num_batches_final = 100 # number of batches for final evaluation (thorough)
 save_every = -1 # every how many steps to save model checkpoints (-1 = disable, and save only at the end of the run)
+# Gradient tracking
+gradient_track_every = 0    # gradient tracking every N steps (0 = disabled)
+gradient_block_size = 4     # virtual block size for GPT gradient tracking
 # Output
 model_tag = "" # optionally override the model tag for the output checkpoint directory name
 # now allow CLI to override the settings via the configurator lol
@@ -769,6 +772,30 @@ while True:
     # termination conditions (TODO: possibly also add loss explosions etc.)
     if last_step:
         break
+
+    # -------------------------------------------------------------------------
+    # Gradient tracking (periodic diagnostic)
+    if gradient_track_every > 0 and step % gradient_track_every == 0 and step > 0:
+        with autocast_ctx:
+            if model_type == "pdlm" and pdlm_stage == "stage1_block":
+                nll = orig_model._forward_stage1_block(
+                    x, y, attn_mask=block_diff_masks[0],
+                    loss_extras=loss_extras, return_nll=True)
+                gt_block_size = block_size
+                gt_loss_mask = loss_extras["loss_mask"]
+            elif model_type == "next_token_ar":
+                nll = orig_model(x, y, loss_reduction='none').view(x.size(0), x.size(1))
+                gt_block_size = gradient_block_size
+                gt_loss_mask = torch.ones_like(nll, dtype=torch.bool)
+            else:
+                nll = None  # gradient tracking not supported for this model type
+
+        if nll is not None:
+            from nanochat.gradient_tracking import compute_gradient_metrics
+            grad_metrics = compute_gradient_metrics(
+                orig_model, nll, gt_loss_mask, gt_block_size)
+            wandb_run.log({"step": step, **grad_metrics})
+            print0(f"[gradient_tracking] step {step}: logged {len(grad_metrics)} metrics")
 
     # -------------------------------------------------------------------------
     # single training step
