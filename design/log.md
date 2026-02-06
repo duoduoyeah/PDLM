@@ -1,3 +1,6 @@
+02/05
+1. for splitting, we could use gpt eval on some text, and then read them, what do you think 
+
 02/03
 1. image token on which dimension of space? [Done]
 2. continuous space language model [Done] 
