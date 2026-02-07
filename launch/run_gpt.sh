@@ -146,6 +146,7 @@ python -m scripts.base_train \
     --depth=${DEPTH} \
     --max_seq_len=${MAX_SEQ_LEN} \
     --device_batch_size=${DEVICE_BATCH_SIZE} \
+    --model_type=next_token_ar \
     --target_shift=1 \
     --target_param_data_ratio=${DATA_RATIO} \
     --eval_every=${EVAL_EVERY} \
