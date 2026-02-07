@@ -108,7 +108,11 @@ TOKENIZER_VARIANT="n${NOISE_LEVEL}_k${OVERLAP_K}_g${NUM_GROUPS}"
 # Build model name
 BASE_MODEL_NAME="pdlm_s1b_d${DEPTH}_b${BLOCK_SIZE}_${TOKENIZER_VARIANT}"
 
-WANDB_GROUP="pdlm_s1b_d${DEPTH}"
+if [ "${GRADIENT_TRACK_EVERY}" != "0" ]; then
+    WANDB_GROUP="s1b_d${DEPTH}_gradient_tracking"
+else
+    WANDB_GROUP="pdlm_s1b_d${DEPTH}"
+fi
 DRIVE_BASE="/content/drive/MyDrive/nanochat"
 
 # Local training base (faster than Drive)
