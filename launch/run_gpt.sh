@@ -127,9 +127,13 @@ fi
 echo "Tokenizer setup complete:"
 ls -la "${NANOCHAT_BASE_DIR}/tokenizer/"
 
-# Download dataset
-echo "Downloading dataset..."
-python -m nanochat.dataset -n 10 --split both
+# Download dataset (skip if already present)
+if [ -d "${NANOCHAT_BASE_DIR}/tokenized_data" ]; then
+    echo "Dataset already present, skipping download."
+else
+    echo "Downloading dataset..."
+    python -m nanochat.dataset -n 10 --split both
+fi
 
 # ============================================================
 # Training
