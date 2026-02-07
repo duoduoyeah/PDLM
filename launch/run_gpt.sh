@@ -147,7 +147,6 @@ python -m scripts.base_train \
     --max_seq_len=${MAX_SEQ_LEN} \
     --device_batch_size=${DEVICE_BATCH_SIZE} \
     --target_shift=1 \
-    --mask_token_id=0 \
     --target_param_data_ratio=${DATA_RATIO} \
     --eval_every=${EVAL_EVERY} \
     --eval_num_batches=${EVAL_NUM_BATCHES} \
