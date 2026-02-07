@@ -15,3 +15,6 @@ experiment_d_temp/
 .claude/
 rope/
 outsource_papers/
+wandb_export/**/*.json
+wandb_export/**/*.csv
+wandb_export/**/*.md
