@@ -299,6 +299,14 @@ def print_results(eval_result, block_size):
             pos_data = s2["positions"][pos]
             print0(f"    pos {pos}: loss={pos_data['loss']:.4f}, ppl={pos_data['ppl']:.2f}")
 
+        # End-to-end per-position metrics (if present)
+        if "end2end" in eval_result:
+            e2e = eval_result["end2end"]
+            print0(f"\n  End-to-End (Stage1→Stage2): loss={e2e['overall_loss']:.4f}, ppl={e2e['overall_ppl']:.2f}")
+            for pos in range(block_size):
+                pos_data = e2e["positions"][pos]
+                print0(f"    pos {pos}: loss={pos_data['loss']:.4f}, ppl={pos_data['ppl']:.2f}")
+
         # Compatibility metrics (if present, in stage2)
         if "compatibility" in s2:
             compat = s2["compatibility"]
