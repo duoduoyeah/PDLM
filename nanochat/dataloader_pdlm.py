@@ -195,10 +195,8 @@ def pdlm_data_loader(
             }
 
         elif stage == "stage1_block":
-            # Stage 1 Block (pure-target mode): pure tokens in, predict pure token at same position in next block
-            # No MASK tokens, no 2L structure — just L pure tokens with block-causal mask.
-            # pure_targets[i] = pure token at position i + block_size
-            # loss_mask: True for blocks 1 through N-2 (skip block 0 = no prior block context, skip last block = no future to predict)
+            # Stage 1 Block: pure tokens in, predict next block with block-causal mask.
+            # No MASK tokens, no 2L structure — just L pure tokens.
 
             prefix_sliding_tokens = 0
             num_blocks = (T - prefix_sliding_tokens) // block_size
@@ -208,30 +206,65 @@ def pdlm_data_loader(
             # inputs: just pure tokens
             inputs_cpu = targets_cpu.clone()
 
-            # pure_targets: shifted view — position i predicts token at i + block_size
-            pure_targets = scratch[block_size:B * T + block_size].view(B, T)
+            stage1_target_mode = getattr(model_config, "stage1_target_mode", "pure")
 
-            # loss_mask: skip block 0 (no prior block context), skip last block (no future to predict)
-            loss_mask = torch.zeros(B, T, dtype=torch.bool)
-            for blk in range(1, num_blocks - 1):
-                blk_start = block_start + blk * block_size
-                loss_mask[:, blk_start:blk_start + block_size] = True
+            if stage1_target_mode == "group":
+                # Group-target mode: predict group token at same position in next block
+                # Same as both_block Stage 1 side
+                pure_to_group = token_map.pure_to_group  # (pure_vocab, overlap_k)
 
-            if prefix_pure_tokens > 0:
-                loss_mask[:, :prefix_pure_tokens] = False
+                # Shifted view: position i predicts group of token at i + block_size
+                future_pure = scratch[block_size:B * T + block_size].view(B, T)
+                block_targets = pure_to_group[future_pure]  # (B, T, overlap_k)
 
-            # Move to device
-            inputs = inputs_cpu.to(device=device, non_blocking=use_cuda)
-            targets = targets_cpu.to(device=device, non_blocking=use_cuda)  # kept for API consistency
-            loss_mask = loss_mask.to(device=device, non_blocking=use_cuda)
-            pure_targets = pure_targets.to(device=device, non_blocking=use_cuda)
+                # block_loss_mask: skip block 0 (no prior block context), include last block
+                block_loss_mask = torch.zeros(B, T, dtype=torch.bool)
+                for blk in range(1, num_blocks):
+                    blk_start = block_start + blk * block_size
+                    block_loss_mask[:, blk_start:blk_start + block_size] = True
 
-            # Also include pure_to_group for eval accuracy computation
-            loss_extras = {
-                "loss_mask": loss_mask,
-                "pure_targets": pure_targets,
-                "pure_to_group": token_map.pure_to_group.to(device=device, non_blocking=use_cuda),
-            }
+                if prefix_pure_tokens > 0:
+                    block_loss_mask[:, :prefix_pure_tokens] = False
+
+                # Move to device
+                inputs = inputs_cpu.to(device=device, non_blocking=use_cuda)
+                targets = targets_cpu.to(device=device, non_blocking=use_cuda)
+                block_targets = block_targets.to(device=device, non_blocking=use_cuda)
+                block_loss_mask = block_loss_mask.to(device=device, non_blocking=use_cuda)
+
+                loss_extras = {
+                    "block_targets": block_targets,
+                    "block_loss_mask": block_loss_mask,
+                }
+            else:
+                # Pure-target mode (default): predict pure token at same position in next block
+                # pure_targets[i] = pure token at position i + block_size
+                # loss_mask: True for blocks 1 through N-2 (skip block 0 = no prior block context, skip last block = no future to predict)
+
+                # pure_targets: shifted view — position i predicts token at i + block_size
+                pure_targets = scratch[block_size:B * T + block_size].view(B, T)
+
+                # loss_mask: skip block 0 (no prior block context), skip last block (no future to predict)
+                loss_mask = torch.zeros(B, T, dtype=torch.bool)
+                for blk in range(1, num_blocks - 1):
+                    blk_start = block_start + blk * block_size
+                    loss_mask[:, blk_start:blk_start + block_size] = True
+
+                if prefix_pure_tokens > 0:
+                    loss_mask[:, :prefix_pure_tokens] = False
+
+                # Move to device
+                inputs = inputs_cpu.to(device=device, non_blocking=use_cuda)
+                targets = targets_cpu.to(device=device, non_blocking=use_cuda)  # kept for API consistency
+                loss_mask = loss_mask.to(device=device, non_blocking=use_cuda)
+                pure_targets = pure_targets.to(device=device, non_blocking=use_cuda)
+
+                # Also include pure_to_group for eval accuracy computation
+                loss_extras = {
+                    "loss_mask": loss_mask,
+                    "pure_targets": pure_targets,
+                    "pure_to_group": token_map.pure_to_group.to(device=device, non_blocking=use_cuda),
+                }
 
         elif stage == "stage1_mtp":
             # Stage 1 MTP: handled separately by MTP dataloader

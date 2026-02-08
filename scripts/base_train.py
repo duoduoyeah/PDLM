@@ -203,6 +203,7 @@ elif model_type == "pdlm":
         bucket_size=block_size,
         model_name=run,
         soft_p_within=soft_p_within,
+        stage1_target_mode=stage1_target_mode,
     )
     # Add loss weight for combined stages
     if pdlm_stage in ("both_mtp", "both_block"):
@@ -241,7 +242,7 @@ if model_type == "mtp" and stage1_target_mode == "pure":
     print0(f"Registered group_to_pure_mask for MTP pure mode ({token_map.num_groups} groups × {token_map.pure_vocab_size} pure tokens)")
 
 # Register group mask for stage1_block pure mode (needed for eval group collapse)
-if model_type == "pdlm" and pdlm_stage == "stage1_block":
+if model_type == "pdlm" and pdlm_stage == "stage1_block" and stage1_target_mode == "pure":
     model.register_group_mask(token_map.group_to_pure_mask.to(device=device))
     print0(f"Registered group_to_pure_mask for stage1_block ({token_map.num_groups} groups × {token_map.pure_vocab_size} pure tokens)")
 
@@ -622,10 +623,16 @@ while True:
                 for pos in range(block_size):
                     pos_data = s2["positions"][pos]
                     print0(f"      pos {pos}: loss={pos_data['loss']:.4f}, ppl={pos_data['ppl']:.2f}")
+                e2e = eval_result["end2end"]
+                print0(f"    End-to-End (Stage1→Stage2): loss={e2e['overall_loss']:.4f}, ppl={e2e['overall_ppl']:.2f}")
+                for pos in range(block_size):
+                    pos_data = e2e["positions"][pos]
+                    print0(f"      pos {pos}: loss={pos_data['loss']:.4f}, ppl={pos_data['ppl']:.2f}")
                 log_data = {
                     "step": step,
                     "eval/combined_loss": eval_result["combined_loss"],
                     "eval/end2end_loss": eval_result["end2end_loss"],
+                    "eval/end2end_ppl": e2e["overall_ppl"],
                     "eval/stage1_loss": s1["overall_loss"],
                     "eval/stage1_ppl": s1["overall_ppl"],
                     "eval/stage1_accuracy": s1["overall_accuracy"],
@@ -640,6 +647,9 @@ while True:
                     s2p = s2["positions"][pos]
                     log_data[f"eval/stage2_pos_{pos}_loss"] = s2p["loss"]
                     log_data[f"eval/stage2_pos_{pos}_ppl"] = s2p["ppl"]
+                    e2ep = e2e["positions"][pos]
+                    log_data[f"eval/end2end_pos_{pos}_loss"] = e2ep["loss"]
+                    log_data[f"eval/end2end_pos_{pos}_ppl"] = e2ep["ppl"]
                 wandb_run.log(log_data)
             else:
                 # Stage 2 evaluation

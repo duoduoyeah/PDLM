@@ -86,6 +86,7 @@ class PDLMConfig:
     prefix_pure_tokens: int = 0
     mask_token_id: int = -1  # only needed for stage1_mask and both_mask
     soft_p_within: float = 1.0  # 1.0 = hard mapping, <1.0 = soft (prob of correct group)
+    stage1_target_mode: str = "pure"  # "pure" (CE over pure_vocab) or "group" (any_correct_ce over num_groups)
 
     # MTP (Multi-Token Prediction) config for both_mtp stage
     n_future_tokens: int = 4       # K: number of group tokens to predict for Stage 1
@@ -108,7 +109,10 @@ class PDLMConfig:
             lm_head_size = self.num_groups
         elif self.stage == "stage1_block":
             wte_size = self.pure_vocab_size
-            lm_head_size = self.pure_vocab_size  # Full vocab for pure-target mode
+            if self.stage1_target_mode == "group":
+                lm_head_size = self.num_groups
+            else:
+                lm_head_size = self.pure_vocab_size  # Full vocab for pure-target mode
         elif self.stage == "stage2":
             wte_size = self.pure_vocab_size + self.num_groups
             lm_head_size = self.pure_vocab_size
@@ -628,15 +632,29 @@ class PDLM(nn.Module):
         logits = logits.float()
         logits = softcap * torch.tanh(logits / softcap)
 
-        # Standard CE loss against pure targets
-        assert loss_extras is not None and "pure_targets" in loss_extras
-        pure_targets = loss_extras["pure_targets"]  # (B, T)
-        loss_mask = loss_extras["loss_mask"]  # (B, T)
+        # Branch on target mode
+        assert loss_extras is not None
+        if "block_targets" in loss_extras:
+            # Group-target mode: any_correct_ce_loss against group targets
+            block_targets = loss_extras["block_targets"]  # (B, T, overlap_k)
+            block_loss_mask = loss_extras["block_loss_mask"]  # (B, T)
+            V = logits.size(-1)
+            overlap_k = block_targets.size(-1)
+            loss = any_correct_ce_loss(
+                logits.reshape(-1, V),
+                block_targets.reshape(-1, overlap_k),
+                block_loss_mask.reshape(-1),
+            )
+        else:
+            # Pure-target mode: standard CE against pure tokens
+            assert "pure_targets" in loss_extras
+            pure_targets = loss_extras["pure_targets"]  # (B, T)
+            loss_mask = loss_extras["loss_mask"]  # (B, T)
 
-        log_probs = F.log_softmax(logits, dim=-1)
-        target_log_probs = torch.gather(log_probs, dim=-1, index=pure_targets.unsqueeze(-1))
-        nll = -target_log_probs.squeeze(-1)
-        loss = (nll * loss_mask).sum() / loss_mask.sum().clamp(min=1)
+            log_probs = F.log_softmax(logits, dim=-1)
+            target_log_probs = torch.gather(log_probs, dim=-1, index=pure_targets.unsqueeze(-1))
+            nll = -target_log_probs.squeeze(-1)
+            loss = (nll * loss_mask).sum() / loss_mask.sum().clamp(min=1)
 
         return loss
 

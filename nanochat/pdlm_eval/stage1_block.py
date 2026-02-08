@@ -1,11 +1,13 @@
 """
 Stage 1 Block evaluation for PDLM.
 
-Stage 1 Block (pure-target mode): pure tokens in, LxL block-causal mask,
-lm_head outputs pure vocab logits. No 2L structure - model is called directly.
+Supports two target modes:
+- pure (default): lm_head outputs pure vocab logits, CE against pure tokens,
+  accuracy via group collapse.
+- group: lm_head outputs group logits, any_correct_ce_loss against group targets,
+  direct argmax accuracy.
 
-Loss: CE against pure tokens
-Accuracy: Group-level - predicted group contains target token?
+No 2L structure - model is called directly with LxL block-causal mask.
 """
 
 import torch
@@ -56,12 +58,19 @@ def eval_pdlm_stage1_block(
             "num_tokens_evaluated": int,
         }
     """
+    target_mode = getattr(model.config, "stage1_target_mode", "pure")
     with model_eval_context(model):
         with torch.no_grad():
-            result = _eval_stage1_block_pure_target(
-                model, val_loader, block_size, num_batches,
-                attn_mask, device, autocast_ctx, prefix_pure_tokens
-            )
+            if target_mode == "group":
+                result = _eval_stage1_block_group_target(
+                    model, val_loader, block_size, num_batches,
+                    attn_mask, device, autocast_ctx, prefix_pure_tokens
+                )
+            else:
+                result = _eval_stage1_block_pure_target(
+                    model, val_loader, block_size, num_batches,
+                    attn_mask, device, autocast_ctx, prefix_pure_tokens
+                )
     return result
 
 
@@ -140,6 +149,77 @@ def _eval_stage1_block_pure_target(
                     valid_mask = valid_groups >= 0
                     any_match = ((valid_groups == pred_g.unsqueeze(-1)) & valid_mask).any(dim=-1)
                     correct_masked = any_match & mask_at_pos
+                    metrics_by_pos[pos]["correct"] += correct_masked.sum().item()
+
+    return build_result_dict(metrics_by_pos, block_size, include_accuracy=True)
+
+
+def _eval_stage1_block_group_target(
+    model, val_loader, block_size, num_batches,
+    attn_mask, device, autocast_ctx, prefix_pure_tokens,
+):
+    """
+    Group-target mode evaluation for stage1_block.
+
+    Loss: any_correct_ce_loss against group targets (block_targets).
+    Accuracy: Direct argmax vs block_targets (any-correct).
+
+    Matches _eval_both_block_stage1 in both_block.py.
+    """
+    metrics_by_pos = {p: {"nll": 0.0, "correct": 0, "tokens": 0} for p in range(block_size)}
+
+    for batch_idx in range(num_batches):
+        inputs, targets, loss_extras, state = next(val_loader)
+        B, T = inputs.shape
+        block_targets = loss_extras.get("block_targets", None)
+        block_loss_mask = loss_extras.get("block_loss_mask", None)
+
+        if block_targets is None:
+            raise ValueError("Group-target stage1_block eval requires block_targets in loss_extras")
+
+        overlap_k = block_targets.size(-1)
+
+        with autocast_ctx:
+            # Forward pass: direct call (no 2L structure)
+            logits = model(inputs, attn_mask=attn_mask)
+            # logits: (B, T, num_groups)
+
+            log_probs = F.log_softmax(logits.float(), dim=-1)
+            preds = logits.argmax(dim=-1)  # (B, T)
+
+            num_blocks = T // block_size
+
+            for pos in range(block_size):
+                # Skip block 0 (no prior block context)
+                for block_idx in range(1, num_blocks - 1):
+                    pos_in_seq = block_idx * block_size + pos
+
+                    if block_loss_mask is not None:
+                        mask_at_pos = block_loss_mask[:, pos_in_seq]
+                    else:
+                        mask_at_pos = torch.ones(B, dtype=torch.bool, device=device)
+
+                    valid_groups = block_targets[:, pos_in_seq, :]  # (B, overlap_k)
+
+                    # Compute any-correct NLL
+                    valid_mask = valid_groups >= 0
+                    safe_targets = valid_groups.clamp(min=0)
+                    valid_log_probs = torch.gather(
+                        log_probs[:, pos_in_seq, :], dim=-1, index=safe_targets
+                    )
+                    valid_log_probs = valid_log_probs.masked_fill(~valid_mask, float('-inf'))
+                    log_valid_prob = torch.logsumexp(valid_log_probs, dim=-1)
+                    nll = -log_valid_prob
+
+                    nll_masked = nll * mask_at_pos.float()
+                    metrics_by_pos[pos]["nll"] += nll_masked.sum().item()
+                    metrics_by_pos[pos]["tokens"] += mask_at_pos.sum().item()
+
+                    # Any-correct accuracy
+                    pred_at_pos = preds[:, pos_in_seq]
+                    pred_expanded = pred_at_pos.unsqueeze(-1)
+                    any_correct = ((valid_groups == pred_expanded) & valid_mask).any(dim=-1)
+                    correct_masked = any_correct & mask_at_pos
                     metrics_by_pos[pos]["correct"] += correct_masked.sum().item()
 
     return build_result_dict(metrics_by_pos, block_size, include_accuracy=True)
