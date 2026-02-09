@@ -1,3 +1,7 @@
+02/08
+1. pdlm-mask, s1 pure
+2. pdlm-block,s1 pure
+
 02/07
 1. perpelxity, use new ppl, ask the bd3lm it use which kind of ppl -> so wierd
 2. s1b, block target
