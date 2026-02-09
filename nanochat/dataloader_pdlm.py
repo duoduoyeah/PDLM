@@ -55,7 +55,7 @@ def pdlm_data_loader(
     assert T % block_size == 0, f"T ({T}) must be divisible by block_size ({block_size})"
 
     # Compute needed_tokens based on stage (fetch extra tokens for shifted targets)
-    if stage in ("stage1_block", "both_block"):
+    if stage in ("stage1_block", "both_block", "block_pdlm_inference"):
         needed_tokens = B * T + block_size
     elif stage == "both_mtp":
         needed_tokens = B * T + model_config.n_future_tokens
@@ -404,6 +404,102 @@ def pdlm_data_loader(
                 "loss_mask": loss_mask,
                 "block_targets": block_targets,
                 "block_loss_mask": block_loss_mask,
+            }
+
+        elif stage == "block_pdlm_inference":
+            # Block PDLM Inference: Stage 2 trains with mixed pure/group inputs.
+            # For each block independently, sample r ~ Uniform{0, ..., block_size-1}
+            # positions 0..r-1 keep pure tokens, positions r..block_size-1 get group tokens.
+            # Stage 2 targets: pure-input positions -> next block pure token,
+            #                  group-input positions -> current block pure token.
+            # Stage 1 targets: shifted pure tokens (same as both_block).
+
+            prefix_sliding_tokens = 0
+            num_blocks = (T - prefix_sliding_tokens) // block_size
+            block_region_len = num_blocks * block_size
+
+            block_start = prefix_sliding_tokens
+            block_end = block_start + block_region_len
+
+            pure_to_group = token_map.pure_to_group  # (pure_vocab, overlap_k)
+            overlap_k = token_map.overlap_k
+            pure_vocab_size = token_map.pure_vocab_size
+
+            # === Build inputs (xt): mixed pure/group tokens ===
+            inputs_cpu = targets_cpu.clone()
+
+            # For each block, sample r (number of revealed pure positions)
+            # r_per_block: (B, num_blocks) each in [0, block_size)
+            r_per_block = torch.randint(0, block_size, (B, num_blocks))
+
+            # Build position mask: True = group token, False = keep pure
+            group_mask = torch.zeros(B, T, dtype=torch.bool)
+            for blk in range(num_blocks):
+                blk_start = block_start + blk * block_size
+                for pos in range(block_size):
+                    # pos >= r means this position gets a group token
+                    group_mask[:, blk_start + pos] = (pos >= r_per_block[:, blk])
+
+            # Convert pure tokens to group tokens at group positions
+            block_tokens = targets_cpu[:, block_start:block_end]  # (B, block_region_len)
+            if overlap_k == 1:
+                group_ids = pure_to_group[block_tokens, 0]
+            else:
+                k_idx = torch.randint(0, overlap_k, block_tokens.shape)
+                flat_tokens = block_tokens.flatten()
+                flat_k_idx = k_idx.flatten()
+                group_ids = pure_to_group[flat_tokens, flat_k_idx]
+                group_ids = group_ids.view(block_tokens.shape)
+
+            group_token_ids = pure_vocab_size + group_ids  # (B, block_region_len)
+
+            # Expand to full sequence and apply mask
+            full_group_token_ids = torch.zeros(B, T, dtype=torch.long)
+            full_group_token_ids[:, block_start:block_end] = group_token_ids
+            inputs_cpu = torch.where(group_mask, full_group_token_ids, inputs_cpu)
+
+            # === Build stage2_targets: mixed targets ===
+            # Pure-input positions (not masked): target = next block pure token
+            # Group-input positions (masked): target = current block pure token (denoise)
+            future_pure = scratch[block_size:B * T + block_size].view(B, T)
+            stage2_targets = torch.where(group_mask, targets_cpu, future_pure)
+
+            # === Build stage2_loss_mask: all block positions are valid ===
+            stage2_loss_mask = torch.zeros(B, T, dtype=torch.bool)
+            stage2_loss_mask[:, block_start:block_end] = True
+            # Skip block 0 for pure-input positions (no prior block to predict from)
+            # Actually: group-input positions in block 0 are still valid (denoise current),
+            # but pure-input positions in block 0 predict next block which is valid.
+            # However, to be consistent, skip block 0 entirely like both_block.
+            stage2_loss_mask[:, block_start:block_start + block_size] = False
+
+            if prefix_pure_tokens > 0:
+                stage2_loss_mask[:, :prefix_pure_tokens] = False
+
+            # === Build stage1_targets: shifted pure tokens (same as both_block) ===
+            stage1_targets = future_pure.clone()
+
+            # === Build stage1_loss_mask: skip block 0 ===
+            stage1_loss_mask = torch.zeros(B, T, dtype=torch.bool)
+            for blk in range(1, num_blocks):
+                blk_start_pos = block_start + blk * block_size
+                stage1_loss_mask[:, blk_start_pos:blk_start_pos + block_size] = True
+            if prefix_pure_tokens > 0:
+                stage1_loss_mask[:, :prefix_pure_tokens] = False
+
+            # Move to device
+            inputs = inputs_cpu.to(device=device, non_blocking=use_cuda)
+            targets = targets_cpu.to(device=device, non_blocking=use_cuda)
+            stage2_targets = stage2_targets.to(device=device, non_blocking=use_cuda)
+            stage2_loss_mask = stage2_loss_mask.to(device=device, non_blocking=use_cuda)
+            stage1_targets = stage1_targets.to(device=device, non_blocking=use_cuda)
+            stage1_loss_mask = stage1_loss_mask.to(device=device, non_blocking=use_cuda)
+
+            loss_extras = {
+                "stage2_targets": stage2_targets,
+                "stage2_loss_mask": stage2_loss_mask,
+                "stage1_targets": stage1_targets,
+                "stage1_loss_mask": stage1_loss_mask,
             }
 
         elif stage == "both_mask":
