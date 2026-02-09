@@ -82,9 +82,98 @@ Two steps per block:
 
 When trying stage embedding, start with Option B (per-block AdaLN).
 
+---
+
+# block_pdlm_inference (Iterative Denoising Variant)
+
+**Stage name:** `pdlm_stage=block_pdlm_inference`
+
+## Motivation
+
+The original block-pdlm generates each block in 2 steps (predict groups, then denoise all at once). This has two problems:
+1. Stage 2 always sees all-group input during training but needs to work with mixed pure/group input during iterative inference
+2. The model cannot be used for iterative (one-position-at-a-time) generation within a block
+
+block_pdlm_inference trains Stage 2 with **mixed pure/group inputs**, so it learns to denoise from any partial state. This enables iterative inference where each block is generated one token at a time.
+
+## Stage 2 Training Change
+
+**Original block-pdlm:**
+```
+Input:  {g, g, g, g}  →  Target: {p, p, p, p}    (denoise all)
+```
+
+**block_pdlm_inference:**
+For each block during training, randomly sample `r ∈ {0, 1, 2, 3}` — the number of "already revealed" pure tokens (left-to-right). **All targets are pure tokens** (pure-target mode):
+
+```
+r=0: {g, g, g, g} → {p_i0, p_i1, p_i2, p_i3}    (denoise current block, same as original)
+r=1: {p, g, g, g} → {p_j0, p_i1, p_i2, p_i3}    (pos 0: predict next block; pos 1-3: denoise)
+r=2: {p, p, g, g} → {p_j0, p_j1, p_i2, p_i3}    (pos 0-1: predict next block; pos 2-3: denoise)
+r=3: {p, p, p, g} → {p_j0, p_j1, p_j2, p_i3}    (pos 0-2: predict next block; pos 3: denoise)
+```
+
+Where `p_i*` = pure token in current block i, `p_j*` = pure token in next block i+1.
+
+**Rule:** Group input → target is pure token at same position in **current block** (denoise). Pure input → target is pure token at same position in **next block** (predict ahead, like Stage 1).
+
+This means the model learns all intermediate denoising states. The lm_head always outputs pure vocab logits. The task (denoise vs predict-ahead) is implicitly determined by whether the model sees a group or pure embedding.
+
+**Stage 1 remains pure-target mode** (unchanged from base block-pdlm).
+
+## Inference (5 Steps Per Block)
+
+For block_size=4, generating one block requires 1 + block_size = 5 forward steps.
+Group tokens are **progressively refined**: at each step, the model's denoising predictions for remaining group positions are collapsed back to updated group tokens.
+
+```
+Step 1 (Stage 1): pure context → pure logits → collapse → g0, g1, g2, g3
+
+Step 2: {g0,g1,g2,g3} → predict p0',p1',p2',p3' (all denoise current block)
+        Sample p0. Update: g1=collapse(p1'), g2=collapse(p2'), g3=collapse(p3')
+
+Step 3: {p0, g1,g2,g3} → predict _,p1',p2',p3'  (pos 0 predicts next block; rest denoise)
+        Sample p1. Update: g2=collapse(p2'), g3=collapse(p3')
+
+Step 4: {p0,p1,g2,g3}  → predict _,_,p2',p3'     (pos 0-1 predict next block; rest denoise)
+        Sample p2. Update: g3=collapse(p3')
+
+Step 5: {p0,p1,p2,g3}  → predict _,_,_,p3'        (pos 0-2 predict next block; pos 3 denoises)
+        Sample p3.
+```
+
+- Stage 1 uses **argmax** (deterministic group selection via pure→group collapse)
+- Stage 2 uses **sampling** (temperature=1.0 default)
+- Group collapse: `pure_probs = softmax(pure_logits)` → `group_probs = group_to_pure_mask @ pure_probs` → argmax
+- Each remaining group token gets refined with more context at each step (e.g., g3 is updated 3 times before being used for final denoising)
+
+## Evaluation
+
+**Dump eval:** Given a prompt of K tokens, generate 128 or 256 tokens using the iterative inference above. Dump the decoded text for manual inspection by researchers.
+
+## Pure-to-Group Collapse with Top-k Filtering
+
+At inference, when collapsing pure logits to group probabilities (for Stage 1 group prediction and group token refinement), use top-k filtering to ignore the long tail of unlikely tokens:
+
+```python
+# collapse_topk: default k=256, set k=-1 to disable
+if collapse_topk > 0:
+    topk_vals, topk_ids = torch.topk(pure_logits, k=collapse_topk)
+    topk_probs = softmax(topk_vals)
+    topk_groups = pure_to_group[topk_ids]       # (*, k, overlap_k)
+    # scatter_add into group_probs
+else:
+    # no filtering, dense collapse
+    group_probs = group_to_pure_mask @ softmax(pure_logits)
+```
+
+- **Default:** `collapse_topk=256`
+- **Disable:** `collapse_topk=-1` (use all vocab tokens)
+- Applied everywhere pure→group collapse happens: Stage 1 group prediction, group token refinement during iterative denoising
+
 ## References
 
 - Stage 1 block approach: `design/experiment_d.md`
-- Implementation: `nanochat/pdlm.py` (`_forward_both_block`)
-- Dataloader: `nanochat/dataloader_pdlm.py` (`both_block` branch)
+- Base implementation: `nanochat/pdlm.py` (`_forward_both_block`)
+- Base dataloader: `nanochat/dataloader_pdlm.py` (`both_block` branch)
 - Training script: `launch/run_block_pdlm.sh`
