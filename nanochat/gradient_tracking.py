@@ -124,3 +124,80 @@ def compute_gradient_metrics(model, per_token_nll, loss_mask, block_size, prefix
             metrics[f"gradient/cos_pos{i}_pos{j}"] = cos_sim
 
     return metrics
+
+
+def compute_stage_gradient_metrics(model, stage_losses, stage_names):
+    """Compute gradient metrics comparing stage losses on shared trunk parameters.
+
+    Args:
+        model: nn.Module (PDLM)
+        stage_losses: list of scalar losses [s1_loss, s2_loss] (in computation graph)
+        stage_names: list of names ["s1", "s2"]
+
+    Returns:
+        dict of metrics ready for wandb logging
+    """
+    device = stage_losses[0].device
+
+    param_groups = _get_param_groups(model)
+    all_params = [p for group in param_groups.values() for p in group]
+
+    grad_vectors = []
+    total_norms = []
+    per_layer_norms = []
+
+    for loss in stage_losses:
+        model.zero_grad()
+        loss.backward(retain_graph=True)
+
+        flat_grads = []
+        for p in all_params:
+            if p.grad is not None:
+                flat_grads.append(p.grad.detach().float().flatten())
+            else:
+                flat_grads.append(torch.zeros(p.numel(), device=device))
+        grad_vec = torch.cat(flat_grads)
+        grad_vectors.append(grad_vec)
+
+        total_norm = grad_vec.norm().item()
+        total_norms.append(total_norm)
+
+        layer_norms = {}
+        for name, params in param_groups.items():
+            layer_grad_parts = []
+            for p in params:
+                if p.grad is not None:
+                    layer_grad_parts.append(p.grad.detach().float().flatten())
+                else:
+                    layer_grad_parts.append(torch.zeros(p.numel(), device=device))
+            layer_vec = torch.cat(layer_grad_parts)
+            layer_norms[name] = layer_vec.norm().item()
+        per_layer_norms.append(layer_norms)
+
+    model.zero_grad()
+
+    metrics = {}
+    total_grad_mass = sum(total_norms)
+
+    for i, sname in enumerate(stage_names):
+        metrics[f"gradient/{sname}_loss"] = stage_losses[i].item()
+        metrics[f"gradient/{sname}_grad_norm"] = total_norms[i]
+        metrics[f"gradient/{sname}_grad_pct"] = (
+            100.0 * total_norms[i] / total_grad_mass if total_grad_mass > 0 else 0.0
+        )
+
+    # Per-layer per-stage grad norms
+    for i, sname in enumerate(stage_names):
+        for layer_name, norm_val in per_layer_norms[i].items():
+            metrics[f"gradient/layer_{layer_name}_{sname}_grad_norm"] = norm_val
+
+    # Pairwise cosine similarity
+    for i in range(len(stage_names)):
+        for j in range(i + 1, len(stage_names)):
+            cos_sim = F.cosine_similarity(
+                grad_vectors[i].unsqueeze(0),
+                grad_vectors[j].unsqueeze(0),
+            ).item()
+            metrics[f"gradient/cos_{stage_names[i]}_{stage_names[j]}"] = cos_sim
+
+    return metrics

@@ -18,7 +18,7 @@ from nanochat.adamw import DistAdamW
 from nanochat.group_tokenizer.token_map import get_token_map
 
 
-def any_correct_ce_loss(logits, valid_targets, loss_mask=None):
+def any_correct_ce_loss(logits, valid_targets, loss_mask=None, reduction="mean"):
     """
     Cross-entropy loss where ANY of the valid targets is considered correct.
 
@@ -32,9 +32,10 @@ def any_correct_ce_loss(logits, valid_targets, loss_mask=None):
         valid_targets: (N, overlap_k) - ALL valid group indices for each position
                        Use -1 for padding (will be masked out)
         loss_mask: optional (N,) bool - True for positions to include in loss
+        reduction: "mean" (default) or "none". When "none", return per-token NLL (N,)
 
     Returns:
-        loss: scalar mean loss
+        loss: scalar mean loss (reduction="mean") or (N,) per-token NLL (reduction="none")
     """
     # Compute log probabilities
     log_probs = F.log_softmax(logits, dim=-1)
@@ -56,6 +57,9 @@ def any_correct_ce_loss(logits, valid_targets, loss_mask=None):
 
     # Negative log likelihood
     nll = -log_valid_prob
+
+    if reduction == "none":
+        return nll
 
     # Apply loss_mask if provided
     if loss_mask is not None:
@@ -641,6 +645,13 @@ class PDLM(nn.Module):
             block_loss_mask = loss_extras["block_loss_mask"]  # (B, T)
             V = logits.size(-1)
             overlap_k = block_targets.size(-1)
+            if return_nll:
+                nll_flat = any_correct_ce_loss(
+                    logits.reshape(-1, V),
+                    block_targets.reshape(-1, overlap_k),
+                    reduction="none",
+                )
+                return nll_flat.reshape(B, T)  # (B, T) per-token NLL
             loss = any_correct_ce_loss(
                 logits.reshape(-1, V),
                 block_targets.reshape(-1, overlap_k),
@@ -661,7 +672,7 @@ class PDLM(nn.Module):
 
         return loss
 
-    def _forward_both_block(self, idx, targets, attn_mask, loss_extras, return_separate_losses=False):
+    def _forward_both_block(self, idx, targets, attn_mask, loss_extras, return_separate_losses=False, return_nll=False):
         """
         Forward pass for both_block stage: combines Stage 1 (block→block) and Stage 2 (denoising).
 
@@ -732,6 +743,9 @@ class PDLM(nn.Module):
             block_targets.reshape(-1, overlap_k),
             block_loss_mask.reshape(-1),
         )
+
+        if return_nll:
+            return stage1_loss, stage2_loss
 
         # Combine losses
         combined_loss = self.config.mtp_loss_weight * stage1_loss + stage2_loss

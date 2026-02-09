@@ -794,11 +794,21 @@ while True:
                     x, y, attn_mask=block_diff_masks[0],
                     loss_extras=loss_extras, return_nll=True)
                 gt_block_size = block_size
-                gt_loss_mask = loss_extras["loss_mask"]
+                gt_loss_mask = loss_extras.get("loss_mask", loss_extras.get("block_loss_mask"))
             elif model_type == "next_token_ar":
                 nll = orig_model(x, y, loss_reduction='none').view(x.size(0), x.size(1))
                 gt_block_size = gradient_block_size
                 gt_loss_mask = torch.ones_like(nll, dtype=torch.bool)
+            elif model_type == "pdlm" and pdlm_stage == "both_block":
+                s1_loss, s2_loss = orig_model._forward_both_block(
+                    x, y, attn_mask=block_diff_masks[0],
+                    loss_extras=loss_extras, return_nll=True)
+                from nanochat.gradient_tracking import compute_stage_gradient_metrics
+                grad_metrics = compute_stage_gradient_metrics(
+                    orig_model, [s1_loss, s2_loss], ["s1", "s2"])
+                wandb_run.log({"step": step, **grad_metrics})
+                print0(f"[gradient_tracking] step {step}: logged {len(grad_metrics)} metrics")
+                nll = None  # skip per-position path
             else:
                 nll = None  # gradient tracking not supported for this model type
 
@@ -838,8 +848,9 @@ while True:
             elif model_type == "pdlm":
                 loss = model(x, y, attn_mask=block_diff_masks[0], loss_extras=loss_extras)
                 # Count effective tokens (positions that contribute to loss)
-                if loss_extras is not None and "loss_mask" in loss_extras:
-                    batch_effective_tokens = loss_extras["loss_mask"].sum().item() * ddp_world_size
+                _eff_mask = loss_extras.get("loss_mask", loss_extras.get("block_loss_mask")) if loss_extras is not None else None
+                if _eff_mask is not None:
+                    batch_effective_tokens = _eff_mask.sum().item() * ddp_world_size
                 else:
                     batch_effective_tokens = x.numel() * ddp_world_size
                 total_effective_tokens += batch_effective_tokens

@@ -31,6 +31,7 @@ BLOCK_SIZE="4"             # bucket_size for block diffusion
 MTP_LOSS_WEIGHT="1.0"      # Stage 1 loss weight relative to Stage 2
 LOSS_WEIGHT_MODE="manual"  # "manual" or "fixed" - fixed computes weight from warmup batches
 DRIVE_OUTPUT_FOLDER=""     # subfolder under DRIVE_BASE for outputs (empty = save directly under DRIVE_BASE)
+GRADIENT_TRACK_EVERY="0"   # 0 = disabled, >0 = log gradient metrics every N steps
 
 # Common training arguments
 MAX_SEQ_LEN="512"
@@ -86,6 +87,9 @@ for arg in "$@"; do
             ;;
         --drive_output_folder=*)
             DRIVE_OUTPUT_FOLDER="${arg#*=}"
+            ;;
+        --gradient_track_every=*)
+            GRADIENT_TRACK_EVERY="${arg#*=}"
             ;;
         *)
             echo "Unknown argument: $arg"
@@ -242,7 +246,8 @@ python -m scripts.base_train \
     --target_param_data_ratio=${DATA_RATIO} \
     --eval_every=${EVAL_EVERY} \
     --eval_num_batches=${EVAL_NUM_BATCHES} \
-    --eval_num_batches_final=${EVAL_NUM_BATCHES_FINAL}
+    --eval_num_batches_final=${EVAL_NUM_BATCHES_FINAL} \
+    --gradient_track_every=${GRADIENT_TRACK_EVERY}
 
 # ============================================================
 # Post-training: copy to Drive
