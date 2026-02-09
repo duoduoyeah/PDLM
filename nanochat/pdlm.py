@@ -18,7 +18,7 @@ from nanochat.adamw import DistAdamW
 from nanochat.group_tokenizer.token_map import get_token_map
 
 
-def any_correct_ce_loss(logits, valid_targets, loss_mask=None):
+def any_correct_ce_loss(logits, valid_targets, loss_mask=None, reduction="mean"):
     """
     Cross-entropy loss where ANY of the valid targets is considered correct.
 
@@ -32,9 +32,10 @@ def any_correct_ce_loss(logits, valid_targets, loss_mask=None):
         valid_targets: (N, overlap_k) - ALL valid group indices for each position
                        Use -1 for padding (will be masked out)
         loss_mask: optional (N,) bool - True for positions to include in loss
+        reduction: "mean" (default) or "none". When "none", return per-token NLL (N,)
 
     Returns:
-        loss: scalar mean loss
+        loss: scalar mean loss (reduction="mean") or (N,) per-token NLL (reduction="none")
     """
     # Compute log probabilities
     log_probs = F.log_softmax(logits, dim=-1)
@@ -56,6 +57,9 @@ def any_correct_ce_loss(logits, valid_targets, loss_mask=None):
 
     # Negative log likelihood
     nll = -log_valid_prob
+
+    if reduction == "none":
+        return nll
 
     # Apply loss_mask if provided
     if loss_mask is not None:
@@ -85,6 +89,8 @@ class PDLMConfig:
     model_name: str = "pdlm"
     prefix_pure_tokens: int = 0
     mask_token_id: int = -1  # only needed for stage1_mask and both_mask
+    soft_p_within: float = 1.0  # 1.0 = hard mapping, <1.0 = soft (prob of correct group)
+    stage1_target_mode: str = "pure"  # "pure" (CE over pure_vocab) or "group" (any_correct_ce over num_groups)
 
     # MTP (Multi-Token Prediction) config for both_mtp stage
     n_future_tokens: int = 4       # K: number of group tokens to predict for Stage 1
@@ -107,7 +113,10 @@ class PDLMConfig:
             lm_head_size = self.num_groups
         elif self.stage == "stage1_block":
             wte_size = self.pure_vocab_size
-            lm_head_size = self.pure_vocab_size  # Full vocab for pure-target mode
+            if self.stage1_target_mode == "group":
+                lm_head_size = self.num_groups
+            else:
+                lm_head_size = self.pure_vocab_size  # Full vocab for pure-target mode
         elif self.stage == "stage2":
             wte_size = self.pure_vocab_size + self.num_groups
             lm_head_size = self.pure_vocab_size
@@ -628,21 +637,42 @@ class PDLM(nn.Module):
         logits = logits.float()
         logits = softcap * torch.tanh(logits / softcap)
 
-        # Standard CE loss against pure targets
-        assert loss_extras is not None and "pure_targets" in loss_extras
-        pure_targets = loss_extras["pure_targets"]  # (B, T)
-        loss_mask = loss_extras["loss_mask"]  # (B, T)
+        # Branch on target mode
+        assert loss_extras is not None
+        if "block_targets" in loss_extras:
+            # Group-target mode: any_correct_ce_loss against group targets
+            block_targets = loss_extras["block_targets"]  # (B, T, overlap_k)
+            block_loss_mask = loss_extras["block_loss_mask"]  # (B, T)
+            V = logits.size(-1)
+            overlap_k = block_targets.size(-1)
+            if return_nll:
+                nll_flat = any_correct_ce_loss(
+                    logits.reshape(-1, V),
+                    block_targets.reshape(-1, overlap_k),
+                    reduction="none",
+                )
+                return nll_flat.reshape(B, T)  # (B, T) per-token NLL
+            loss = any_correct_ce_loss(
+                logits.reshape(-1, V),
+                block_targets.reshape(-1, overlap_k),
+                block_loss_mask.reshape(-1),
+            )
+        else:
+            # Pure-target mode: standard CE against pure tokens
+            assert "pure_targets" in loss_extras
+            pure_targets = loss_extras["pure_targets"]  # (B, T)
+            loss_mask = loss_extras["loss_mask"]  # (B, T)
 
-        log_probs = F.log_softmax(logits, dim=-1)
-        target_log_probs = torch.gather(log_probs, dim=-1, index=pure_targets.unsqueeze(-1))
-        nll = -target_log_probs.squeeze(-1)
-        if return_nll:
-            return nll  # (B, T) per-token NLL, before masking/reducing
-        loss = (nll * loss_mask).sum() / loss_mask.sum().clamp(min=1)
+            log_probs = F.log_softmax(logits, dim=-1)
+            target_log_probs = torch.gather(log_probs, dim=-1, index=pure_targets.unsqueeze(-1))
+            nll = -target_log_probs.squeeze(-1)
+            if return_nll:
+                return nll  # (B, T) per-token NLL, before masking/reducing
+            loss = (nll * loss_mask).sum() / loss_mask.sum().clamp(min=1)
 
         return loss
 
-    def _forward_both_block(self, idx, targets, attn_mask, loss_extras, return_separate_losses=False):
+    def _forward_both_block(self, idx, targets, attn_mask, loss_extras, return_separate_losses=False, return_nll=False):
         """
         Forward pass for both_block stage: combines Stage 1 (block→block) and Stage 2 (denoising).
 
@@ -713,6 +743,9 @@ class PDLM(nn.Module):
             block_targets.reshape(-1, overlap_k),
             block_loss_mask.reshape(-1),
         )
+
+        if return_nll:
+            return stage1_loss, stage2_loss
 
         # Combine losses
         combined_loss = self.config.mtp_loss_weight * stage1_loss + stage2_loss

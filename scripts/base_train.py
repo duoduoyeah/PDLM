@@ -49,6 +49,7 @@ bd3lm_compute_matched = True # If True, don't adjust iterations for BD3LM (compu
 mtp_loss_beta = 0.8 # MTP: exponential decay factor for loss weighting (β^k)
 n_future_tokens = 4 # MTP/both_mtp: number of future group tokens to predict (K)
 mtp_loss_weight = 1.0 # both_mtp: Stage 1 MTP loss weight relative to Stage 2
+soft_p_within = 1.0 # stage2: prob of correct group mapping (1.0 = hard, <1.0 = soft noise)
 loss_weight_mode = "manual" # "manual" or "fixed" - fixed computes weight from warmup batches
 loss_weight_warmup_steps = 10 # number of batches for estimating loss ratio (used when loss_weight_mode="fixed")
 stage1_target_mode = "pure" # MTP: "pure" (default) or "group" (legacy) - determines target format and loss
@@ -204,6 +205,8 @@ elif model_type == "pdlm":
         is_causal=is_causal,
         bucket_size=block_size,
         model_name=run,
+        soft_p_within=soft_p_within,
+        stage1_target_mode=stage1_target_mode,
     )
     # Add loss weight for combined stages
     if pdlm_stage in ("both_mtp", "both_block"):
@@ -242,7 +245,7 @@ if model_type == "mtp" and stage1_target_mode == "pure":
     print0(f"Registered group_to_pure_mask for MTP pure mode ({token_map.num_groups} groups × {token_map.pure_vocab_size} pure tokens)")
 
 # Register group mask for stage1_block pure mode (needed for eval group collapse)
-if model_type == "pdlm" and pdlm_stage == "stage1_block":
+if model_type == "pdlm" and pdlm_stage == "stage1_block" and stage1_target_mode == "pure":
     model.register_group_mask(token_map.group_to_pure_mask.to(device=device))
     print0(f"Registered group_to_pure_mask for stage1_block ({token_map.num_groups} groups × {token_map.pure_vocab_size} pure tokens)")
 
@@ -623,10 +626,16 @@ while True:
                 for pos in range(block_size):
                     pos_data = s2["positions"][pos]
                     print0(f"      pos {pos}: loss={pos_data['loss']:.4f}, ppl={pos_data['ppl']:.2f}")
+                e2e = eval_result["end2end"]
+                print0(f"    End-to-End (Stage1→Stage2): loss={e2e['overall_loss']:.4f}, ppl={e2e['overall_ppl']:.2f}")
+                for pos in range(block_size):
+                    pos_data = e2e["positions"][pos]
+                    print0(f"      pos {pos}: loss={pos_data['loss']:.4f}, ppl={pos_data['ppl']:.2f}")
                 log_data = {
                     "step": step,
                     "eval/combined_loss": eval_result["combined_loss"],
                     "eval/end2end_loss": eval_result["end2end_loss"],
+                    "eval/end2end_ppl": e2e["overall_ppl"],
                     "eval/stage1_loss": s1["overall_loss"],
                     "eval/stage1_ppl": s1["overall_ppl"],
                     "eval/stage1_accuracy": s1["overall_accuracy"],
@@ -641,6 +650,9 @@ while True:
                     s2p = s2["positions"][pos]
                     log_data[f"eval/stage2_pos_{pos}_loss"] = s2p["loss"]
                     log_data[f"eval/stage2_pos_{pos}_ppl"] = s2p["ppl"]
+                    e2ep = e2e["positions"][pos]
+                    log_data[f"eval/end2end_pos_{pos}_loss"] = e2ep["loss"]
+                    log_data[f"eval/end2end_pos_{pos}_ppl"] = e2ep["ppl"]
                 wandb_run.log(log_data)
             else:
                 # Stage 2 evaluation
@@ -782,11 +794,21 @@ while True:
                     x, y, attn_mask=block_diff_masks[0],
                     loss_extras=loss_extras, return_nll=True)
                 gt_block_size = block_size
-                gt_loss_mask = loss_extras["loss_mask"]
+                gt_loss_mask = loss_extras.get("loss_mask", loss_extras.get("block_loss_mask"))
             elif model_type == "next_token_ar":
                 nll = orig_model(x, y, loss_reduction='none').view(x.size(0), x.size(1))
                 gt_block_size = gradient_block_size
                 gt_loss_mask = torch.ones_like(nll, dtype=torch.bool)
+            elif model_type == "pdlm" and pdlm_stage == "both_block":
+                s1_loss, s2_loss = orig_model._forward_both_block(
+                    x, y, attn_mask=block_diff_masks[0],
+                    loss_extras=loss_extras, return_nll=True)
+                from nanochat.gradient_tracking import compute_stage_gradient_metrics
+                grad_metrics = compute_stage_gradient_metrics(
+                    orig_model, [s1_loss, s2_loss], ["s1", "s2"])
+                wandb_run.log({"step": step, **grad_metrics})
+                print0(f"[gradient_tracking] step {step}: logged {len(grad_metrics)} metrics")
+                nll = None  # skip per-position path
             else:
                 nll = None  # gradient tracking not supported for this model type
 
@@ -826,8 +848,9 @@ while True:
             elif model_type == "pdlm":
                 loss = model(x, y, attn_mask=block_diff_masks[0], loss_extras=loss_extras)
                 # Count effective tokens (positions that contribute to loss)
-                if loss_extras is not None and "loss_mask" in loss_extras:
-                    batch_effective_tokens = loss_extras["loss_mask"].sum().item() * ddp_world_size
+                _eff_mask = loss_extras.get("loss_mask", loss_extras.get("block_loss_mask")) if loss_extras is not None else None
+                if _eff_mask is not None:
+                    batch_effective_tokens = _eff_mask.sum().item() * ddp_world_size
                 else:
                     batch_effective_tokens = x.numel() * ddp_world_size
                 total_effective_tokens += batch_effective_tokens

@@ -74,8 +74,8 @@ def eval_pdlm_both_block(
                 model, cached_batches, block_size, attn_mask, device, autocast_ctx,
             )
 
-            # End-to-end eval (two-step inference)
-            end2end_loss = _eval_both_block_end2end(
+            # End-to-end eval (two-step inference) - returns per-position dict
+            end2end_result = _eval_both_block_end2end(
                 model, cached_batches, block_size, attn_mask, device, autocast_ctx,
             )
 
@@ -110,10 +110,11 @@ def eval_pdlm_both_block(
     return {
         "stage": "both_block",
         "combined_loss": combined_loss,
-        "end2end_loss": end2end_loss,
+        "end2end_loss": end2end_result["overall_loss"],
         "mtp_loss_weight": mtp_loss_weight,
         "stage1": stage1_result,
         "stage2": stage2_result,
+        "end2end": end2end_result,
     }
 
 
@@ -236,9 +237,11 @@ def _eval_both_block_end2end(
 
     Why blocks 2..N-1: Block 0 has no Stage 1 context. Block 1's groups come from
     block 0 (unreliable). Valid end-to-end blocks are 2 through N-1.
+
+    Returns:
+        dict with per-position loss/ppl via build_result_dict
     """
-    total_nll = 0.0
-    total_tokens = 0
+    nll_by_pos = {p: {"nll": 0.0, "tokens": 0} for p in range(block_size)}
 
     for inputs, targets, loss_extras, _ in cached_batches:
         B, T = inputs.shape
@@ -269,19 +272,19 @@ def _eval_both_block_end2end(
             log_probs = F.log_softmax(logits.float(), dim=-1)
             target_log_probs = log_probs.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
 
-            # Step 4: Compute loss at blocks 2..N-1
-            for block_idx in range(2, num_blocks):
-                for pos in range(block_size):
+            # Step 4: Compute loss at blocks 2..N-1, per position
+            for pos in range(block_size):
+                for block_idx in range(2, num_blocks):
                     pos_in_seq = block_idx * block_size + pos
 
                     if loss_mask is not None:
                         mask_at_pos = loss_mask[:, pos_in_seq]
                         nll = -target_log_probs[:, pos_in_seq]
-                        total_nll += (nll * mask_at_pos.float()).sum().item()
-                        total_tokens += mask_at_pos.sum().item()
+                        nll_by_pos[pos]["nll"] += (nll * mask_at_pos.float()).sum().item()
+                        nll_by_pos[pos]["tokens"] += mask_at_pos.sum().item()
                     else:
                         nll = -target_log_probs[:, pos_in_seq]
-                        total_nll += nll.sum().item()
-                        total_tokens += B
+                        nll_by_pos[pos]["nll"] += nll.sum().item()
+                        nll_by_pos[pos]["tokens"] += B
 
-    return total_nll / total_tokens if total_tokens > 0 else 0.0
+    return build_result_dict(nll_by_pos, block_size, include_accuracy=False)

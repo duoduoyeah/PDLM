@@ -1,41 +1,33 @@
 #!/bin/bash
 
-## Block-PDLM Training Script
-## Single-pass model that performs:
-##   - Stage 1 (Block→Block: position k in block i predicts group at position k in block i+1)
-##   - Stage 2 (Group → Pure denoising) on the first L positions
-##
-## Architecture uses 2L input: [xt | x0] with block diffusion mask.
-## Stage 1 uses block→block prediction via lm_head (no MTP head).
-##
-## Tokenizer naming: n{noise}_k{overlap_k}_g{num_groups}
-##   - noise_level: tokens per final group (e.g., 64, 1024)
-##   - overlap_k: how many groups each token appears in
-##   - num_groups: number of final groups
+## Experiment C Soft Group Noise Training Script (PDLM Stage 2: Group → Pure)
+## Tests robustness of group tokens under soft (noisy) mapping.
+## soft_p_within: probability of correct group mapping (1.0 = hard, <1.0 = soft noise)
 ##
 ## Usage:
-##   bash launch/run_block_pdlm.sh --noise_level=64 --overlap_k=1 --num_groups=64
-##   bash launch/run_block_pdlm.sh --noise_level=1024 --overlap_k=7 --num_groups=28 --depth=8
-##   bash launch/run_block_pdlm.sh --noise_level=64 --num_groups=64 --test_mode=false --data_ratio=20
+##   bash launch/run_expc_soft.sh --noise_level=64 --num_groups=64 --soft_p_within=0.5
+##   bash launch/run_expc_soft.sh --noise_level=256 --num_groups=16 --soft_p_within=0.7 --depth=8
+##   bash launch/run_expc_soft.sh --noise_level=16 --num_groups=256 --soft_p_within=0.9 --block_size=8
 
 # ============================================================
 # Default values
 # ============================================================
-NOISE_LEVEL="64"           # tokens per final group
-OVERLAP_K="1"              # how many groups each token appears in
-NUM_GROUPS="64"            # number of final groups
+# Tokenizer naming: n{noise}_k{overlap_k}_g{num_groups}
+NOISE_LEVEL="64"        # tokens per final group (e.g., 64, 256, 16)
+OVERLAP_K="1"           # how many groups each token appears in
+NUM_GROUPS="64"         # number of final groups
+SOFT_P_WITHIN="0.5"     # prob of correct group mapping (1.0 = hard, <1.0 = soft)
 TEST_MODE="true"
-DATA_RATIO="10"            # default 10 for test mode
-DEPTH="4"                  # model depth
-BLOCK_SIZE="4"             # bucket_size for block diffusion
-MTP_LOSS_WEIGHT="1.0"      # Stage 1 loss weight relative to Stage 2
-LOSS_WEIGHT_MODE="manual"  # "manual" or "fixed" - fixed computes weight from warmup batches
-DRIVE_OUTPUT_FOLDER=""     # subfolder under DRIVE_BASE for outputs (empty = save directly under DRIVE_BASE)
-GRADIENT_TRACK_EVERY="0"   # 0 = disabled, >0 = log gradient metrics every N steps
+DATA_RATIO="10"  # default 10 for test mode
+DEPTH="4"  # model depth
+BLOCK_SIZE="4"  # block size
+DRIVE_OUTPUT_FOLDER=""  # subfolder under DRIVE_BASE for outputs (empty = save directly under DRIVE_BASE)
 
 # Common training arguments
+PREFIX_PURE_TOKENS="1"
+IS_CAUSAL="False"
 MAX_SEQ_LEN="512"
-DEVICE_BATCH_SIZE="64"     # Lower than Stage 1 due to 2L input (doubled sequence)
+DEVICE_BATCH_SIZE="128"
 EVAL_EVERY="2500"
 EVAL_NUM_BATCHES="20"
 EVAL_NUM_BATCHES_FINAL="100"
@@ -52,6 +44,9 @@ for arg in "$@"; do
         --num_groups=*)
             NUM_GROUPS="${arg#*=}"
             ;;
+        --soft_p_within=*)
+            SOFT_P_WITHIN="${arg#*=}"
+            ;;
         --test_mode=*)
             TEST_MODE="${arg#*=}"
             ;;
@@ -64,11 +59,11 @@ for arg in "$@"; do
         --block_size=*)
             BLOCK_SIZE="${arg#*=}"
             ;;
-        --mtp_loss_weight=*)
-            MTP_LOSS_WEIGHT="${arg#*=}"
+        --prefix_pure_tokens=*)
+            PREFIX_PURE_TOKENS="${arg#*=}"
             ;;
-        --loss_weight_mode=*)
-            LOSS_WEIGHT_MODE="${arg#*=}"
+        --is_causal=*)
+            IS_CAUSAL="${arg#*=}"
             ;;
         --max_seq_len=*)
             MAX_SEQ_LEN="${arg#*=}"
@@ -88,28 +83,20 @@ for arg in "$@"; do
         --drive_output_folder=*)
             DRIVE_OUTPUT_FOLDER="${arg#*=}"
             ;;
-        --gradient_track_every=*)
-            GRADIENT_TRACK_EVERY="${arg#*=}"
-            ;;
         *)
             echo "Unknown argument: $arg"
-            echo "Usage: bash launch/run_block_pdlm.sh [--noise_level=64] [--overlap_k=1] [--num_groups=64]"
-            echo "       [--depth=4] [--block_size=8] [--mtp_loss_weight=1.0] [--loss_weight_mode=manual]"
-            echo "       [--test_mode=true] [--data_ratio=10]"
-            echo "       [--max_seq_len=512] [--device_batch_size=64]"
-            echo "       [--drive_output_folder=<folder>]"
+            echo "Usage: bash launch/run_expc_soft.sh [--noise_level=64] [--overlap_k=1] [--num_groups=64]"
+            echo "       [--soft_p_within=0.5] [--depth=4] [--block_size=4] [--test_mode=true] [--data_ratio=10]"
+            echo "       [--prefix_pure_tokens=1] [--is_causal=False] [--max_seq_len=512]"
+            echo "       [--device_batch_size=128] [--eval_every=2500] [--drive_output_folder=<folder>]"
             echo ""
             echo "Tokenizer naming: n{noise}_k{overlap_k}_g{num_groups}"
-            echo "Examples: n64_k1_g64, n1024_k7_g28, n1024_k55_g220"
+            echo "Examples: n64_k1_g64, n256_k1_g16, n16_k1_g256"
             echo ""
-            echo "Parameters:"
-            echo "  --noise_level       Tokens per final group (e.g., 64, 1024)"
-            echo "  --overlap_k         How many groups each token appears in"
-            echo "  --num_groups        Number of final groups"
-            echo "  --block_size        Bucket size for block diffusion"
-            echo "  --mtp_loss_weight   Stage 1 loss weight relative to Stage 2 (used when loss_weight_mode=manual)"
-            echo "  --loss_weight_mode  'manual' (use mtp_loss_weight) or 'fixed' (compute from warmup batches)"
-            echo "  --drive_output_folder  Save outputs to subfolder under DRIVE_BASE"
+            echo "soft_p_within: probability of correct group mapping"
+            echo "  1.0 = hard mapping (baseline), 0.5 = 50% correct, etc."
+            echo ""
+            echo "Use --drive_output_folder to save outputs to a subfolder under DRIVE_BASE"
             exit 1
             ;;
     esac
@@ -118,16 +105,22 @@ done
 # Build tokenizer variant name (matches folder naming convention)
 TOKENIZER_VARIANT="n${NOISE_LEVEL}_k${OVERLAP_K}_g${NUM_GROUPS}"
 
-# Build model name
-BASE_MODEL_NAME="block_pdlm_d${DEPTH}_b${BLOCK_SIZE}_${TOKENIZER_VARIANT}"
+# Convert soft_p_within to integer for naming (e.g., 0.5 -> 50, 0.7 -> 70, 1.0 -> 100)
+SOFT_INT=$(python3 -c "print(int(float('${SOFT_P_WITHIN}') * 100))")
 
-WANDB_GROUP="block_pdlm_d${DEPTH}"
+# Build model name (includes soft value)
+BASE_MODEL_NAME="expc_d${DEPTH}_b${BLOCK_SIZE}_${TOKENIZER_VARIANT}_soft${SOFT_INT}"
+
+WANDB_GROUP="expc_soft_d${DEPTH}"
+MODEL_REPO="duoduoyeah/expc_d${DEPTH}"
 DRIVE_BASE="/content/drive/MyDrive/nanochat"
 
 # Local training base (faster than Drive)
-LOCAL_TRAIN_BASE="/content/block_pdlm_temp_train"
+LOCAL_TRAIN_BASE="/content/pdlm_temp_train"
 
-# Group tokenizer path on Drive
+# Group tokenizer path on Drive (built by build_group_tokenizer.sh)
+# Contains: tokenizer.pkl, token_maps.pt (self-contained, no need for base tokenizer)
+# Naming convention: n{noise}_k{overlap_k}_g{num_groups}
 GROUP_TOKENIZER_PATH="${DRIVE_BASE}/group_tokenizers/${TOKENIZER_VARIANT}"
 
 # Load secrets from .env file
@@ -155,18 +148,18 @@ export MODEL_NAME
 export DATA_RATIO
 export DEPTH
 export WANDB_GROUP
+export MODEL_REPO
 export NANOCHAT_BASE_DIR="${LOCAL_TRAIN_BASE}/${MODEL_NAME}"
 
-echo "=== Running Combined PDLM (block_pdlm): ${MODEL_NAME} ==="
+echo "=== Running Experiment C (Soft): ${MODEL_NAME} ==="
 echo "=== Local base dir: ${NANOCHAT_BASE_DIR} ==="
 echo "=== Drive base: ${DRIVE_BASE} ==="
 echo "=== Drive output folder: ${DRIVE_OUTPUT_FOLDER:-<root>} ==="
 echo "=== Test mode: ${TEST_MODE} ==="
 echo "=== Data ratio: ${DATA_RATIO} ==="
 echo "=== Depth: ${DEPTH} ==="
-echo "=== Block size (bucket): ${BLOCK_SIZE} ==="
-echo "=== MTP loss weight: ${MTP_LOSS_WEIGHT} ==="
-echo "=== Loss weight mode: ${LOSS_WEIGHT_MODE} ==="
+echo "=== Block size: ${BLOCK_SIZE} ==="
+echo "=== soft_p_within: ${SOFT_P_WITHIN} ==="
 echo "=== Tokenizer: ${TOKENIZER_VARIANT} (noise=${NOISE_LEVEL}, overlap_k=${OVERLAP_K}, num_groups=${NUM_GROUPS}) ==="
 echo "=== Group tokenizer path: ${GROUP_TOKENIZER_PATH} ==="
 
@@ -228,29 +221,29 @@ else
 fi
 
 # ============================================================
-# Training - Combined PDLM (block_pdlm)
+# Training - PDLM Stage 2 (Group → Pure) with Soft Noise
 # ============================================================
 
-echo "Starting Combined PDLM (block_pdlm) training..."
+echo "Starting PDLM Stage 2 training with soft_p_within=${SOFT_P_WITHIN}..."
 python -m scripts.base_train \
     --run="${MODEL_NAME}" \
     --wandb_group="${WANDB_GROUP}" \
     --model_type=pdlm \
-    --pdlm_stage=both_block \
+    --pdlm_stage=stage2 \
     --depth=${DEPTH} \
     --block_size=${BLOCK_SIZE} \
-    --mtp_loss_weight=${MTP_LOSS_WEIGHT} \
-    --loss_weight_mode=${LOSS_WEIGHT_MODE} \
+    --prefix_pure_tokens=${PREFIX_PURE_TOKENS} \
+    --is_causal=${IS_CAUSAL} \
     --max_seq_len=${MAX_SEQ_LEN} \
     --device_batch_size=${DEVICE_BATCH_SIZE} \
     --target_param_data_ratio=${DATA_RATIO} \
     --eval_every=${EVAL_EVERY} \
     --eval_num_batches=${EVAL_NUM_BATCHES} \
     --eval_num_batches_final=${EVAL_NUM_BATCHES_FINAL} \
-    --gradient_track_every=${GRADIENT_TRACK_EVERY}
+    --soft_p_within=${SOFT_P_WITHIN}
 
 # ============================================================
-# Post-training: copy to Drive
+# Post-training: copy to Drive and upload
 # ============================================================
 
 echo "=== Training complete for ${MODEL_NAME} ==="
@@ -280,6 +273,9 @@ echo "Copying results to Drive: ${DRIVE_OUTPUT_DIR}"
 mkdir -p "${DRIVE_OUTPUT_DIR}"
 cp -r "${NANOCHAT_BASE_DIR}"/* "${DRIVE_OUTPUT_DIR}/"
 echo "Results saved to Drive."
+
+# Skip HuggingFace upload (keeping results on Google Drive only)
+echo "Skipping HuggingFace upload (disabled for now, results saved to Drive)"
 
 # Cleanup local training dir
 echo "Cleaning up local training dir..."

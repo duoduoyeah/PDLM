@@ -27,6 +27,7 @@ DEPTH="4"               # model depth
 BLOCK_SIZE="4"          # bucket size (parallel block prediction)
 PREFIX_PURE_TOKENS="0"  # pure prefix tokens for conditioning
 IS_CAUSAL="False"       # bidirectional attention within blocks
+STAGE1_TARGET_MODE="pure"  # "pure" (CE over pure_vocab) or "group" (any_correct_ce over num_groups)
 GRADIENT_TRACK_EVERY="0"  # gradient tracking interval (0 = disabled)
 DRIVE_OUTPUT_FOLDER=""  # subfolder under DRIVE_BASE for outputs (empty = save directly under DRIVE_BASE)
 
@@ -67,6 +68,9 @@ for arg in "$@"; do
         --is_causal=*)
             IS_CAUSAL="${arg#*=}"
             ;;
+        --stage1_target_mode=*)
+            STAGE1_TARGET_MODE="${arg#*=}"
+            ;;
         --max_seq_len=*)
             MAX_SEQ_LEN="${arg#*=}"
             ;;
@@ -91,7 +95,7 @@ for arg in "$@"; do
         *)
             echo "Unknown argument: $arg"
             echo "Usage: bash launch/run_pdlm_stage1_block.sh [--noise_level=64] [--overlap_k=1] [--num_groups=64]"
-            echo "       [--depth=4] [--block_size=8] [--prefix_pure_tokens=0] [--is_causal=False]"
+            echo "       [--depth=4] [--block_size=8] [--prefix_pure_tokens=0] [--is_causal=False] [--stage1_target_mode=pure]"
             echo "       [--test_mode=true] [--data_ratio=10]"
             echo "       [--max_seq_len=512] [--device_batch_size=64] [--gradient_track_every=0]"
             echo "       [--drive_output_folder=<folder>]"
@@ -158,6 +162,7 @@ echo "=== Depth: ${DEPTH} ==="
 echo "=== Block size: ${BLOCK_SIZE} ==="
 echo "=== Prefix pure tokens: ${PREFIX_PURE_TOKENS} ==="
 echo "=== Is causal: ${IS_CAUSAL} ==="
+echo "=== Stage1 target mode: ${STAGE1_TARGET_MODE} ==="
 echo "=== Tokenizer: ${TOKENIZER_VARIANT} (noise=${NOISE_LEVEL}, overlap_k=${OVERLAP_K}, num_groups=${NUM_GROUPS}) ==="
 echo "=== Group tokenizer path: ${GROUP_TOKENIZER_PATH} ==="
 
@@ -234,6 +239,7 @@ python -m scripts.base_train \
     --eval_every=${EVAL_EVERY} \
     --eval_num_batches=${EVAL_NUM_BATCHES} \
     --eval_num_batches_final=${EVAL_NUM_BATCHES_FINAL} \
+    --stage1_target_mode=${STAGE1_TARGET_MODE} \
     --gradient_track_every=${GRADIENT_TRACK_EVERY}
 
 # ============================================================
