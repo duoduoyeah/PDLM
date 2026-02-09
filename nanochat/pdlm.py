@@ -399,11 +399,11 @@ class PDLM(nn.Module):
                 group["initial_lr"] = group["lr"]
         return optimizers
 
-    def forward(self, idx, targets=None, kv_cache=None, attn_mask=None, loss_extras=None, return_separate_losses=False):
+    def forward(self, idx, targets=None, kv_cache=None, attn_mask=None, loss_extras=None, return_separate_losses=False, return_nll=False):
         """Training: idx/targets are length L; we concat to 2L inside this and apply block mask."""
         # Dispatch to specialized forward methods for certain stages
         if self.config.stage == "stage1_block" and targets is not None:
-            return self._forward_stage1_block(idx, targets, attn_mask, loss_extras)
+            return self._forward_stage1_block(idx, targets, attn_mask, loss_extras, return_nll=return_nll)
         if self.config.stage == "both_block" and targets is not None:
             return self._forward_both_block(idx, targets, attn_mask, loss_extras, return_separate_losses)
         if self.config.stage == "both_mtp" and targets is not None:
@@ -595,7 +595,7 @@ class PDLM(nn.Module):
 
         return combined_loss
 
-    def _forward_stage1_block(self, idx, targets, attn_mask, loss_extras):
+    def _forward_stage1_block(self, idx, targets, attn_mask, loss_extras, return_nll=False):
         """
         Forward pass for stage1_block (pure-target mode): L pure tokens in, L×L block-causal mask.
         Position k in block i predicts the pure token at position k in block i+1.
@@ -609,9 +609,10 @@ class PDLM(nn.Module):
             targets: (B, L) pure tokens (unused directly, kept for API consistency)
             attn_mask: (L, L) block-causal mask
             loss_extras: dict with "pure_targets" (B, T) and "loss_mask" (B, T)
+            return_nll: if True, return per-token NLL (B, T) instead of scalar loss
 
         Returns:
-            loss: scalar loss
+            loss: scalar loss, or (B, T) per-token NLL if return_nll=True
         """
         B, T = idx.size()
         assert attn_mask is not None, "stage1_block requires attention mask"
@@ -654,6 +655,8 @@ class PDLM(nn.Module):
             log_probs = F.log_softmax(logits, dim=-1)
             target_log_probs = torch.gather(log_probs, dim=-1, index=pure_targets.unsqueeze(-1))
             nll = -target_log_probs.squeeze(-1)
+            if return_nll:
+                return nll  # (B, T) per-token NLL, before masking/reducing
             loss = (nll * loss_mask).sum() / loss_mask.sum().clamp(min=1)
 
         return loss

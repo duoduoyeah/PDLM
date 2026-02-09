@@ -1,3 +1,11 @@
+02/07
+1. perpelxity, use new ppl, ask the bd3lm it use which kind of ppl
+
+02/06
+1. continue read the funnel transfer one
+2. impl gradient tracking for s1b model
+3. continue on stage_disambiguation
+
 02/05
 1. for splitting, we could use gpt eval on some text, and then read them, what do you think 
 
