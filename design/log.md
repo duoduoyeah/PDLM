@@ -1,5 +1,7 @@
 02/07
-1. perpelxity, use new ppl, ask the bd3lm it use which kind of ppl
+1. perpelxity, use new ppl, ask the bd3lm it use which kind of ppl -> so wierd
+2. s1b, block target
+3. block pdlm, with gradient check 
 
 02/06
 1. continue read the funnel transfer one
