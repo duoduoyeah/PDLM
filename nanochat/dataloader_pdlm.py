@@ -432,13 +432,11 @@ def pdlm_data_loader(
             # r_per_block: (B, num_blocks) each in [0, block_size)
             r_per_block = torch.randint(0, block_size, (B, num_blocks))
 
-            # Build position mask: True = group token, False = keep pure
+            # Build position mask: True = group token, False = keep pure (vectorized)
+            pos_in_block = (torch.arange(block_region_len) % block_size).unsqueeze(0)  # (1, block_region_len)
+            r_expanded = r_per_block.repeat_interleave(block_size, dim=1)  # (B, block_region_len)
             group_mask = torch.zeros(B, T, dtype=torch.bool)
-            for blk in range(num_blocks):
-                blk_start = block_start + blk * block_size
-                for pos in range(block_size):
-                    # pos >= r means this position gets a group token
-                    group_mask[:, blk_start + pos] = (pos >= r_per_block[:, blk])
+            group_mask[:, block_start:block_end] = (pos_in_block >= r_expanded)
 
             # Convert pure tokens to group tokens at group positions
             block_tokens = targets_cpu[:, block_start:block_end]  # (B, block_region_len)
@@ -492,9 +490,8 @@ def pdlm_data_loader(
 
             # === Build stage1_loss_mask: skip block 0 ===
             stage1_loss_mask = torch.zeros(B, T, dtype=torch.bool)
-            for blk in range(1, num_blocks):
-                blk_start_pos = block_start + blk * block_size
-                stage1_loss_mask[:, blk_start_pos:blk_start_pos + block_size] = True
+            stage1_loss_mask[:, block_start:block_end] = True
+            stage1_loss_mask[:, block_start:block_start + block_size] = False
             if prefix_pure_tokens > 0:
                 stage1_loss_mask[:, :prefix_pure_tokens] = False
 
@@ -512,6 +509,86 @@ def pdlm_data_loader(
                 "stage1_targets": stage1_targets,
                 "stage1_loss_mask": stage1_loss_mask,
             }
+
+        elif stage == "mask_pdlm":
+            # Mask PDLM: every position predicts itself (not the next block's token).
+            # For each block independently, sample r ~ Uniform{0, ..., block_size}
+            # r=0: all positions → mask token
+            # r>=1: positions 0..r-2 → pure (keep), positions r-1..block_size-1 → group token
+            # loss_mask: True at mask + group positions, False at pure positions. Skip block 0.
+
+            prefix_sliding_tokens = 0
+            num_blocks = (T - prefix_sliding_tokens) // block_size
+            block_region_len = num_blocks * block_size
+
+            block_start = prefix_sliding_tokens
+            block_end = block_start + block_region_len
+
+            pure_to_group = token_map.pure_to_group  # (pure_vocab, overlap_k)
+            overlap_k = token_map.overlap_k
+            pure_vocab_size = token_map.pure_vocab_size
+            num_groups = token_map.num_groups
+            mask_token_id = pure_vocab_size + num_groups  # last token in wte
+            soft_p_within = model_config.soft_p_within
+
+            # === Build inputs (xt): mixed mask/group/pure tokens (vectorized) ===
+            inputs_cpu = targets_cpu.clone()
+
+            # For each block, sample r (number of revealed pure positions + 1 for mask state)
+            # r_per_block: (B, num_blocks) each in [0, block_size + 1)
+            # 5 states for block_size=4: r=0 (all mask), r=1..4 (progressive reveal)
+            r_per_block = torch.randint(0, block_size + 1, (B, num_blocks))
+
+            # Vectorized position and r tensors for the block region
+            # pos_in_block: (1, block_region_len) — position within each block (0,1,...,K-1,0,1,...)
+            pos_in_block = (torch.arange(block_region_len) % block_size).unsqueeze(0)  # (1, block_region_len)
+            # r_expanded: (B, block_region_len) — each position knows its block's r value
+            r_expanded = r_per_block.repeat_interleave(block_size, dim=1)  # (B, block_region_len)
+
+            # Compute masks vectorized: (B, block_region_len)
+            is_mask = (r_expanded == 0)
+            is_group = (~is_mask) & (pos_in_block >= r_expanded - 1)
+            # (is_pure = everything else — not needed explicitly)
+
+            # Get block tokens and convert to group tokens (vectorized, same as both_block)
+            block_tokens = targets_cpu[:, block_start:block_end]  # (B, block_region_len)
+            if overlap_k == 1:
+                correct_group_ids = pure_to_group[block_tokens, 0]
+            else:
+                k_idx = torch.randint(0, overlap_k, block_tokens.shape)
+                correct_group_ids = pure_to_group[block_tokens.flatten(), k_idx.flatten()].view(block_tokens.shape)
+
+            # Apply soft noise (vectorized)
+            if soft_p_within >= 1.0:
+                group_ids = correct_group_ids
+            else:
+                wrong_group_ids = torch.randint(0, num_groups, block_tokens.shape)
+                within_mask_soft = torch.rand(block_tokens.shape) < soft_p_within
+                group_ids = torch.where(within_mask_soft, correct_group_ids, wrong_group_ids)
+
+            group_token_ids = pure_vocab_size + group_ids  # (B, block_region_len)
+
+            # Build final block tokens: mask where is_mask, group where is_group, pure elsewhere
+            block_result = block_tokens.clone()
+            block_result[is_mask] = mask_token_id
+            block_result[is_group] = group_token_ids[is_group]
+            inputs_cpu[:, block_start:block_end] = block_result
+
+            # Build loss_mask: True at mask + group positions, skip block 0
+            block_loss = is_mask | is_group  # (B, block_region_len)
+            block_loss[:, :block_size] = False  # skip block 0
+            loss_mask = torch.zeros(B, T, dtype=torch.bool)
+            loss_mask[:, block_start:block_end] = block_loss
+
+            if prefix_pure_tokens > 0:
+                loss_mask[:, :prefix_pure_tokens] = False
+
+            # Move to device
+            inputs = inputs_cpu.to(device=device, non_blocking=use_cuda)
+            targets = targets_cpu.to(device=device, non_blocking=use_cuda)
+            loss_mask = loss_mask.to(device=device, non_blocking=use_cuda)
+
+            loss_extras = {"loss_mask": loss_mask}
 
         elif stage == "both_mask":
             # Both stages with MASK instead of MTP - placeholder
