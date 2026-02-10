@@ -25,6 +25,7 @@ TEST_MODE="true"
 DATA_RATIO="10"            # default 10 for test mode
 DEPTH="4"                  # model depth
 BLOCK_SIZE="4"             # bucket_size for block diffusion
+SOFT_P_WITHIN="1.0"        # prob of correct group mapping (1.0 = hard, <1.0 = soft noise on group positions)
 DRIVE_OUTPUT_FOLDER=""     # subfolder under DRIVE_BASE for outputs (empty = save directly under DRIVE_BASE)
 GRADIENT_TRACK_EVERY="0"   # 0 = disabled, >0 = log gradient metrics every N steps
 
@@ -58,6 +59,9 @@ for arg in "$@"; do
             ;;
         --block_size=*)
             BLOCK_SIZE="${arg#*=}"
+            ;;
+        --soft_p_within=*)
+            SOFT_P_WITHIN="${arg#*=}"
             ;;
         --max_seq_len=*)
             MAX_SEQ_LEN="${arg#*=}"
@@ -142,6 +146,7 @@ echo "=== Test mode: ${TEST_MODE} ==="
 echo "=== Data ratio: ${DATA_RATIO} ==="
 echo "=== Depth: ${DEPTH} ==="
 echo "=== Block size (bucket): ${BLOCK_SIZE} ==="
+echo "=== Soft p within: ${SOFT_P_WITHIN} ==="
 echo "=== Tokenizer: ${TOKENIZER_VARIANT} (noise=${NOISE_LEVEL}, overlap_k=${OVERLAP_K}, num_groups=${NUM_GROUPS}) ==="
 echo "=== Group tokenizer path: ${GROUP_TOKENIZER_PATH} ==="
 
@@ -214,6 +219,7 @@ python -m scripts.base_train \
     --pdlm_stage=mask_pdlm \
     --depth=${DEPTH} \
     --block_size=${BLOCK_SIZE} \
+    --soft_p_within=${SOFT_P_WITHIN} \
     --max_seq_len=${MAX_SEQ_LEN} \
     --device_batch_size=${DEVICE_BATCH_SIZE} \
     --target_param_data_ratio=${DATA_RATIO} \

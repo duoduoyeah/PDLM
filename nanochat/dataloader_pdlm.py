@@ -521,6 +521,7 @@ def pdlm_data_loader(
             pure_vocab_size = token_map.pure_vocab_size
             num_groups = token_map.num_groups
             mask_token_id = pure_vocab_size + num_groups  # last token in wte
+            soft_p_within = model_config.soft_p_within
 
             # === Build inputs (xt): mixed mask/group/pure tokens ===
             inputs_cpu = targets_cpu.clone()
@@ -550,10 +551,19 @@ def pdlm_data_loader(
                     # Get group token ids for this position
                     pure_tokens_at_pos = targets_cpu[:, idx_pos]
                     if overlap_k == 1:
-                        group_ids = pure_to_group[pure_tokens_at_pos, 0]
+                        correct_group_ids = pure_to_group[pure_tokens_at_pos, 0]
                     else:
                         k_idx = torch.randint(0, overlap_k, (B,))
-                        group_ids = pure_to_group[pure_tokens_at_pos, k_idx]
+                        correct_group_ids = pure_to_group[pure_tokens_at_pos, k_idx]
+
+                    # Apply soft noise on group assignment
+                    if soft_p_within >= 1.0:
+                        group_ids = correct_group_ids
+                    else:
+                        wrong_group_ids = torch.randint(0, num_groups, (B,))
+                        within_mask = torch.rand(B) < soft_p_within
+                        group_ids = torch.where(within_mask, correct_group_ids, wrong_group_ids)
+
                     group_token_ids = pure_vocab_size + group_ids
 
                     # Set mask tokens
