@@ -27,6 +27,7 @@ DEPTH="4"                  # model depth
 BLOCK_SIZE="4"             # bucket_size for block diffusion
 MTP_LOSS_WEIGHT="1.0"      # Stage 1 loss weight relative to Stage 2
 LOSS_WEIGHT_MODE="manual"  # "manual" or "fixed" - fixed computes weight from warmup batches
+SOFT_P_WITHIN="1.0"        # prob of correct group mapping (1.0 = hard, <1.0 = soft)
 DRIVE_OUTPUT_FOLDER=""     # subfolder under DRIVE_BASE for outputs (empty = save directly under DRIVE_BASE)
 GRADIENT_TRACK_EVERY="0"   # 0 = disabled, >0 = log gradient metrics every N steps
 
@@ -48,6 +49,9 @@ for arg in "$@"; do
             ;;
         --num_groups=*)
             NUM_GROUPS="${arg#*=}"
+            ;;
+        --soft_p_within=*)
+            SOFT_P_WITHIN="${arg#*=}"
             ;;
         --test_mode=*)
             TEST_MODE="${arg#*=}"
@@ -91,7 +95,7 @@ for arg in "$@"; do
         *)
             echo "Unknown argument: $arg"
             echo "Usage: bash launch/run_block_pdlm_inference.sh [--noise_level=64] [--overlap_k=1] [--num_groups=64]"
-            echo "       [--depth=4] [--block_size=4] [--mtp_loss_weight=1.0] [--loss_weight_mode=manual]"
+            echo "       [--soft_p_within=1.0] [--depth=4] [--block_size=4] [--mtp_loss_weight=1.0] [--loss_weight_mode=manual]"
             echo "       [--test_mode=true] [--data_ratio=10]"
             echo "       [--max_seq_len=512] [--device_batch_size=64]"
             echo "       [--drive_output_folder=<folder>]"
@@ -103,8 +107,13 @@ done
 # Build tokenizer variant name (matches folder naming convention)
 TOKENIZER_VARIANT="n${NOISE_LEVEL}_k${OVERLAP_K}_g${NUM_GROUPS}"
 
-# Build model name
-BASE_MODEL_NAME="block_pdlm_inference_d${DEPTH}_b${BLOCK_SIZE}_${TOKENIZER_VARIANT}"
+# Build model name (include soft value if not 1.0)
+SOFT_INT=$(python3 -c "print(int(float('${SOFT_P_WITHIN}') * 100))")
+if [ "${SOFT_P_WITHIN}" = "1.0" ]; then
+    BASE_MODEL_NAME="block_pdlm_inference_d${DEPTH}_b${BLOCK_SIZE}_${TOKENIZER_VARIANT}"
+else
+    BASE_MODEL_NAME="block_pdlm_inference_d${DEPTH}_b${BLOCK_SIZE}_${TOKENIZER_VARIANT}_soft${SOFT_INT}"
+fi
 
 WANDB_GROUP="block_pdlm_inference_d${DEPTH}"
 DRIVE_BASE="/content/drive/MyDrive/nanochat"
@@ -152,6 +161,7 @@ echo "=== Depth: ${DEPTH} ==="
 echo "=== Block size (bucket): ${BLOCK_SIZE} ==="
 echo "=== MTP loss weight: ${MTP_LOSS_WEIGHT} ==="
 echo "=== Loss weight mode: ${LOSS_WEIGHT_MODE} ==="
+echo "=== soft_p_within: ${SOFT_P_WITHIN} ==="
 echo "=== Tokenizer: ${TOKENIZER_VARIANT} (noise=${NOISE_LEVEL}, overlap_k=${OVERLAP_K}, num_groups=${NUM_GROUPS}) ==="
 echo "=== Group tokenizer path: ${GROUP_TOKENIZER_PATH} ==="
 
@@ -216,7 +226,7 @@ fi
 # Training - Block PDLM Inference
 # ============================================================
 
-echo "Starting Block PDLM Inference training..."
+echo "Starting Block PDLM Inference training with soft_p_within=${SOFT_P_WITHIN}..."
 python -m scripts.base_train \
     --run="${MODEL_NAME}" \
     --wandb_group="${WANDB_GROUP}" \
@@ -226,6 +236,7 @@ python -m scripts.base_train \
     --block_size=${BLOCK_SIZE} \
     --mtp_loss_weight=${MTP_LOSS_WEIGHT} \
     --loss_weight_mode=${LOSS_WEIGHT_MODE} \
+    --soft_p_within=${SOFT_P_WITHIN} \
     --max_seq_len=${MAX_SEQ_LEN} \
     --device_batch_size=${DEVICE_BATCH_SIZE} \
     --target_param_data_ratio=${DATA_RATIO} \
