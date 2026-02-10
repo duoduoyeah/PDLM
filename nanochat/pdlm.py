@@ -69,7 +69,7 @@ def any_correct_ce_loss(logits, valid_targets, loss_mask=None, reduction="mean")
         return nll.mean()
 
 # Stage types for PDLM
-PDLMStage = Literal["stage1_mtp", "stage1_mask", "stage1_block", "stage2", "both_mtp", "both_mask", "both_block", "block_pdlm_inference"]
+PDLMStage = Literal["stage1_mtp", "stage1_mask", "stage1_block", "stage2", "both_mtp", "both_mask", "both_block", "block_pdlm_inference", "mask_pdlm"]
 
 @dataclass
 class PDLMConfig:
@@ -98,7 +98,7 @@ class PDLMConfig:
     mtp_loss_weight: float = 1.0   # Stage 1 MTP loss weight relative to Stage 2 (which is 1.0)
 
     def __post_init__(self):
-        valid_stages = {"stage1_mtp", "stage1_mask", "stage1_block", "stage2", "both_mtp", "both_mask", "both_block", "block_pdlm_inference"}
+        valid_stages = {"stage1_mtp", "stage1_mask", "stage1_block", "stage2", "both_mtp", "both_mask", "both_block", "block_pdlm_inference", "mask_pdlm"}
         if self.stage not in valid_stages:
             raise ValueError(f"Invalid stage: {self.stage}. Must be one of {valid_stages}")
 
@@ -133,6 +133,9 @@ class PDLMConfig:
             assert self.mask_token_id != -1, "both_mask requires mask_token_id"
             wte_size = self.pure_vocab_size + self.num_groups + 1
             lm_head_size = self.pure_vocab_size + self.num_groups
+        elif self.stage == "mask_pdlm":
+            wte_size = self.pure_vocab_size + self.num_groups + 1  # pure + groups + mask
+            lm_head_size = self.pure_vocab_size
         else:
             raise ValueError(f"Unknown stage: {self.stage}")
         return wte_size, lm_head_size
@@ -415,6 +418,8 @@ class PDLM(nn.Module):
             return self._forward_both_block(idx, targets, attn_mask, loss_extras, return_separate_losses)
         if self.config.stage == "block_pdlm_inference" and targets is not None:
             return self._forward_block_pdlm_inference(idx, targets, attn_mask, loss_extras, return_separate_losses)
+        if self.config.stage == "mask_pdlm" and targets is not None:
+            return self._forward_mask_pdlm(idx, targets, attn_mask, loss_extras, return_nll=return_nll)
         if self.config.stage == "both_mtp" and targets is not None:
             return self._forward_both_mtp(idx, targets, attn_mask, loss_extras)
 
@@ -839,6 +844,289 @@ class PDLM(nn.Module):
         if return_separate_losses:
             return combined_loss, stage1_loss.detach(), stage2_loss.detach()
         return combined_loss
+
+    def _forward_mask_pdlm(self, idx, targets, attn_mask, loss_extras, return_nll=False):
+        """
+        Forward pass for mask_pdlm stage.
+
+        Same 2L structure as block_pdlm_inference:
+        - First L (idx/xt): mixed mask/group/pure tokens -> predicts self's pure tokens
+        - Second L (targets/x0): pure tokens (context only, no loss)
+
+        Unified loss on xt half only, at mask+group positions (via loss_mask).
+        Target = self's pure token (no shifted targets).
+
+        Args:
+            idx: (B, L) input tokens (xt: mixed mask/group/pure tokens)
+            targets: (B, L) target tokens (x0: pure tokens)
+            attn_mask: (2L, 2L) block diffusion attention mask
+            loss_extras: dict with "loss_mask" (B, L)
+            return_nll: if True, return single NLL scalar for gradient tracking
+
+        Returns:
+            loss: scalar loss
+        """
+        B, T = idx.size()
+        assert attn_mask is not None, "Train should have attn mask"
+        assert self.config.sequence_len == T, "use double seq length when train"
+        assert targets.size(1) == T, "Targets should match the base sequence length"
+
+        # Concatenate [xt | x0] to form (B, 2L) input
+        combined_idx = torch.cat((idx, targets), dim=1)  # (B, 2L)
+
+        # Get rotary embeddings for 2L sequence (same positions for both halves)
+        cos = self.cos[:, :T]
+        sin = self.sin[:, :T]
+        cos_sin = (torch.cat((cos, cos), dim=1), torch.cat((sin, sin), dim=1))
+
+        # Forward through transformer
+        x = self.transformer.wte(combined_idx)
+        x = norm(x)
+        for block in self.transformer.h:
+            x = block(x, cos_sin, kv_cache=None, attn_mask=attn_mask)
+        x = norm(x)
+
+        # Compute logits (lm_head outputs pure_vocab_size)
+        softcap = 15
+        logits = self.lm_head(x)  # (B, 2L, pure_vocab_size)
+        logits = logits.float()
+        logits = softcap * torch.tanh(logits / softcap)
+
+        # Unified loss on xt half only
+        xt_logits = logits[:, :T, :]  # (B, T, pure_vocab_size)
+        loss_mask = loss_extras["loss_mask"]  # (B, T)
+
+        log_probs = F.log_softmax(xt_logits, dim=-1)
+        target_log_probs = torch.gather(log_probs, dim=-1, index=targets.unsqueeze(-1))
+        nll = -target_log_probs.squeeze(-1)  # (B, T)
+        loss = (nll * loss_mask).sum() / loss_mask.sum().clamp(min=1)
+
+        if return_nll:
+            return loss
+
+        return loss
+
+    def forward_for_eval_mask_pdlm(self, idx, targets, attn_mask):
+        """
+        Forward pass for mask_pdlm evaluation that returns xt-half logits.
+
+        Returns:
+            logits: (B, L, pure_vocab_size) logits from xt half
+        """
+        B, T = idx.size()
+        assert targets.size(1) == T, "Targets should match input length"
+
+        # Concatenate [xt | x0] = [idx | targets]
+        idx = torch.cat((idx, targets), dim=1)  # (B, 2L)
+
+        # Get rotary embeddings for 2L sequence
+        cos = self.cos[:, :T]
+        sin = self.sin[:, :T]
+        cos_sin = (torch.cat((cos, cos), dim=1), torch.cat((sin, sin), dim=1))
+
+        # Forward through transformer
+        x = self.transformer.wte(idx)
+        x = norm(x)
+        for block in self.transformer.h:
+            x = block(x, cos_sin, kv_cache=None, attn_mask=attn_mask)
+        x = norm(x)
+
+        # Compute logits (lm_head outputs pure_vocab_size)
+        softcap = 15
+        logits = self.lm_head(x)  # (B, 2L, pure_vocab_size)
+        logits = logits.float()
+        logits = softcap * torch.tanh(logits / softcap)
+
+        # Return only xt half logits
+        return logits[:, :T, :]  # (B, L, pure_vocab_size)
+
+    @torch.inference_mode()
+    def generate_mask_pdlm(self, tokens, max_new_tokens, block_size=None,
+                           temperature=0.0, topk=0, seed=42,
+                           collapse_topk=256, num_denoise_steps=4):
+        """
+        Generate tokens using mask_pdlm model (iterative denoising).
+
+        Each block is generated in (1 + num_denoise_steps) steps:
+        1. Append K mask tokens to xt, zeros to x0 → forward 2L → pure logits
+           at mask positions → collapse to groups → initial group tokens
+        2-5. Build xt with current pure/group mix, forward 2L, sample pure token,
+             collapse remaining positions back to groups
+
+        Args:
+            tokens: list of pure token ids (prompt)
+            max_new_tokens: number of new pure tokens to generate
+            block_size: K, tokens per block (default from config.bucket_size)
+            temperature: sampling temperature (0 = greedy)
+            topk: top-k sampling (0 = disabled)
+            seed: random seed for sampling
+            collapse_topk: top-k for pure→group collapse (256 default, -1 for dense)
+            num_denoise_steps: number of denoising steps per block (default 4)
+
+        Returns:
+            generated_tokens: tensor of pure token ids (1, total_len)
+            debug_blocks: list of per-block generation details
+        """
+        assert self.config.stage == "mask_pdlm", \
+            "generate_mask_pdlm requires mask_pdlm stage"
+        assert isinstance(tokens, list), "tokens must be a list"
+
+        device = self.get_device()
+        if block_size is None:
+            block_size = self.config.bucket_size
+        K = block_size
+
+        pure_vocab_size = self.config.pure_vocab_size
+        group_offset = pure_vocab_size
+        mask_token_id = pure_vocab_size + self.config.num_groups  # last token in wte
+
+        # Setup RNG for sampling
+        rng = None
+        if temperature > 0:
+            rng = torch.Generator(device=device)
+            rng.manual_seed(seed)
+
+        # Current sequence (pure tokens)
+        ids = torch.tensor([tokens], dtype=torch.long, device=device)  # (1, prompt_len)
+        prompt_len = ids.size(1)
+        target_len = prompt_len + max_new_tokens
+
+        debug_blocks = []
+        block_step = 0
+
+        while ids.size(1) < target_len:
+            current_len = ids.size(1)
+            T = ids.size(1)
+
+            # === Step 1: Forward with mask tokens → collapse to groups ===
+            # Build xt: pure context + K mask tokens
+            mask_tokens = torch.full((1, K), mask_token_id, dtype=torch.long, device=device)
+            xt = torch.cat([ids, mask_tokens], dim=1)  # (1, T+K)
+
+            # Build x0: pure context + placeholder zeros
+            x0 = torch.cat([ids, torch.zeros(1, K, dtype=torch.long, device=device)], dim=1)
+
+            total_len = T + K
+            combined_idx = torch.cat([xt, x0], dim=1)  # (1, 2*(T+K))
+
+            cos = self.cos[:, :total_len]
+            sin = self.sin[:, :total_len]
+            cos_sin_2l = (torch.cat([cos, cos], dim=1), torch.cat([sin, sin], dim=1))
+
+            from nanochat.attn_masks import gen_mask
+            attn_mask = gen_mask(total_len, K, attn_backend="sdpa",
+                                 is_causal=self._is_causal,
+                                 prefix_sliding_tokens=0).to(device)
+
+            softcap = 15
+            x = self.transformer.wte(combined_idx)
+            x = norm(x)
+            for block in self.transformer.h:
+                x = block(x, cos_sin_2l, kv_cache=None, attn_mask=attn_mask)
+            x = norm(x)
+
+            logits_2l = self.lm_head(x)
+            logits_2l = logits_2l.float()
+            logits_2l = softcap * torch.tanh(logits_2l / softcap)
+
+            # Get pure logits at mask positions (xt half, positions T:T+K)
+            block_logits = logits_2l[:, T:T+K, :]  # (1, K, pure_vocab_size)
+
+            # Collapse to groups
+            initial_groups = self.collapse_pure_to_group(block_logits, collapse_topk=collapse_topk)  # (1, K)
+
+            # Initialize block state
+            block_pure = torch.full((1, K), -1, dtype=torch.long, device=device)
+            block_groups = initial_groups  # (1, K)
+
+            debug_info = {
+                "block_step": block_step,
+                "context_len": current_len,
+                "initial_groups": initial_groups.cpu().tolist()[0],
+                "denoise_steps": [],
+            }
+
+            # === Steps 2..num_denoise_steps+1: Iterative denoising ===
+            for denoise_step in range(num_denoise_steps):
+                # Build xt: pure context + current block (mix of pure and group tokens)
+                block_tokens = torch.where(
+                    block_pure >= 0,
+                    block_pure,
+                    block_groups + group_offset,
+                )  # (1, K)
+                xt = torch.cat([ids, block_tokens], dim=1)
+
+                x0 = torch.cat([ids, torch.zeros(1, K, dtype=torch.long, device=device)], dim=1)
+
+                total_len = T + K
+                combined_idx = torch.cat([xt, x0], dim=1)
+
+                cos = self.cos[:, :total_len]
+                sin = self.sin[:, :total_len]
+                cos_sin_2l = (torch.cat([cos, cos], dim=1), torch.cat([sin, sin], dim=1))
+
+                attn_mask = gen_mask(total_len, K, attn_backend="sdpa",
+                                     is_causal=self._is_causal,
+                                     prefix_sliding_tokens=0).to(device)
+
+                x = self.transformer.wte(combined_idx)
+                x = norm(x)
+                for block in self.transformer.h:
+                    x = block(x, cos_sin_2l, kv_cache=None, attn_mask=attn_mask)
+                x = norm(x)
+
+                logits_2l = self.lm_head(x)
+                logits_2l = logits_2l.float()
+                logits_2l = softcap * torch.tanh(logits_2l / softcap)
+
+                block_logits = logits_2l[:, T:T+K, :]
+
+                # Sample next pure token (left-to-right: reveal position denoise_step)
+                pos = denoise_step
+                if pos < K:
+                    pos_logits = block_logits[:, pos, :]
+
+                    if temperature > 0:
+                        if topk > 0:
+                            v, _ = torch.topk(pos_logits, min(topk, pos_logits.size(-1)), dim=-1)
+                            pos_logits[pos_logits < v[:, [-1]]] = float('-inf')
+                        probs = F.softmax(pos_logits / temperature, dim=-1)
+                        sampled = torch.multinomial(probs, num_samples=1, generator=rng)
+                    else:
+                        sampled = pos_logits.argmax(dim=-1, keepdim=True)
+
+                    block_pure[:, pos] = sampled.squeeze(-1)
+
+                    # Update remaining group tokens via collapse
+                    for remaining_pos in range(pos + 1, K):
+                        remaining_logits = block_logits[:, remaining_pos:remaining_pos+1, :]
+                        block_groups[:, remaining_pos] = self.collapse_pure_to_group(
+                            remaining_logits, collapse_topk=collapse_topk
+                        ).squeeze(0)
+
+                debug_info["denoise_steps"].append({
+                    "step": denoise_step,
+                    "revealed_pos": pos if pos < K else -1,
+                    "pure_token": block_pure[:, pos].item() if pos < K else -1,
+                })
+
+            # After all denoise steps, fill remaining positions with argmax
+            for pos in range(num_denoise_steps, K):
+                if block_pure[:, pos].item() < 0:
+                    block_pure[:, pos] = block_logits[:, pos, :].argmax(dim=-1)
+
+            debug_blocks.append(debug_info)
+
+            # Append revealed pure tokens to sequence
+            ids = torch.cat([ids, block_pure], dim=1)
+            block_step += 1
+
+            if block_step > 1000:
+                break
+
+        # Truncate to exact target length
+        ids = ids[:, :target_len]
+        return ids, debug_blocks
 
     def forward_for_eval_block_pdlm_inference(self, idx, targets, attn_mask):
         """

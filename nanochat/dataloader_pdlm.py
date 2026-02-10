@@ -502,6 +502,89 @@ def pdlm_data_loader(
                 "stage1_loss_mask": stage1_loss_mask,
             }
 
+        elif stage == "mask_pdlm":
+            # Mask PDLM: every position predicts itself (not the next block's token).
+            # For each block independently, sample r ~ Uniform{0, ..., block_size}
+            # r=0: all positions → mask token
+            # r>=1: positions 0..r-2 → pure (keep), positions r-1..block_size-1 → group token
+            # loss_mask: True at mask + group positions, False at pure positions. Skip block 0.
+
+            prefix_sliding_tokens = 0
+            num_blocks = (T - prefix_sliding_tokens) // block_size
+            block_region_len = num_blocks * block_size
+
+            block_start = prefix_sliding_tokens
+            block_end = block_start + block_region_len
+
+            pure_to_group = token_map.pure_to_group  # (pure_vocab, overlap_k)
+            overlap_k = token_map.overlap_k
+            pure_vocab_size = token_map.pure_vocab_size
+            num_groups = token_map.num_groups
+            mask_token_id = pure_vocab_size + num_groups  # last token in wte
+
+            # === Build inputs (xt): mixed mask/group/pure tokens ===
+            inputs_cpu = targets_cpu.clone()
+
+            # For each block, sample r (number of revealed pure positions + 1 for mask state)
+            # r_per_block: (B, num_blocks) each in [0, block_size + 1)
+            # 5 states for block_size=4: r=0 (all mask), r=1..4 (progressive reveal)
+            r_per_block = torch.randint(0, block_size + 1, (B, num_blocks))
+
+            # Build position masks and set tokens
+            loss_mask = torch.zeros(B, T, dtype=torch.bool)
+
+            for blk in range(num_blocks):
+                blk_start = block_start + blk * block_size
+                r = r_per_block[:, blk]  # (B,)
+
+                for pos in range(block_size):
+                    idx_pos = blk_start + pos
+
+                    # Determine token type per sample
+                    # r=0: all mask
+                    # r>=1: pos < r-1 → pure, pos >= r-1 → group
+                    is_mask = (r == 0)  # (B,)
+                    is_pure = (~is_mask) & (pos < r - 1)  # (B,)
+                    is_group = (~is_mask) & (pos >= r - 1)  # (B,)
+
+                    # Get group token ids for this position
+                    pure_tokens_at_pos = targets_cpu[:, idx_pos]
+                    if overlap_k == 1:
+                        group_ids = pure_to_group[pure_tokens_at_pos, 0]
+                    else:
+                        k_idx = torch.randint(0, overlap_k, (B,))
+                        group_ids = pure_to_group[pure_tokens_at_pos, k_idx]
+                    group_token_ids = pure_vocab_size + group_ids
+
+                    # Set mask tokens
+                    inputs_cpu[:, idx_pos] = torch.where(
+                        is_mask,
+                        torch.full((B,), mask_token_id, dtype=torch.long),
+                        inputs_cpu[:, idx_pos],
+                    )
+                    # Set group tokens (only at group positions, not mask positions)
+                    inputs_cpu[:, idx_pos] = torch.where(
+                        is_group,
+                        group_token_ids,
+                        inputs_cpu[:, idx_pos],
+                    )
+                    # Pure positions keep their original pure token (already in inputs_cpu)
+
+                    # loss_mask: True at mask + group positions, False at pure positions
+                    # Skip block 0
+                    if blk >= 1:
+                        loss_mask[:, idx_pos] = is_mask | is_group
+
+            if prefix_pure_tokens > 0:
+                loss_mask[:, :prefix_pure_tokens] = False
+
+            # Move to device
+            inputs = inputs_cpu.to(device=device, non_blocking=use_cuda)
+            targets = targets_cpu.to(device=device, non_blocking=use_cuda)
+            loss_mask = loss_mask.to(device=device, non_blocking=use_cuda)
+
+            loss_extras = {"loss_mask": loss_mask}
+
         elif stage == "both_mask":
             # Both stages with MASK instead of MTP - placeholder
             raise NotImplementedError(f"PDLM {stage} not yet implemented in dataloader")

@@ -16,7 +16,7 @@ from nanochat.bd3lm import BDLM, BDLMConfig
 from nanochat.gpt_mtp import GPTMTP, GPTMTPConfig
 from nanochat.dataloader import get_data_loader
 from nanochat.bd3lm_eval import eval_bd3lm
-from nanochat.pdlm_eval import eval_pdlm, eval_pdlm_stage1_mask, eval_pdlm_stage1_block, eval_pdlm_both_block, eval_pdlm_full, eval_block_pdlm_inference
+from nanochat.pdlm_eval import eval_pdlm, eval_pdlm_stage1_mask, eval_pdlm_stage1_block, eval_pdlm_both_block, eval_pdlm_full, eval_block_pdlm_inference, eval_mask_pdlm
 from nanochat.mtp_eval import eval_mtp
 from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, print_banner, get_base_dir, autodetect_device_type
 from nanochat.tokenizer import get_tokenizer
@@ -253,6 +253,11 @@ if model_type == "pdlm" and pdlm_stage == "stage1_block" and stage1_target_mode 
 if model_type == "pdlm" and pdlm_stage == "block_pdlm_inference":
     model.register_group_mask(token_map.group_to_pure_mask.to(device=device))
     print0(f"Registered group_to_pure_mask for block_pdlm_inference ({token_map.num_groups} groups × {token_map.pure_vocab_size} pure tokens)")
+
+# Register group mask for mask_pdlm (needed for inference collapse)
+if model_type == "pdlm" and pdlm_stage == "mask_pdlm":
+    model.register_group_mask(token_map.group_to_pure_mask.to(device=device))
+    print0(f"Registered group_to_pure_mask for mask_pdlm ({token_map.num_groups} groups × {token_map.pure_vocab_size} pure tokens)")
 
 # Generate attention masks
 # For BD3LM: pre-generate block_size masks for prefix_sliding_tokens cycling (both normal and target_shift modes)
@@ -710,6 +715,44 @@ while True:
                     log_data[f"eval/end2end_pos_{pos}_loss"] = e2ep["loss"]
                     log_data[f"eval/end2end_pos_{pos}_ppl"] = e2ep["ppl"]
                 wandb_run.log(log_data)
+            elif pdlm_stage == "mask_pdlm":
+                print0(f"Running mask_pdlm evaluation at step {step} ({current_eval_batches} batches)...")
+                eval_result = eval_mask_pdlm(
+                    model=orig_model,
+                    val_loader=val_loader,
+                    block_size=block_size,
+                    num_batches=current_eval_batches,
+                    attn_mask=eval_attn_mask,
+                    device=device,
+                    autocast_ctx=autocast_ctx,
+                    prefix_pure_tokens=prefix_pure_tokens,
+                )
+                unified = eval_result["unified"]
+                e2e = eval_result["end2end"]
+                print0(f"  [mask_pdlm] unified_loss: {eval_result['unified_loss']:.4f}, end2end_loss: {eval_result['end2end_loss']:.4f}")
+                print0(f"    Unified: loss={unified['overall_loss']:.4f}, ppl={unified['overall_ppl']:.2f}")
+                for pos in range(block_size):
+                    pos_data = unified["positions"][pos]
+                    print0(f"      pos {pos}: loss={pos_data['loss']:.4f}, ppl={pos_data['ppl']:.2f}")
+                print0(f"    End-to-End: loss={e2e['overall_loss']:.4f}, ppl={e2e['overall_ppl']:.2f}")
+                for pos in range(block_size):
+                    pos_data = e2e["positions"][pos]
+                    print0(f"      pos {pos}: loss={pos_data['loss']:.4f}, ppl={pos_data['ppl']:.2f}")
+                log_data = {
+                    "step": step,
+                    "eval/unified_loss": eval_result["unified_loss"],
+                    "eval/end2end_loss": eval_result["end2end_loss"],
+                    "eval/unified_ppl": unified["overall_ppl"],
+                    "eval/end2end_ppl": e2e["overall_ppl"],
+                }
+                for pos in range(block_size):
+                    up = unified["positions"][pos]
+                    log_data[f"eval/unified_pos_{pos}_loss"] = up["loss"]
+                    log_data[f"eval/unified_pos_{pos}_ppl"] = up["ppl"]
+                    ep = e2e["positions"][pos]
+                    log_data[f"eval/end2end_pos_{pos}_loss"] = ep["loss"]
+                    log_data[f"eval/end2end_pos_{pos}_ppl"] = ep["ppl"]
+                wandb_run.log(log_data)
             else:
                 # Stage 2 evaluation
                 # Use full eval (with compatibility + oracle accuracy) for final step
@@ -872,6 +915,16 @@ while True:
                 from nanochat.gradient_tracking import compute_stage_gradient_metrics
                 grad_metrics = compute_stage_gradient_metrics(
                     orig_model, [s1_loss, s2_loss], ["s1", "s2"])
+                wandb_run.log({"step": step, **grad_metrics})
+                print0(f"[gradient_tracking] step {step}: logged {len(grad_metrics)} metrics")
+                nll = None  # skip per-position path
+            elif model_type == "pdlm" and pdlm_stage == "mask_pdlm":
+                nll_loss = orig_model._forward_mask_pdlm(
+                    x, y, attn_mask=block_diff_masks[0],
+                    loss_extras=loss_extras, return_nll=True)
+                from nanochat.gradient_tracking import compute_stage_gradient_metrics
+                grad_metrics = compute_stage_gradient_metrics(
+                    orig_model, [nll_loss], ["unified"])
                 wandb_run.log({"step": step, **grad_metrics})
                 print0(f"[gradient_tracking] step {step}: logged {len(grad_metrics)} metrics")
                 nll = None  # skip per-position path
