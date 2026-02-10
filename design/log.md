@@ -1,3 +1,6 @@
+02/10
+1. the ppl, re-talking this stuff
+
 02/08
 1. pdlm-mask, s1 pure
 2. pdlm-block,s1 pure
