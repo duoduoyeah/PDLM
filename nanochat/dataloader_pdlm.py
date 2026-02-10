@@ -432,13 +432,11 @@ def pdlm_data_loader(
             # r_per_block: (B, num_blocks) each in [0, block_size)
             r_per_block = torch.randint(0, block_size, (B, num_blocks))
 
-            # Build position mask: True = group token, False = keep pure
+            # Build position mask: True = group token, False = keep pure (vectorized)
+            pos_in_block = (torch.arange(block_region_len) % block_size).unsqueeze(0)  # (1, block_region_len)
+            r_expanded = r_per_block.repeat_interleave(block_size, dim=1)  # (B, block_region_len)
             group_mask = torch.zeros(B, T, dtype=torch.bool)
-            for blk in range(num_blocks):
-                blk_start = block_start + blk * block_size
-                for pos in range(block_size):
-                    # pos >= r means this position gets a group token
-                    group_mask[:, blk_start + pos] = (pos >= r_per_block[:, blk])
+            group_mask[:, block_start:block_end] = (pos_in_block >= r_expanded)
 
             # Convert pure tokens to group tokens at group positions
             block_tokens = targets_cpu[:, block_start:block_end]  # (B, block_region_len)
@@ -481,9 +479,8 @@ def pdlm_data_loader(
 
             # === Build stage1_loss_mask: skip block 0 ===
             stage1_loss_mask = torch.zeros(B, T, dtype=torch.bool)
-            for blk in range(1, num_blocks):
-                blk_start_pos = block_start + blk * block_size
-                stage1_loss_mask[:, blk_start_pos:blk_start_pos + block_size] = True
+            stage1_loss_mask[:, block_start:block_end] = True
+            stage1_loss_mask[:, block_start:block_start + block_size] = False
             if prefix_pure_tokens > 0:
                 stage1_loss_mask[:, :prefix_pure_tokens] = False
 
@@ -523,7 +520,7 @@ def pdlm_data_loader(
             mask_token_id = pure_vocab_size + num_groups  # last token in wte
             soft_p_within = model_config.soft_p_within
 
-            # === Build inputs (xt): mixed mask/group/pure tokens ===
+            # === Build inputs (xt): mixed mask/group/pure tokens (vectorized) ===
             inputs_cpu = targets_cpu.clone()
 
             # For each block, sample r (number of revealed pure positions + 1 for mask state)
@@ -531,59 +528,46 @@ def pdlm_data_loader(
             # 5 states for block_size=4: r=0 (all mask), r=1..4 (progressive reveal)
             r_per_block = torch.randint(0, block_size + 1, (B, num_blocks))
 
-            # Build position masks and set tokens
+            # Vectorized position and r tensors for the block region
+            # pos_in_block: (1, block_region_len) — position within each block (0,1,...,K-1,0,1,...)
+            pos_in_block = (torch.arange(block_region_len) % block_size).unsqueeze(0)  # (1, block_region_len)
+            # r_expanded: (B, block_region_len) — each position knows its block's r value
+            r_expanded = r_per_block.repeat_interleave(block_size, dim=1)  # (B, block_region_len)
+
+            # Compute masks vectorized: (B, block_region_len)
+            is_mask = (r_expanded == 0)
+            is_group = (~is_mask) & (pos_in_block >= r_expanded - 1)
+            # (is_pure = everything else — not needed explicitly)
+
+            # Get block tokens and convert to group tokens (vectorized, same as both_block)
+            block_tokens = targets_cpu[:, block_start:block_end]  # (B, block_region_len)
+            if overlap_k == 1:
+                correct_group_ids = pure_to_group[block_tokens, 0]
+            else:
+                k_idx = torch.randint(0, overlap_k, block_tokens.shape)
+                correct_group_ids = pure_to_group[block_tokens.flatten(), k_idx.flatten()].view(block_tokens.shape)
+
+            # Apply soft noise (vectorized)
+            if soft_p_within >= 1.0:
+                group_ids = correct_group_ids
+            else:
+                wrong_group_ids = torch.randint(0, num_groups, block_tokens.shape)
+                within_mask_soft = torch.rand(block_tokens.shape) < soft_p_within
+                group_ids = torch.where(within_mask_soft, correct_group_ids, wrong_group_ids)
+
+            group_token_ids = pure_vocab_size + group_ids  # (B, block_region_len)
+
+            # Build final block tokens: mask where is_mask, group where is_group, pure elsewhere
+            block_result = block_tokens.clone()
+            block_result[is_mask] = mask_token_id
+            block_result[is_group] = group_token_ids[is_group]
+            inputs_cpu[:, block_start:block_end] = block_result
+
+            # Build loss_mask: True at mask + group positions, skip block 0
+            block_loss = is_mask | is_group  # (B, block_region_len)
+            block_loss[:, :block_size] = False  # skip block 0
             loss_mask = torch.zeros(B, T, dtype=torch.bool)
-
-            for blk in range(num_blocks):
-                blk_start = block_start + blk * block_size
-                r = r_per_block[:, blk]  # (B,)
-
-                for pos in range(block_size):
-                    idx_pos = blk_start + pos
-
-                    # Determine token type per sample
-                    # r=0: all mask
-                    # r>=1: pos < r-1 → pure, pos >= r-1 → group
-                    is_mask = (r == 0)  # (B,)
-                    is_pure = (~is_mask) & (pos < r - 1)  # (B,)
-                    is_group = (~is_mask) & (pos >= r - 1)  # (B,)
-
-                    # Get group token ids for this position
-                    pure_tokens_at_pos = targets_cpu[:, idx_pos]
-                    if overlap_k == 1:
-                        correct_group_ids = pure_to_group[pure_tokens_at_pos, 0]
-                    else:
-                        k_idx = torch.randint(0, overlap_k, (B,))
-                        correct_group_ids = pure_to_group[pure_tokens_at_pos, k_idx]
-
-                    # Apply soft noise on group assignment
-                    if soft_p_within >= 1.0:
-                        group_ids = correct_group_ids
-                    else:
-                        wrong_group_ids = torch.randint(0, num_groups, (B,))
-                        within_mask = torch.rand(B) < soft_p_within
-                        group_ids = torch.where(within_mask, correct_group_ids, wrong_group_ids)
-
-                    group_token_ids = pure_vocab_size + group_ids
-
-                    # Set mask tokens
-                    inputs_cpu[:, idx_pos] = torch.where(
-                        is_mask,
-                        torch.full((B,), mask_token_id, dtype=torch.long),
-                        inputs_cpu[:, idx_pos],
-                    )
-                    # Set group tokens (only at group positions, not mask positions)
-                    inputs_cpu[:, idx_pos] = torch.where(
-                        is_group,
-                        group_token_ids,
-                        inputs_cpu[:, idx_pos],
-                    )
-                    # Pure positions keep their original pure token (already in inputs_cpu)
-
-                    # loss_mask: True at mask + group positions, False at pure positions
-                    # Skip block 0
-                    if blk >= 1:
-                        loss_mask[:, idx_pos] = is_mask | is_group
+            loss_mask[:, block_start:block_end] = block_loss
 
             if prefix_pure_tokens > 0:
                 loss_mask[:, :prefix_pure_tokens] = False
