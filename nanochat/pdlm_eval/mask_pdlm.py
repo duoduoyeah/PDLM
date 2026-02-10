@@ -53,9 +53,18 @@ def _eval_unified(model, cached_batches, block_size, attn_mask, device, autocast
     """
     Evaluate unified loss: CE on non-pure xt positions (mask + group).
     Uses forward_for_eval_mask_pdlm() which returns xt-half logits.
-    Per-position breakdown within blocks.
+    Per-position breakdown within blocks, split by mask vs group (by num_G_before).
     """
+    pure_vocab_size = model.config.pure_vocab_size
+    num_groups = model.config.num_groups
+    mask_token_id = pure_vocab_size + num_groups
+
+    # Overall per-position tracking
     nll_by_pos = {p: {"nll": 0.0, "tokens": 0} for p in range(block_size)}
+    # Mask scenario (r=0): per position
+    nll_mask = {p: {"nll": 0.0, "tokens": 0} for p in range(block_size)}
+    # Group scenario: per (pos, num_G_before)
+    nll_group = {p: {g: {"nll": 0.0, "tokens": 0} for g in range(block_size)} for p in range(block_size)}
 
     for inputs, targets, loss_extras, _ in cached_batches:
         B, T = inputs.shape
@@ -64,24 +73,72 @@ def _eval_unified(model, cached_batches, block_size, attn_mask, device, autocast
         with autocast_ctx:
             logits = model.forward_for_eval_mask_pdlm(
                 inputs, targets, attn_mask=attn_mask)
-            # logits: (B, T, pure_vocab_size)
 
             log_probs = F.log_softmax(logits.float(), dim=-1)
             target_log_probs = log_probs.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
 
             num_blocks = T // block_size
 
+            # Detect token types from inputs
+            is_mask_token = (inputs == mask_token_id)  # (B, T)
+            is_group_token = (inputs >= pure_vocab_size) & (~is_mask_token)  # (B, T)
+
             for pos in range(block_size):
                 for block_idx in range(1, num_blocks):
                     pos_in_seq = block_idx * block_size + pos
+                    blk_start = block_idx * block_size
 
-                    mask_at_pos = loss_mask[:, pos_in_seq]
-                    nll = -target_log_probs[:, pos_in_seq]
-                    nll_masked = nll * mask_at_pos.float()
-                    nll_by_pos[pos]["nll"] += nll_masked.sum().item()
-                    nll_by_pos[pos]["tokens"] += mask_at_pos.sum().item()
+                    has_loss = loss_mask[:, pos_in_seq]  # (B,)
+                    nll = -target_log_probs[:, pos_in_seq]  # (B,)
 
-    return build_result_dict(nll_by_pos, block_size, include_accuracy=False)
+                    # Overall (unchanged)
+                    nll_by_pos[pos]["nll"] += (nll * has_loss.float()).sum().item()
+                    nll_by_pos[pos]["tokens"] += has_loss.sum().item()
+
+                    # Mask scenario
+                    is_mask_here = is_mask_token[:, pos_in_seq] & has_loss
+                    nll_mask[pos]["nll"] += (nll * is_mask_here.float()).sum().item()
+                    nll_mask[pos]["tokens"] += is_mask_here.sum().item()
+
+                    # Group scenario — count preceding G's in same block
+                    is_group_here = is_group_token[:, pos_in_seq] & has_loss
+                    if is_group_here.any():
+                        if pos > 0:
+                            num_g_before = is_group_token[:, blk_start:blk_start + pos].sum(dim=1)  # (B,)
+                        else:
+                            num_g_before = torch.zeros(B, dtype=torch.long, device=inputs.device)
+                        for g in range(pos + 1):  # max G before pos is pos itself
+                            g_match = is_group_here & (num_g_before == g)
+                            nll_group[pos][g]["nll"] += (nll * g_match.float()).sum().item()
+                            nll_group[pos][g]["tokens"] += g_match.sum().item()
+
+    result = build_result_dict(nll_by_pos, block_size, include_accuracy=False)
+    # Attach detailed breakdown
+    result["mask_breakdown"] = _build_breakdown(nll_mask, block_size)
+    result["group_breakdown"] = {}
+    for pos in range(block_size):
+        result["group_breakdown"][pos] = {}
+        for g in range(pos + 1):
+            m = nll_group[pos][g]
+            if m["tokens"] > 0:
+                loss = m["nll"] / m["tokens"]
+                result["group_breakdown"][pos][g] = {
+                    "loss": loss,
+                    "ppl": torch.exp(torch.tensor(loss)).item(),
+                    "tokens": m["tokens"],
+                }
+    return result
+
+
+def _build_breakdown(nll_dict, block_size):
+    """Build loss/ppl dict from nll tracker."""
+    result = {}
+    for pos in range(block_size):
+        m = nll_dict[pos]
+        if m["tokens"] > 0:
+            loss = m["nll"] / m["tokens"]
+            result[pos] = {"loss": loss, "ppl": torch.exp(torch.tensor(loss)).item(), "tokens": m["tokens"]}
+    return result
 
 
 def _eval_end2end(model, cached_batches, block_size, attn_mask, device, autocast_ctx):

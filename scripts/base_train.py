@@ -731,9 +731,20 @@ while True:
                 e2e = eval_result["end2end"]
                 print0(f"  [mask_pdlm] unified_loss: {eval_result['unified_loss']:.4f}, end2end_loss: {eval_result['end2end_loss']:.4f}")
                 print0(f"    Unified: loss={unified['overall_loss']:.4f}, ppl={unified['overall_ppl']:.2f}")
+                mask_bk = unified.get("mask_breakdown", {})
+                group_bk = unified.get("group_breakdown", {})
                 for pos in range(block_size):
                     pos_data = unified["positions"][pos]
-                    print0(f"      pos {pos}: loss={pos_data['loss']:.4f}, ppl={pos_data['ppl']:.2f}")
+                    parts = [f"pos {pos}: loss={pos_data['loss']:.4f}"]
+                    if pos in mask_bk:
+                        parts.append(f"mask={mask_bk[pos]['loss']:.4f}")
+                    g_parts = []
+                    for g in range(pos + 1):
+                        if pos in group_bk and g in group_bk[pos]:
+                            g_parts.append(f"g{g}={group_bk[pos][g]['loss']:.4f}")
+                    if g_parts:
+                        parts.append("group[" + " ".join(g_parts) + "]")
+                    print0(f"      {' | '.join(parts)}")
                 print0(f"    End-to-End: loss={e2e['overall_loss']:.4f}, ppl={e2e['overall_ppl']:.2f}")
                 for pos in range(block_size):
                     pos_data = e2e["positions"][pos]
@@ -752,6 +763,12 @@ while True:
                     ep = e2e["positions"][pos]
                     log_data[f"eval/end2end_pos_{pos}_loss"] = ep["loss"]
                     log_data[f"eval/end2end_pos_{pos}_ppl"] = ep["ppl"]
+                    # Detailed breakdown
+                    if pos in mask_bk:
+                        log_data[f"eval/unified_pos_{pos}_mask_loss"] = mask_bk[pos]["loss"]
+                    for g in range(pos + 1):
+                        if pos in group_bk and g in group_bk[pos]:
+                            log_data[f"eval/unified_pos_{pos}_group_g{g}_loss"] = group_bk[pos][g]["loss"]
                 wandb_run.log(log_data)
             else:
                 # Stage 2 evaluation
