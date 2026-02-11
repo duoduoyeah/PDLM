@@ -687,9 +687,20 @@ while True:
                     pos_data = s1["positions"][pos]
                     print0(f"      pos {pos}: loss={pos_data['loss']:.4f}, ppl={pos_data['ppl']:.2f}")
                 print0(f"    Stage 2 (Mixed→Pure): loss={s2['overall_loss']:.4f}, ppl={s2['overall_ppl']:.2f}")
+                pure_bk = s2.get("pure_breakdown", {})
+                group_bk = s2.get("group_breakdown", {})
                 for pos in range(block_size):
                     pos_data = s2["positions"][pos]
-                    print0(f"      pos {pos}: loss={pos_data['loss']:.4f}, ppl={pos_data['ppl']:.2f}")
+                    parts = [f"pos {pos}: loss={pos_data['loss']:.4f}"]
+                    if pos in pure_bk:
+                        parts.append(f"pure={pure_bk[pos]['loss']:.4f}")
+                    g_parts = []
+                    for g in range(pos + 1):
+                        if pos in group_bk and g in group_bk[pos]:
+                            g_parts.append(f"g{g}={group_bk[pos][g]['loss']:.4f}")
+                    if g_parts:
+                        parts.append("group[" + " ".join(g_parts) + "]")
+                    print0(f"      {' | '.join(parts)}")
                 print0(f"    End-to-End (Iterative): loss={e2e['overall_loss']:.4f}, ppl={e2e['overall_ppl']:.2f}")
                 for pos in range(block_size):
                     pos_data = e2e["positions"][pos]
@@ -711,6 +722,12 @@ while True:
                     s2p = s2["positions"][pos]
                     log_data[f"eval/stage2_pos_{pos}_loss"] = s2p["loss"]
                     log_data[f"eval/stage2_pos_{pos}_ppl"] = s2p["ppl"]
+                    # Stage2 breakdown logging
+                    if pos in pure_bk:
+                        log_data[f"eval/stage2_pos_{pos}_pure_loss"] = pure_bk[pos]["loss"]
+                    for g in range(pos + 1):
+                        if pos in group_bk and g in group_bk[pos]:
+                            log_data[f"eval/stage2_pos_{pos}_group_g{g}_loss"] = group_bk[pos][g]["loss"]
                     e2ep = e2e["positions"][pos]
                     log_data[f"eval/end2end_pos_{pos}_loss"] = e2ep["loss"]
                     log_data[f"eval/end2end_pos_{pos}_ppl"] = e2ep["ppl"]

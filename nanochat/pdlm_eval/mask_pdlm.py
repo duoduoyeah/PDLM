@@ -147,10 +147,10 @@ def _eval_end2end(model, cached_batches, block_size, attn_mask, device, autocast
 
     Processes ALL target blocks (2..N-1) simultaneously:
     1. Mask all target blocks → forward → collapse to groups
-    2. Iterative denoising (block_size steps): sample one position per step, collapse rest
-    3. Final forward → compute CE
+    2. Iterative denoising (block_size steps): sample one position per step,
+       capture CE from that step's logits, collapse rest
 
-    Total forward passes per batch: block_size + 2 (instead of per-block sequential).
+    Total forward passes per batch: 1 + block_size.
     """
     nll_by_pos = {p: {"nll": 0.0, "tokens": 0} for p in range(block_size)}
     pure_vocab_size = model.config.pure_vocab_size
@@ -187,9 +187,17 @@ def _eval_end2end(model, cached_batches, block_size, attn_mask, device, autocast
             eval_inputs[target_mask] = all_groups[target_mask] + group_offset
 
             # Steps 2..block_size+1: Iterative denoising (all blocks simultaneously)
+            # Capture CE from each step's logits (when the position is actually predicted)
             for denoise_step in range(block_size):
                 logits = model.forward_for_eval_mask_pdlm(
                     eval_inputs, targets, attn_mask=attn_mask)
+
+                # Compute CE for this position from current logits (model sees group/mask input)
+                log_probs = F.log_softmax(logits.float(), dim=-1)
+                target_log_probs = log_probs.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
+                nll = -target_log_probs[pos_masks[denoise_step]]
+                nll_by_pos[denoise_step]["nll"] += nll.sum().item()
+                nll_by_pos[denoise_step]["tokens"] += pos_masks[denoise_step].sum().item()
 
                 # Sample pure token at denoise_step position of all target blocks
                 sampled = logits.argmax(dim=-1)  # (B, T)
@@ -200,18 +208,5 @@ def _eval_end2end(model, cached_batches, block_size, attn_mask, device, autocast
                     all_groups = model.collapse_pure_to_group(logits)
                     for rp in range(denoise_step + 1, block_size):
                         eval_inputs[pos_masks[rp]] = all_groups[pos_masks[rp]] + group_offset
-
-            # Final forward for CE computation
-            logits = model.forward_for_eval_mask_pdlm(
-                eval_inputs, targets, attn_mask=attn_mask)
-
-            # Compute CE at all target blocks against ground truth
-            log_probs = F.log_softmax(logits.float(), dim=-1)
-            target_log_probs = log_probs.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
-
-            for pos in range(block_size):
-                nll = -target_log_probs[pos_masks[pos]]
-                nll_by_pos[pos]["nll"] += nll.sum().item()
-                nll_by_pos[pos]["tokens"] += pos_masks[pos].sum().item()
 
     return build_result_dict(nll_by_pos, block_size, include_accuracy=False)
