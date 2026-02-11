@@ -440,14 +440,25 @@ def pdlm_data_loader(
 
             # Convert pure tokens to group tokens at group positions
             block_tokens = targets_cpu[:, block_start:block_end]  # (B, block_region_len)
+            num_groups = token_map.num_groups
+            soft_p_within = model_config.soft_p_within
+
             if overlap_k == 1:
-                group_ids = pure_to_group[block_tokens, 0]
+                correct_group_ids = pure_to_group[block_tokens, 0]
             else:
                 k_idx = torch.randint(0, overlap_k, block_tokens.shape)
                 flat_tokens = block_tokens.flatten()
                 flat_k_idx = k_idx.flatten()
-                group_ids = pure_to_group[flat_tokens, flat_k_idx]
-                group_ids = group_ids.view(block_tokens.shape)
+                correct_group_ids = pure_to_group[flat_tokens, flat_k_idx]
+                correct_group_ids = correct_group_ids.view(block_tokens.shape)
+
+            # Apply soft noise (only on xt side; targets stay correct)
+            if soft_p_within >= 1.0:
+                group_ids = correct_group_ids
+            else:
+                wrong_group_ids = torch.randint(0, num_groups, block_tokens.shape)
+                within_mask = torch.rand(block_tokens.shape) < soft_p_within
+                group_ids = torch.where(within_mask, correct_group_ids, wrong_group_ids)
 
             group_token_ids = pure_vocab_size + group_ids  # (B, block_region_len)
 
