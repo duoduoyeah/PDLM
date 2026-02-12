@@ -155,7 +155,7 @@ echo "============================================================"
 echo "Part 1: Loss Evaluation (unified + end2end)"
 echo "============================================================"
 
-uv run -m scripts.pdlm_eval \
+python -m scripts.pdlm_eval \
     --ckpt_dir="${ACTUAL_CKPT_DIR}" \
     --num_batches=${NUM_BATCHES} \
     --output_json="${CKPT_DIR}/eval_result.json"
@@ -172,7 +172,7 @@ if [ "${GENERATE}" = "true" ]; then
     echo "Part 2: Generation (iterative denoising)"
     echo "============================================================"
 
-    uv run -m scripts.pdlm_eval \
+    python -m scripts.pdlm_eval \
         --ckpt_dir="${ACTUAL_CKPT_DIR}" \
         --generate \
         --num_prompts=${NUM_PROMPTS} \
