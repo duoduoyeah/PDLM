@@ -23,7 +23,7 @@ import torch
 from nanochat.common import compute_init, autodetect_device_type, get_base_dir, print0
 from nanochat.checkpoint_manager import load_checkpoint, find_last_step, find_largest_model
 from nanochat.pdlm import PDLM, PDLMConfig
-from nanochat.pdlm_eval import eval_pdlm, eval_pdlm_stage1_mask, eval_pdlm_stage1_block, eval_pdlm_compatibility, eval_pdlm_full, eval_pdlm_both_block, dump_batch_to_file, dump_stage1_block_batch
+from nanochat.pdlm_eval import eval_pdlm, eval_pdlm_stage1_mask, eval_pdlm_stage1_block, eval_pdlm_compatibility, eval_pdlm_full, eval_pdlm_both_block, eval_mask_pdlm, dump_batch_to_file, dump_stage1_block_batch
 from nanochat.dataloader import get_data_loader
 from nanochat.attn_masks import gen_mask, gen_block_causal_mask
 from nanochat.group_tokenizer.token_map import get_token_map
@@ -235,6 +235,18 @@ def run_eval(
             run_oracle_accuracy=run_oracle_accuracy,
             oracle_accuracy_batches=oracle_accuracy_batches,
         )
+    elif stage == "mask_pdlm":
+        print0(f"Running mask_pdlm evaluation...")
+        eval_result = eval_mask_pdlm(
+            model=model,
+            val_loader=val_loader,
+            block_size=block_size,
+            num_batches=num_batches,
+            attn_mask=attn_mask,
+            device=device,
+            autocast_ctx=autocast_ctx,
+            prefix_pure_tokens=prefix_pure_tokens,
+        )
     elif run_compatibility or run_oracle_accuracy:
         extras = []
         if run_compatibility:
@@ -279,7 +291,36 @@ def print_results(eval_result, block_size):
     stage = eval_result.get("stage", "stage2")
 
     print0("\n" + "=" * 60)
-    if stage == "both_block":
+    if stage == "mask_pdlm":
+        print0("PDLM MASK_PDLM EVALUATION RESULTS")
+        print0("=" * 60)
+
+        unified = eval_result["unified"]
+        e2e = eval_result["end2end"]
+        print0(f"\n[mask_pdlm] unified_loss: {eval_result['unified_loss']:.4f}, end2end_loss: {eval_result['end2end_loss']:.4f}")
+
+        print0(f"\n  Unified: loss={unified['overall_loss']:.4f}, ppl={unified['overall_ppl']:.2f}")
+        mask_bk = unified.get("mask_breakdown", {})
+        group_bk = unified.get("group_breakdown", {})
+        for pos in range(block_size):
+            pos_data = unified["positions"][pos]
+            parts = [f"pos {pos}: loss={pos_data['loss']:.4f}"]
+            if pos in mask_bk:
+                parts.append(f"mask={mask_bk[pos]['loss']:.4f}")
+            g_parts = []
+            for g in range(pos + 1):
+                if pos in group_bk and g in group_bk[pos]:
+                    g_parts.append(f"g{g}={group_bk[pos][g]['loss']:.4f}")
+            if g_parts:
+                parts.append("group[" + " ".join(g_parts) + "]")
+            print0(f"    {' | '.join(parts)}")
+
+        print0(f"\n  End-to-End: loss={e2e['overall_loss']:.4f}, ppl={e2e['overall_ppl']:.2f}")
+        for pos in range(block_size):
+            pos_data = e2e["positions"][pos]
+            print0(f"    pos {pos}: loss={pos_data['loss']:.4f}, ppl={pos_data['ppl']:.2f}")
+
+    elif stage == "both_block":
         print0("PDLM BOTH_BLOCK EVALUATION RESULTS")
         print0("=" * 60)
 
@@ -372,6 +413,80 @@ def print_results(eval_result, block_size):
     print0("\n" + "=" * 60)
 
 
+def run_generation(
+    model_tag=None,
+    step=None,
+    device_type="auto",
+    ckpt_dir=None,
+    num_prompts=5,
+    prompt_tokens=64,
+    generate_tokens=128,
+    temperature=0.0,
+    topk=0,
+):
+    """
+    Generate text using mask_pdlm iterative denoising.
+
+    Loads model, grabs validation data as prompt source, generates block-by-block.
+    """
+    from nanochat.tokenizer import get_tokenizer
+
+    # Load model
+    model, meta_data, device, autocast_ctx, model_config = load_pdlm_model(
+        model_tag, step, device_type, ckpt_dir=ckpt_dir
+    )
+
+    model_config_dict = meta_data["model_config"]
+    user_config = meta_data.get("user_config", {})
+    max_seq_len = model_config_dict["sequence_len"]
+    block_size = model_config_dict.get("bucket_size", user_config.get("block_size", 4))
+    stage = model_config_dict.get("stage", "stage2")
+
+    assert stage == "mask_pdlm", f"Generation requires mask_pdlm model, got stage={stage}"
+
+    # Create validation dataloader to get prompt tokens
+    device_batch_size = user_config.get("device_batch_size", 32)
+    val_loader = get_data_loader(
+        device_batch_size, max_seq_len, split="val", device=device,
+        model_config=model_config, resume_state_dict=None,
+    )
+
+    # Grab first batch targets as pure token source
+    _, targets, _, _ = next(val_loader)
+
+    # Load tokenizer
+    tokenizer = get_tokenizer()
+
+    print0(f"\nGenerating with mask_pdlm (block_size={block_size}, temperature={temperature}, topk={topk})")
+    print0(f"Prompt tokens: {prompt_tokens}, Generate tokens: {generate_tokens}")
+    print0("=" * 60)
+
+    for i in range(min(num_prompts, targets.size(0))):
+        prompt = targets[i, :prompt_tokens].tolist()
+        prompt_text = tokenizer.decode(prompt)
+
+        with autocast_ctx:
+            generated, debug_blocks = model.generate_mask_pdlm(
+                tokens=prompt,
+                max_new_tokens=generate_tokens,
+                block_size=block_size,
+                temperature=temperature,
+                topk=topk,
+            )
+
+        # Decode full output (prompt + generated)
+        full_ids = generated[0].tolist()
+        generated_text = tokenizer.decode(full_ids[prompt_tokens:])
+
+        print0(f"\n--- Prompt {i+1} ({prompt_tokens} tokens) ---")
+        print0(prompt_text)
+        print0(f"--- Generated ({generate_tokens} tokens, {len(debug_blocks)} blocks) ---")
+        print0(generated_text)
+        print0("")
+
+    print0("=" * 60)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Standalone PDLM evaluation (Stage 1 MASK or Stage 2)")
     parser.add_argument("--model_tag", type=str, default=None, help="Model directory name (e.g., d8)")
@@ -385,10 +500,31 @@ def main():
     parser.add_argument("--run_oracle_accuracy", action="store_true", help="Run oracle accuracy evaluation (given ground truth context)")
     parser.add_argument("--no_oracle_accuracy", action="store_true", help="Disable oracle accuracy even when running compatibility")
     parser.add_argument("--oracle_accuracy_batches", type=int, default=None, help="Number of batches for oracle accuracy (default: num_batches // 4)")
+    parser.add_argument("--generate", action="store_true", help="Run generation instead of loss evaluation (mask_pdlm only)")
+    parser.add_argument("--num_prompts", type=int, default=5, help="Number of prompts for generation (default: 5)")
+    parser.add_argument("--prompt_tokens", type=int, default=64, help="Number of prompt tokens (default: 64)")
+    parser.add_argument("--generate_tokens", type=int, default=128, help="Number of tokens to generate (default: 128)")
+    parser.add_argument("--temperature", type=float, default=0.0, help="Sampling temperature for generation (default: 0.0 = greedy)")
+    parser.add_argument("--topk", type=int, default=0, help="Top-k sampling for generation (default: 0 = disabled)")
     parser.add_argument("--dump_batch", type=str, default=None, help="Dump one batch to file for debugging (path to output txt)")
     parser.add_argument("--dump_stage1_block", type=str, default=None, help="Dump stage1_block predictions to file (path to output txt)")
     parser.add_argument("--dump_sequences", type=int, default=5, help="Number of sequences to dump (default: 5)")
     args = parser.parse_args()
+
+    # Handle generation mode (mask_pdlm only)
+    if args.generate:
+        run_generation(
+            model_tag=args.model_tag,
+            step=args.step,
+            device_type=args.device,
+            ckpt_dir=args.ckpt_dir,
+            num_prompts=args.num_prompts,
+            prompt_tokens=args.prompt_tokens,
+            generate_tokens=args.generate_tokens,
+            temperature=args.temperature,
+            topk=args.topk,
+        )
+        return
 
     # Handle dump_batch mode (separate from normal eval)
     if args.dump_batch:
