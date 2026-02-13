@@ -2,19 +2,26 @@
 Structural splitting exploration (Section 1 of hierarchical_tokenization.md).
 
 Downloads a sample shard and applies structural splitting boundaries to analyze
-segment length distributions.
+segment length distributions using actual BPE token counts.
+
+Two distinct concepts:
+  - Sequence: variable-length text segment defined by structural punctuation
+    boundaries, optionally merged to a target token count.
+  - Block: fixed-length unit the model processes (e.g., 4 or 8 tokens).
+    No punctuation boundary should appear inside a block.
 
 Usage:
-    uv run python dev/explore_structural_split.py
-    uv run python dev/explore_structural_split.py --num-docs 500 --show-examples 5
+    uv run python -m structural_splitting.explore_structural_split --num-docs 100
+    uv run python -m structural_splitting.explore_structural_split --num-docs 500 --merge-target 16
 """
 
 import re
+import math
 import argparse
 import numpy as np
-from collections import defaultdict
 
 from nanochat.dataset import download_single_file, parquets_iter_batched
+from nanochat.tokenizer import get_tokenizer
 
 # ---------------------------------------------------------------------------
 # Boundary definitions (from design/hierarchical_tokenization.md)
@@ -61,20 +68,20 @@ def split_structural(text, include_inactive=False):
     return [p for p in parts if p.strip()]
 
 
-def merge_short_segments(segments, target_chars):
+def merge_short_segments(segments, target, len_fn=len):
     """
     Greedy left-to-right merge: accumulate adjacent segments until the
-    current chunk reaches *target_chars* characters, then start a new chunk.
+    current chunk reaches *target* (measured by *len_fn*), then start a new
+    chunk.
 
-    This reduces padding waste when segments are later padded to a fixed
-    token length K (~target_chars / 4 tokens).
+    When len_fn is a tokenizer-based function, *target* is in tokens.
     """
     if not segments:
         return []
     merged = []
     current = segments[0]
     for seg in segments[1:]:
-        if len(current) < target_chars:
+        if len_fn(current) < target:
             current = current + ' ' + seg
         else:
             merged.append(current)
@@ -116,8 +123,16 @@ def fmt_stats(s):
 def main():
     parser = argparse.ArgumentParser(description='Explore structural splitting')
     parser.add_argument('--num-docs', type=int, default=1000)
+    parser.add_argument('--merge-target', type=int, default=16,
+                        help='Merge target in tokens (default: 16)')
     parser.add_argument('--show-examples', type=int, default=3)
     args = parser.parse_args()
+
+    # --- Load tokenizer ---
+    print('Loading tokenizer...')
+    tokenizer = get_tokenizer()
+    tok_len = lambda text: len(tokenizer.encode(text))
+    print()
 
     # --- Download first shard if needed ---
     print('Ensuring training shard 0 is available...')
@@ -145,34 +160,55 @@ def main():
         print(f'  {name:20s} [{tag:6s}]  {fmt_stats(s)}')
     print()
 
-    # === 2. Active-only segment lengths ===
+    # Pre-split all docs into segments
+    all_doc_segs = [split_structural(doc, include_inactive=False) for doc in docs]
+
+    # Compute actual token lengths for all segments
+    print('Computing token lengths for all segments...')
+    all_seg_tok_lens = []   # flat list of token lengths
+    per_doc_tok_lens = []   # list of lists, one per doc
+    for segs in all_doc_segs:
+        doc_lens = [tok_len(s) for s in segs]
+        per_doc_tok_lens.append(doc_lens)
+        all_seg_tok_lens.extend(doc_lens)
+    print(f'  {len(all_seg_tok_lens):,} segments tokenized\n')
+
+    # === 2. Sequence length distribution (tokens) ===
     print('=' * 70)
-    print('SEGMENT LENGTHS — ACTIVE BOUNDARIES ONLY (chars)')
+    print('SEQUENCE LENGTH DISTRIBUTION — ACTIVE BOUNDARIES (tokens)')
     print('=' * 70)
-    seg_lens_active = []
-    for doc in docs:
-        for s in split_structural(doc, include_inactive=False):
-            seg_lens_active.append(len(s))
-    st = compute_stats(seg_lens_active)
+    st = compute_stats(all_seg_tok_lens)
     print(f'  {fmt_stats(st)}')
-    print(f'  (~{st["mean"]/4:.1f} tok avg, ~{st["P50"]/4:.0f} tok median  @ ~4 chars/tok)')
+    arr_tok = np.array(all_seg_tok_lens)
+    for p in [25, 50, 75, 90, 95]:
+        print(f'    P{p:02d} = {np.percentile(arr_tok, p):.0f} tokens')
+    print()
+
+    # Token histogram
+    print('  Token length histogram:')
+    buckets = [0, 4, 8, 12, 16, 24, 32, 64, float('inf')]
+    for lo, hi in zip(buckets[:-1], buckets[1:]):
+        count = int(np.sum((arr_tok >= lo) & (arr_tok < hi)))
+        pct = count / len(arr_tok) * 100
+        bar = '#' * int(pct / 2)
+        hi_s = f'{hi:.0f}' if hi != float('inf') else '...'
+        print(f'    [{lo:3.0f}, {hi_s:>4s})  {count:7,}  {pct:5.1f}%  {bar}')
     print()
 
     # === 3. All-boundaries comparison ===
     print('=' * 70)
     print('SEGMENT LENGTHS — ALL BOUNDARIES (+ comma)')
     print('=' * 70)
-    seg_lens_all = []
+    seg_tok_lens_all = []
     for doc in docs:
         for s in split_structural(doc, include_inactive=True):
-            seg_lens_all.append(len(s))
-    st_all = compute_stats(seg_lens_all)
-    print(f'  {fmt_stats(st_all)}')
-    print(f'  (~{st_all["mean"]/4:.1f} tok avg, ~{st_all["P50"]/4:.0f} tok median  @ ~4 chars/tok)')
+            seg_tok_lens_all.append(tok_len(s))
+    st_all = compute_stats(seg_tok_lens_all)
+    print(f'  {fmt_stats(st_all)}  (tokens)')
     print()
     print(f'  Comparison:')
-    print(f'    Active only:  {st["n"]:,} segments, mean={st["mean"]:.1f} chars')
-    print(f'    + comma:      {st_all["n"]:,} segments, mean={st_all["mean"]:.1f} chars')
+    print(f'    Active only:  {st["n"]:,} segments, mean={st["mean"]:.1f} tokens')
+    print(f'    + comma:      {st_all["n"]:,} segments, mean={st_all["mean"]:.1f} tokens')
     print(f'    Comma adds ~{st_all["n"] - st["n"]:,} more segments')
     print()
 
@@ -180,8 +216,8 @@ def main():
     print('=' * 70)
     print('PER-STAGE CONTRIBUTION (cumulative)')
     print('=' * 70)
-    print(f'  {"Stage":20s}  {"Segments":>10s}  {"Mean chars":>10s}  {"~Mean toks":>10s}')
-    print(f'  {"-"*20}  {"-"*10}  {"-"*10}  {"-"*10}')
+    print(f'  {"Stage":20s}  {"Segments":>10s}  {"Mean toks":>10s}')
+    print(f'  {"-"*20}  {"-"*10}  {"-"*10}')
     for depth in range(len(BOUNDARY_STAGES)):
         name = BOUNDARY_STAGES[depth][0]
         active = BOUNDARY_STAGES[depth][3]
@@ -193,99 +229,92 @@ def main():
             for p in parts:
                 p = p.strip()
                 if p:
-                    lens.append(len(p))
+                    lens.append(tok_len(p))
         s = compute_stats(lens)
         tag = '' if active else ' (unused)'
-        print(f'  +{name:19s}  {s["n"]:10,}  {s["mean"]:10.1f}  {s["mean"]/4:10.1f}{tag}')
+        print(f'  +{name:19s}  {s["n"]:10,}  {s["mean"]:10.1f}{tag}')
     print()
 
-    # === 5. Length histogram ===
+    # === 5. Merge sequences (token-space) ===
+    merge_target = args.merge_target
     print('=' * 70)
-    print('SEGMENT LENGTH HISTOGRAM (active boundaries, chars)')
+    print(f'MERGE — target = {merge_target} tokens')
     print('=' * 70)
-    buckets = [0, 10, 25, 50, 100, 200, 400, 800, 1600, float('inf')]
-    arr = np.array(seg_lens_active)
-    for lo, hi in zip(buckets[:-1], buckets[1:]):
-        count = int(np.sum((arr >= lo) & (arr < hi)))
-        pct = count / len(arr) * 100
-        bar = '#' * int(pct / 2)
-        hi_s = f'{hi:.0f}' if hi != float('inf') else '...'
-        print(f'  [{lo:5.0f}, {hi_s:>5s})  {count:7,}  {pct:5.1f}%  {bar}')
+    all_merged_segs = []
+    all_merged_tok_lens = []
+    for segs in all_doc_segs:
+        merged = merge_short_segments(segs, merge_target, len_fn=tok_len)
+        all_merged_segs.append(merged)
+        all_merged_tok_lens.extend(tok_len(s) for s in merged)
+    st_merged = compute_stats(all_merged_tok_lens)
+    print(f'  Before merge: {len(all_seg_tok_lens):,} sequences')
+    print(f'  After merge:  {len(all_merged_tok_lens):,} sequences')
+    print(f'  Merged stats: {fmt_stats(st_merged)}')
+    arr_merged = np.array(all_merged_tok_lens)
+    for p in [25, 50, 75, 90, 95]:
+        print(f'    P{p:02d} = {np.percentile(arr_merged, p):.0f} tokens')
     print()
 
-    # === 6. Merge + padding waste comparison ===
+    # === 6. Block padding waste sweep ===
     print('=' * 70)
-    print('MERGE + PADDING WASTE COMPARISON')
-    print('  (greedy left merge to target K, then pad remainder to K)')
+    print('BLOCK PADDING WASTE SWEEP')
+    print('  For each block size B: waste = ceil(seq_tok_len / B) * B - seq_tok_len')
     print('=' * 70)
-    print(f'  {"K":>3s}  {"chars":>5s}  '
-          f'{"segs_before":>11s}  {"waste_before":>12s}  '
-          f'{"segs_after":>11s}  {"waste_after":>12s}  '
-          f'{"waste_saved":>11s}  {"mean_after":>10s}  {"std_after":>10s}')
-    print(f'  {"-"*3}  {"-"*5}  '
-          f'{"-"*11}  {"-"*12}  '
-          f'{"-"*11}  {"-"*12}  '
-          f'{"-"*11}  {"-"*10}  {"-"*10}')
+    print(f'  {"B":>3s}  '
+          f'{"--- Before merge ---":^40s}  '
+          f'{"--- After merge (target={merge_target}) ---":^40s}')
+    print(f'  {"":>3s}  '
+          f'{"blocks":>8s}  {"waste":>8s}  {"waste%":>7s}  {"need_pad":>8s}  '
+          f'{"blocks":>8s}  {"waste":>8s}  {"waste%":>7s}  {"need_pad":>8s}')
+    print(f'  {"---":>3s}  '
+          f'{"--------":>8s}  {"--------":>8s}  {"-------":>7s}  {"--------":>8s}  '
+          f'{"--------":>8s}  {"--------":>8s}  {"-------":>7s}  {"--------":>8s}')
 
-    # Pre-split all docs into segments (reuse seg_lens_active for before-stats)
-    all_doc_segs = [split_structural(doc, include_inactive=False) for doc in docs]
+    for B in [2, 4, 6, 8, 12, 16]:
+        # Before merge
+        before_blocks = sum(math.ceil(tl / B) for tl in all_seg_tok_lens)
+        before_waste = sum(math.ceil(tl / B) * B - tl for tl in all_seg_tok_lens)
+        before_total = sum(all_seg_tok_lens)
+        before_waste_pct = before_waste / (before_total + before_waste) * 100
+        before_need_pad = sum(1 for tl in all_seg_tok_lens if tl % B != 0)
 
-    for K in [4, 6, 8, 12, 16, 24, 32]:
-        char_K = K * 4
+        # After merge
+        after_blocks = sum(math.ceil(tl / B) for tl in all_merged_tok_lens)
+        after_waste = sum(math.ceil(tl / B) * B - tl for tl in all_merged_tok_lens)
+        after_total = sum(all_merged_tok_lens)
+        after_waste_pct = after_waste / (after_total + after_waste) * 100
+        after_need_pad = sum(1 for tl in all_merged_tok_lens if tl % B != 0)
 
-        # --- Before merge ---
-        total_before = len(seg_lens_active)
-        # padding waste = sum of (ceil_to_K - actual) for each segment
-        waste_before = sum(
-            (((cl + char_K - 1) // char_K) * char_K) - cl
-            for cl in seg_lens_active
-        )
-
-        # --- After merge ---
-        merged_lens = []
-        for segs in all_doc_segs:
-            merged = merge_short_segments(segs, char_K)
-            merged_lens.extend(len(s) for s in merged)
-
-        total_after = len(merged_lens)
-        waste_after = sum(
-            (((cl + char_K - 1) // char_K) * char_K) - cl
-            for cl in merged_lens
-        )
-
-        m_st = compute_stats(merged_lens)
-        saved_pct = (waste_before - waste_after) / max(waste_before, 1) * 100
-
-        print(f'  K={K:2d}  {char_K:5d}  '
-              f'{total_before:11,}  {waste_before:12,}  '
-              f'{total_after:11,}  {waste_after:12,}  '
-              f'{saved_pct:10.1f}%  '
-              f'{m_st["mean"]:10.1f}  {m_st["std"]:10.1f}')
+        print(f'  B={B:2d}  '
+              f'{before_blocks:8,}  {before_waste:8,}  {before_waste_pct:6.1f}%  {before_need_pad:8,}  '
+              f'{after_blocks:8,}  {after_waste:8,}  {after_waste_pct:6.1f}%  {after_need_pad:8,}')
     print()
 
     # === 7. Examples ===
-    EXAMPLE_K = 16  # tokens, for merge demo
     if args.show_examples > 0:
         print('=' * 70)
-        print(f'EXAMPLE SPLITS (first {args.show_examples} docs, merge target K={EXAMPLE_K} tokens)')
+        print(f'EXAMPLE SPLITS (first {args.show_examples} docs, '
+              f'merge target = {merge_target} tokens)')
         print('=' * 70)
         for i, doc in enumerate(docs[:args.show_examples]):
-            segs = split_structural(doc, include_inactive=False)
-            merged = merge_short_segments(segs, EXAMPLE_K * 4)
-            print(f'\n--- Doc {i} ({len(doc)} chars) ---')
-            print(f'  Split: {len(segs)} segments -> Merged: {len(merged)} segments')
-            print(f'Before merge:')
+            segs = all_doc_segs[i]
+            merged = all_merged_segs[i]
+            print(f'\n--- Doc {i} ({len(doc)} chars, {tok_len(doc)} tokens) ---')
+            print(f'  Split: {len(segs)} sequences -> Merged: {len(merged)} sequences')
+            print(f'  Before merge:')
             for j, seg in enumerate(segs[:10]):
+                tl = tok_len(seg)
                 preview = seg[:80].replace('\n', '\\n')
-                print(f'  [{j:2d}] {len(seg):4d} chars (~{len(seg)//4:3d} tok)  {preview!r}')
+                print(f'    [{j:2d}] {tl:4d} tok  {preview!r}')
             if len(segs) > 10:
-                print(f'  ... and {len(segs) - 10} more')
-            print(f'After merge (target={EXAMPLE_K * 4} chars / {EXAMPLE_K} tok):')
+                print(f'    ... and {len(segs) - 10} more')
+            print(f'  After merge (target={merge_target} tokens):')
             for j, seg in enumerate(merged[:10]):
+                tl = tok_len(seg)
                 preview = seg[:80].replace('\n', '\\n')
-                print(f'  [{j:2d}] {len(seg):4d} chars (~{len(seg)//4:3d} tok)  {preview!r}')
+                print(f'    [{j:2d}] {tl:4d} tok  {preview!r}')
             if len(merged) > 10:
-                print(f'  ... and {len(merged) - 10} more')
+                print(f'    ... and {len(merged) - 10} more')
 
 
 if __name__ == '__main__':
