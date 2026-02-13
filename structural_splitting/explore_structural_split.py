@@ -60,6 +60,28 @@ def split_structural(text, include_inactive=False):
         parts = _refine(parts, split_pat)
     return [p for p in parts if p.strip()]
 
+
+def merge_short_segments(segments, target_chars):
+    """
+    Greedy left-to-right merge: accumulate adjacent segments until the
+    current chunk reaches *target_chars* characters, then start a new chunk.
+
+    This reduces padding waste when segments are later padded to a fixed
+    token length K (~target_chars / 4 tokens).
+    """
+    if not segments:
+        return []
+    merged = []
+    current = segments[0]
+    for seg in segments[1:]:
+        if len(current) < target_chars:
+            current = current + ' ' + seg
+        else:
+            merged.append(current)
+            current = seg
+    merged.append(current)
+    return merged
+
 # ---------------------------------------------------------------------------
 # Statistics helpers
 # ---------------------------------------------------------------------------
@@ -191,36 +213,79 @@ def main():
         print(f'  [{lo:5.0f}, {hi_s:>5s})  {count:7,}  {pct:5.1f}%  {bar}')
     print()
 
-    # === 6. Fixed-chunk preview ===
+    # === 6. Merge + padding waste comparison ===
     print('=' * 70)
-    print('FIXED-CHUNK PREVIEW (if segments chunked into K-token blocks)')
+    print('MERGE + PADDING WASTE COMPARISON')
+    print('  (greedy left merge to target K, then pad remainder to K)')
     print('=' * 70)
-    for K in [4, 6, 8, 12, 16]:
+    print(f'  {"K":>3s}  {"chars":>5s}  '
+          f'{"segs_before":>11s}  {"waste_before":>12s}  '
+          f'{"segs_after":>11s}  {"waste_after":>12s}  '
+          f'{"waste_saved":>11s}  {"mean_after":>10s}  {"std_after":>10s}')
+    print(f'  {"-"*3}  {"-"*5}  '
+          f'{"-"*11}  {"-"*12}  '
+          f'{"-"*11}  {"-"*12}  '
+          f'{"-"*11}  {"-"*10}  {"-"*10}')
+
+    # Pre-split all docs into segments (reuse seg_lens_active for before-stats)
+    all_doc_segs = [split_structural(doc, include_inactive=False) for doc in docs]
+
+    for K in [4, 6, 8, 12, 16, 24, 32]:
         char_K = K * 4
-        n_chunks = sum(max(1, (cl + char_K - 1) // char_K) for cl in seg_lens_active)
-        n_padded = sum(1 for cl in seg_lens_active if cl < char_K)
-        pct_padded = n_padded / len(seg_lens_active) * 100
-        print(f'  K={K:2d} (~{char_K:3d} chars):  '
-              f'{n_chunks:,} chunks, '
-              f'{n_padded:,}/{len(seg_lens_active):,} ({pct_padded:.1f}%) need padding')
+
+        # --- Before merge ---
+        total_before = len(seg_lens_active)
+        # padding waste = sum of (ceil_to_K - actual) for each segment
+        waste_before = sum(
+            (((cl + char_K - 1) // char_K) * char_K) - cl
+            for cl in seg_lens_active
+        )
+
+        # --- After merge ---
+        merged_lens = []
+        for segs in all_doc_segs:
+            merged = merge_short_segments(segs, char_K)
+            merged_lens.extend(len(s) for s in merged)
+
+        total_after = len(merged_lens)
+        waste_after = sum(
+            (((cl + char_K - 1) // char_K) * char_K) - cl
+            for cl in merged_lens
+        )
+
+        m_st = compute_stats(merged_lens)
+        saved_pct = (waste_before - waste_after) / max(waste_before, 1) * 100
+
+        print(f'  K={K:2d}  {char_K:5d}  '
+              f'{total_before:11,}  {waste_before:12,}  '
+              f'{total_after:11,}  {waste_after:12,}  '
+              f'{saved_pct:10.1f}%  '
+              f'{m_st["mean"]:10.1f}  {m_st["std"]:10.1f}')
     print()
 
     # === 7. Examples ===
+    EXAMPLE_K = 16  # tokens, for merge demo
     if args.show_examples > 0:
         print('=' * 70)
-        print(f'EXAMPLE SPLITS (first {args.show_examples} docs)')
+        print(f'EXAMPLE SPLITS (first {args.show_examples} docs, merge target K={EXAMPLE_K} tokens)')
         print('=' * 70)
         for i, doc in enumerate(docs[:args.show_examples]):
             segs = split_structural(doc, include_inactive=False)
-            print(f'\n--- Doc {i} ({len(doc)} chars -> {len(segs)} segments) ---')
-            print(f'Original (first 300 chars):')
-            print(f'  {doc[:300]!r}')
-            print(f'Segments:')
-            for j, seg in enumerate(segs[:15]):
-                preview = seg[:100].replace('\n', '\\n')
-                print(f'  [{j:2d}] {len(seg):4d} chars  {preview!r}')
-            if len(segs) > 15:
-                print(f'  ... and {len(segs) - 15} more')
+            merged = merge_short_segments(segs, EXAMPLE_K * 4)
+            print(f'\n--- Doc {i} ({len(doc)} chars) ---')
+            print(f'  Split: {len(segs)} segments -> Merged: {len(merged)} segments')
+            print(f'Before merge:')
+            for j, seg in enumerate(segs[:10]):
+                preview = seg[:80].replace('\n', '\\n')
+                print(f'  [{j:2d}] {len(seg):4d} chars (~{len(seg)//4:3d} tok)  {preview!r}')
+            if len(segs) > 10:
+                print(f'  ... and {len(segs) - 10} more')
+            print(f'After merge (target={EXAMPLE_K * 4} chars / {EXAMPLE_K} tok):')
+            for j, seg in enumerate(merged[:10]):
+                preview = seg[:80].replace('\n', '\\n')
+                print(f'  [{j:2d}] {len(seg):4d} chars (~{len(seg)//4:3d} tok)  {preview!r}')
+            if len(merged) > 10:
+                print(f'  ... and {len(merged) - 10} more')
 
 
 if __name__ == '__main__':
