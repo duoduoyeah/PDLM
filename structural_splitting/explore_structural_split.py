@@ -260,9 +260,10 @@ def main():
     print('BLOCK PADDING WASTE SWEEP')
     print('  For each block size B: waste = ceil(seq_tok_len / B) * B - seq_tok_len')
     print('=' * 70)
+    after_header = f'--- After merge (target={merge_target}) ---'
     print(f'  {"B":>3s}  '
           f'{"--- Before merge ---":^40s}  '
-          f'{"--- After merge (target={merge_target}) ---":^40s}')
+          f'{after_header:^40s}')
     print(f'  {"":>3s}  '
           f'{"blocks":>8s}  {"waste":>8s}  {"waste%":>7s}  {"need_pad":>8s}  '
           f'{"blocks":>8s}  {"waste":>8s}  {"waste%":>7s}  {"need_pad":>8s}')
