@@ -60,7 +60,7 @@ def _eval_unified(model, cached_batches, block_size, attn_mask, device, autocast
     mask_token_id = pure_vocab_size + num_groups
 
     # Overall per-position tracking
-    nll_by_pos = {p: {"nll": 0.0, "tokens": 0} for p in range(block_size)}
+    nll_by_pos = {p: {"nll": 0.0, "entropy": 0.0, "tokens": 0} for p in range(block_size)}
     # Mask scenario (r=0): per position
     nll_mask = {p: {"nll": 0.0, "tokens": 0} for p in range(block_size)}
     # Group scenario: per (pos, num_G_before)
@@ -76,6 +76,7 @@ def _eval_unified(model, cached_batches, block_size, attn_mask, device, autocast
 
             log_probs = F.log_softmax(logits.float(), dim=-1)
             target_log_probs = log_probs.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
+            entropy = -(log_probs.exp() * log_probs).sum(dim=-1)  # (B, T)
 
             num_blocks = T // block_size
 
@@ -91,8 +92,9 @@ def _eval_unified(model, cached_batches, block_size, attn_mask, device, autocast
                     has_loss = loss_mask[:, pos_in_seq]  # (B,)
                     nll = -target_log_probs[:, pos_in_seq]  # (B,)
 
-                    # Overall (unchanged)
+                    # Overall
                     nll_by_pos[pos]["nll"] += (nll * has_loss.float()).sum().item()
+                    nll_by_pos[pos]["entropy"] += (entropy[:, pos_in_seq] * has_loss.float()).sum().item()
                     nll_by_pos[pos]["tokens"] += has_loss.sum().item()
 
                     # Mask scenario
@@ -152,7 +154,7 @@ def _eval_end2end(model, cached_batches, block_size, attn_mask, device, autocast
 
     Total forward passes per batch: 1 + block_size.
     """
-    nll_by_pos = {p: {"nll": 0.0, "tokens": 0} for p in range(block_size)}
+    nll_by_pos = {p: {"nll": 0.0, "entropy": 0.0, "tokens": 0} for p in range(block_size)}
     pure_vocab_size = model.config.pure_vocab_size
     num_groups = model.config.num_groups
     mask_token_id = pure_vocab_size + num_groups
@@ -195,8 +197,10 @@ def _eval_end2end(model, cached_batches, block_size, attn_mask, device, autocast
                 # Compute CE for this position from current logits (model sees group/mask input)
                 log_probs = F.log_softmax(logits.float(), dim=-1)
                 target_log_probs = log_probs.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
+                entropy = -(log_probs.exp() * log_probs).sum(dim=-1)  # (B, T)
                 nll = -target_log_probs[pos_masks[denoise_step]]
                 nll_by_pos[denoise_step]["nll"] += nll.sum().item()
+                nll_by_pos[denoise_step]["entropy"] += entropy[pos_masks[denoise_step]].sum().item()
                 nll_by_pos[denoise_step]["tokens"] += pos_masks[denoise_step].sum().item()
 
                 # Sample pure token at denoise_step position of all target blocks

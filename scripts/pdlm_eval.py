@@ -308,7 +308,8 @@ def print_results(eval_result, block_size):
         e2e = eval_result["end2end"]
         print0(f"\n[mask_pdlm] unified_loss: {eval_result['unified_loss']:.4f}, end2end_loss: {eval_result['end2end_loss']:.4f}")
 
-        print0(f"\n  Unified: loss={unified['overall_loss']:.4f}, ppl={unified['overall_ppl']:.2f}")
+        u_eppl = f", entropy_ppl={unified['overall_entropy_ppl']:.2f}" if "overall_entropy_ppl" in unified else ""
+        print0(f"\n  Unified: loss={unified['overall_loss']:.4f}, ppl={unified['overall_ppl']:.2f}{u_eppl}")
         mask_bk = unified.get("mask_breakdown", {})
         group_bk = unified.get("group_breakdown", {})
         for pos in range(block_size):
@@ -324,10 +325,12 @@ def print_results(eval_result, block_size):
                 parts.append("group[" + " ".join(g_parts) + "]")
             print0(f"    {' | '.join(parts)}")
 
-        print0(f"\n  End-to-End: loss={e2e['overall_loss']:.4f}, ppl={e2e['overall_ppl']:.2f}")
+        e_eppl = f", entropy_ppl={e2e['overall_entropy_ppl']:.2f}" if "overall_entropy_ppl" in e2e else ""
+        print0(f"\n  End-to-End: loss={e2e['overall_loss']:.4f}, ppl={e2e['overall_ppl']:.2f}{e_eppl}")
         for pos in range(block_size):
             pos_data = e2e["positions"][pos]
-            print0(f"    pos {pos}: loss={pos_data['loss']:.4f}, ppl={pos_data['ppl']:.2f}")
+            eppl = f", entropy_ppl={pos_data['entropy_ppl']:.2f}" if "entropy_ppl" in pos_data else ""
+            print0(f"    pos {pos}: loss={pos_data['loss']:.4f}, ppl={pos_data['ppl']:.2f}{eppl}")
 
     elif stage == "both_block":
         print0("PDLM BOTH_BLOCK EVALUATION RESULTS")
