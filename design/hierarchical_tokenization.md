@@ -4,6 +4,9 @@
 
 Split text at punctuation and whitespace boundaries where cross-boundary dependency is weak. These are purely symbol-based, no word-level heuristics:
 
+**Core insight:** Segments replace tokens as the fundamental unit of the main model. Structural boundaries (punctuation, paragraph breaks) become the "tokenization" at this higher level — just like BPE regex splits define boundaries at the token level.
+
+
 | Boundary | Strength | Status | Example |
 |---|---|---|---|
 | `\n\n+` | Strongest (paragraph) | Active | Topic/scene shift |
@@ -12,10 +15,11 @@ Split text at punctuation and whitespace boundaries where cross-boundary depende
 | `[""]` | Quote boundary | Not used | Mid-sentence quotes get messy, especially in dialogue-heavy data |
 | `—` | Em dash | Not used | Rare in children's stories |
 | `,\s+` | Weakest (clause) | Not used | Creates very short context-dependent fragments |
+| `\n` | Single newline | Not used | Formatting only in prose, relevant for code/poetry |
 
 This is analogous to how BPE uses a regex (GPT-4 pattern) to split text into token-level chunks — but one level up. BPE chunks are ~1 word; these segments are ~1 sentence/clause.
 
-## 2. Segment Encoder/Decoder
+## 2. Segment Encoder/Decoder(Consider Later, currently ignored)
 
 Encoder maps variable-length segments (1~K tokens) into fixed-shape latent, decoder reconstructs. Trained together with reconstruction loss (like CV autoencoders for latent diffusion).
 
@@ -29,7 +33,8 @@ Encoder maps variable-length segments (1~K tokens) into fixed-shape latent, deco
 
 The encoder outputs both the latent representation and a length signal. The decoder uses both to reconstruct the original segment. This is self-contained — the fixed-shape output contains everything needed to reconstruct, including length.
 
-## 3. Two-Level Architecture
+## 3. Two-Level Architecture(Consider Later, currently ignored)
+
 
 The fixed-shape segment representations become the input sequence to the main LLM, attending causally to all previous segments:
 
