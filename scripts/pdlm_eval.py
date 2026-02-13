@@ -454,8 +454,9 @@ def run_generation(
     # Grab first batch targets as pure token source
     _, targets, _, _ = next(val_loader)
 
-    # Load tokenizer
+    # Load tokenizer and get bos token for stop condition
     tokenizer = get_tokenizer()
+    bos_token_id = tokenizer.get_bos_token_id()
 
     print0(f"\nGenerating with mask_pdlm (block_size={block_size}, temperature={temperature}, topk={topk})")
     print0(f"Prompt tokens: {prompt_tokens}, Generate tokens: {generate_tokens}")
@@ -472,15 +473,17 @@ def run_generation(
                 block_size=block_size,
                 temperature=temperature,
                 topk=topk,
+                stop_token=bos_token_id,
             )
 
-        # Decode full output (prompt + generated)
+        # Decode generated part (may be shorter than generate_tokens if stopped at bos)
         full_ids = generated[0].tolist()
+        actual_generated = len(full_ids) - prompt_tokens
         generated_text = tokenizer.decode(full_ids[prompt_tokens:])
 
         print0(f"\n--- Prompt {i+1} ({prompt_tokens} tokens) ---")
         print0(prompt_text)
-        print0(f"--- Generated ({generate_tokens} tokens, {len(debug_blocks)} blocks) ---")
+        print0(f"--- Generated ({actual_generated} tokens, {len(debug_blocks)} blocks) ---")
         print0(generated_text)
         print0("")
 
@@ -502,7 +505,7 @@ def main():
     parser.add_argument("--oracle_accuracy_batches", type=int, default=None, help="Number of batches for oracle accuracy (default: num_batches // 4)")
     parser.add_argument("--generate", action="store_true", help="Run generation instead of loss evaluation (mask_pdlm only)")
     parser.add_argument("--num_prompts", type=int, default=5, help="Number of prompts for generation (default: 5)")
-    parser.add_argument("--prompt_tokens", type=int, default=64, help="Number of prompt tokens (default: 64)")
+    parser.add_argument("--prompt_tokens", type=int, default=16, help="Number of prompt tokens (default: 16)")
     parser.add_argument("--generate_tokens", type=int, default=128, help="Number of tokens to generate (default: 128)")
     parser.add_argument("--temperature", type=float, default=0.0, help="Sampling temperature for generation (default: 0.0 = greedy)")
     parser.add_argument("--topk", type=int, default=0, help="Top-k sampling for generation (default: 0 = disabled)")

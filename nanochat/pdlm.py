@@ -943,7 +943,8 @@ class PDLM(nn.Module):
     @torch.inference_mode()
     def generate_mask_pdlm(self, tokens, max_new_tokens, block_size=None,
                            temperature=0.0, topk=0, seed=42,
-                           collapse_topk=256, num_denoise_steps=4):
+                           collapse_topk=256, num_denoise_steps=4,
+                           stop_token=None):
         """
         Generate tokens using mask_pdlm model (iterative denoising).
 
@@ -962,6 +963,7 @@ class PDLM(nn.Module):
             seed: random seed for sampling
             collapse_topk: top-k for pure→group collapse (256 default, -1 for dense)
             num_denoise_steps: number of denoising steps per block (default 4)
+            stop_token: if set, stop generation when this token is produced (e.g. bos_token_id)
 
         Returns:
             generated_tokens: tensor of pure token ids (1, total_len)
@@ -1121,11 +1123,21 @@ class PDLM(nn.Module):
             ids = torch.cat([ids, block_pure], dim=1)
             block_step += 1
 
+            # Stop if stop_token found in this block
+            if stop_token is not None:
+                stop_positions = (block_pure[0] == stop_token).nonzero(as_tuple=True)[0]
+                if len(stop_positions) > 0:
+                    # Truncate to just before the stop token
+                    stop_pos_in_ids = ids.size(1) - K + stop_positions[0].item()
+                    ids = ids[:, :stop_pos_in_ids]
+                    break
+
             if block_step > 1000:
                 break
 
         # Truncate to exact target length
-        ids = ids[:, :target_len]
+        if ids.size(1) > target_len:
+            ids = ids[:, :target_len]
         return ids, debug_blocks
 
     def forward_for_eval_block_pdlm_inference(self, idx, targets, attn_mask):
