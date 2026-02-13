@@ -23,7 +23,7 @@ import torch
 from nanochat.common import compute_init, autodetect_device_type, get_base_dir, print0
 from nanochat.checkpoint_manager import load_checkpoint, find_last_step, find_largest_model
 from nanochat.pdlm import PDLM, PDLMConfig
-from nanochat.pdlm_eval import eval_pdlm, eval_pdlm_stage1_mask, eval_pdlm_stage1_block, eval_pdlm_compatibility, eval_pdlm_full, eval_pdlm_both_block, eval_mask_pdlm, dump_batch_to_file, dump_stage1_block_batch
+from nanochat.pdlm_eval import eval_pdlm, eval_pdlm_stage1_mask, eval_pdlm_stage1_block, eval_pdlm_compatibility, eval_pdlm_full, eval_pdlm_both_block, eval_block_pdlm_inference, eval_mask_pdlm, dump_batch_to_file, dump_stage1_block_batch
 from nanochat.dataloader import get_data_loader
 from nanochat.attn_masks import gen_mask, gen_block_causal_mask
 from nanochat.group_tokenizer.token_map import get_token_map
@@ -235,6 +235,15 @@ def run_eval(
             run_oracle_accuracy=run_oracle_accuracy,
             oracle_accuracy_batches=oracle_accuracy_batches,
         )
+    elif stage == "block_pdlm_inference":
+        mtp_loss_weight = model_config_dict.get("mtp_loss_weight", 1.0)
+        print0(f"Running block_pdlm_inference evaluation...")
+        eval_result = eval_block_pdlm_inference(
+            model=model, val_loader=val_loader, block_size=block_size,
+            num_batches=num_batches, attn_mask=attn_mask, device=device,
+            autocast_ctx=autocast_ctx, prefix_pure_tokens=prefix_pure_tokens,
+            mtp_loss_weight=mtp_loss_weight,
+        )
     elif stage == "mask_pdlm":
         print0(f"Running mask_pdlm evaluation...")
         eval_result = eval_mask_pdlm(
@@ -363,6 +372,45 @@ def print_results(eval_result, block_size):
             for pos in range(block_size):
                 pos_data = oracle["positions"][pos]
                 print0(f"    pos {pos}: {pos_data['accuracy']:.2%} ({pos_data['matched']}/{pos_data['total']})")
+
+    elif stage == "block_pdlm_inference":
+        print0("BLOCK_PDLM_INFERENCE EVALUATION RESULTS")
+        print0("=" * 60)
+
+        s1 = eval_result["stage1"]
+        s2 = eval_result["stage2"]
+
+        print0(f"\n[block_pdlm_inference] combined_loss: {eval_result['combined_loss']:.4f}, end2end_loss: {eval_result['end2end_loss']:.4f}")
+        print0(f"  mtp_loss_weight: {eval_result['mtp_loss_weight']}, stage1_loss: {s1['overall_loss']:.4f}, stage2_loss: {s2['overall_loss']:.4f}")
+
+        print0(f"\n  Stage 1 (Pure→Pure): loss={s1['overall_loss']:.4f}, ppl={s1['overall_ppl']:.2f}")
+        for pos in range(block_size):
+            pos_data = s1["positions"][pos]
+            print0(f"    pos {pos}: loss={pos_data['loss']:.4f}, ppl={pos_data['ppl']:.2f}")
+
+        print0(f"\n  Stage 2 (Mixed→Pure): loss={s2['overall_loss']:.4f}, ppl={s2['overall_ppl']:.2f}")
+        pure_bk = s2.get("pure_breakdown", {})
+        group_bk = s2.get("group_breakdown", {})
+        for pos in range(block_size):
+            pos_data = s2["positions"][pos]
+            parts = [f"pos {pos}: loss={pos_data['loss']:.4f}"]
+            if pos in pure_bk:
+                parts.append(f"pure={pure_bk[pos]['loss']:.4f}")
+            g_parts = []
+            for g in range(pos + 1):
+                if pos in group_bk and g in group_bk[pos]:
+                    g_parts.append(f"g{g}={group_bk[pos][g]['loss']:.4f}")
+            if g_parts:
+                parts.append("group[" + " ".join(g_parts) + "]")
+            print0(f"    {' | '.join(parts)}")
+
+        # End-to-end per-position metrics
+        if "end2end" in eval_result:
+            e2e = eval_result["end2end"]
+            print0(f"\n  End-to-End (Iterative): loss={e2e['overall_loss']:.4f}, ppl={e2e['overall_ppl']:.2f}")
+            for pos in range(block_size):
+                pos_data = e2e["positions"][pos]
+                print0(f"    pos {pos}: loss={pos_data['loss']:.4f}, ppl={pos_data['ppl']:.2f}")
 
     else:
         if stage == "stage1_mask":
