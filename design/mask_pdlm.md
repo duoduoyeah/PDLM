@@ -38,6 +38,26 @@ r=4: {p, p, p, g}  — 3 pure, 1 group
 
 **Data efficiency:** Average loss-contributing positions per block: (4+4+3+2+1)/5 = 2.8/4 = 70% of xt. Since x0 computes no loss, effective utilization is ~35% of total positions.
 
+### Padding-1
+
+**4 block states (merged variant):** Merge r=0 (all mask) and r=1 (all group) into a single state. The first step goes directly from all-mask to decoding the first position, so each block takes 4 steps instead of 5. For each block, randomly sample r ∈ {0,1,2,3}:
+
+```
+r=0: {m, m, m, m}  — all mask (first step decodes pos 0)
+r=1: {p, g, g, g}  — 1 pure, 3 group
+r=2: {p, p, g, g}  — 2 pure, 2 group
+r=3: {p, p, p, g}  — 3 pure, 1 group
+```
+
+Data efficiency: (4+3+2+1)/4 = 2.5/4 = 62.5% of xt. Overall ~31.25%.
+
+**Dynamic softmapping ratio:** Instead of hardcoding the softmapping (top-k collapse) ratio, make it adaptive during training:
+1. First train the model on `{m,m,m,m} → {p,g,g,g}` (the r=0 state)
+2. Compute the accuracy rate from the model's predictions
+3. Use the accuracy rate to dynamically set the softmapping ratio as training progresses
+
+This replaces the fixed top-k with a curriculum that tightens the collapse as the model improves.
+
 ## Inference
 
 5 steps per block (block_size=4):
