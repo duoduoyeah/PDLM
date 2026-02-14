@@ -996,15 +996,6 @@ class PDLM(nn.Module):
         avg_embs = norm(noise_embs.mean(dim=1)).view(B_n, block_region_len, D)
         x[:, block_start:block_start + block_region_len] = avg_embs
 
-        # Debug: check wte weights and loss every call
-        _call = getattr(self, '_pdlm_emb_call', 0)
-        if _call < 20 or x.isnan().any().item():
-            wte_nan = self.transformer.wte.weight.isnan().any().item()
-            lm_nan = self.lm_head.weight.isnan().any().item()
-            x_nan = x.isnan().any().item()
-            print(f"[DBG] call={_call} wte_nan={wte_nan} lm_nan={lm_nan} x_nan={x_nan}")
-        self._pdlm_emb_call = _call + 1
-
         for block in self.transformer.h:
             x = block(x, cos_sin, kv_cache=None, attn_mask=attn_mask)
         x = norm(x)
@@ -1023,9 +1014,6 @@ class PDLM(nn.Module):
         target_log_probs = torch.gather(log_probs, dim=-1, index=targets.unsqueeze(-1))
         nll = -target_log_probs.squeeze(-1)  # (B, T)
         loss = (nll * loss_mask).sum() / loss_mask.sum().clamp(min=1)
-
-        if _call < 20 or loss.isnan().item():
-            print(f"[DBG] call={_call} loss={loss.item()}")
 
         if return_nll:
             return loss
