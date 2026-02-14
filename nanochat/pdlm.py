@@ -983,41 +983,37 @@ class PDLM(nn.Module):
         # Forward through transformer: embed tokens then override block positions
         x = self.transformer.wte(combined_idx)
         x = norm(x)
-        _dbg = getattr(self, '_pdlm_emb_debug', True)  # debug first few calls
-        if _dbg: print(f"[DBG] after wte+norm: nan={x.isnan().any().item()}, inf={x.isinf().any().item()}, shape={x.shape}, dtype={x.dtype}")
 
         # Override xt block positions with averaged noise embeddings
         noise_tokens = loss_extras["noise_tokens"]  # (B, block_region_len, noise_count)
         B_n, block_region_len, noise_count = noise_tokens.shape
         D = x.size(-1)
         block_start = 0  # pdlm_emb uses prefix_sliding_tokens=0
-        if _dbg: print(f"[DBG] noise_tokens: min={noise_tokens.min().item()}, max={noise_tokens.max().item()}, wte_size={self.transformer.wte.weight.shape[0]}")
 
         noise_embs = self.transformer.wte(noise_tokens.reshape(-1))  # (B*block_len*nc, D)
-        if _dbg: print(f"[DBG] noise_embs raw: nan={noise_embs.isnan().any().item()}, inf={noise_embs.isinf().any().item()}")
         noise_embs = noise_embs.view(B_n * block_region_len, noise_count, D)
         noise_embs = norm(noise_embs)
-        if _dbg: print(f"[DBG] noise_embs normed: nan={noise_embs.isnan().any().item()}, inf={noise_embs.isinf().any().item()}")
-        mean_embs = noise_embs.mean(dim=1)
-        if _dbg: print(f"[DBG] mean_embs: nan={mean_embs.isnan().any().item()}, inf={mean_embs.isinf().any().item()}, rms={mean_embs.pow(2).mean().sqrt().item():.6f}")
-        avg_embs = norm(mean_embs).view(B_n, block_region_len, D)
-        if _dbg: print(f"[DBG] avg_embs (normed mean): nan={avg_embs.isnan().any().item()}, inf={avg_embs.isinf().any().item()}")
+        avg_embs = norm(noise_embs.mean(dim=1)).view(B_n, block_region_len, D)
         x[:, block_start:block_start + block_region_len] = avg_embs
-        if _dbg: print(f"[DBG] x after override: nan={x.isnan().any().item()}, inf={x.isinf().any().item()}")
 
-        for i, block in enumerate(self.transformer.h):
+        # Debug: check wte weights and loss every call
+        _call = getattr(self, '_pdlm_emb_call', 0)
+        if _call < 20 or x.isnan().any().item():
+            wte_nan = self.transformer.wte.weight.isnan().any().item()
+            lm_nan = self.lm_head.weight.isnan().any().item()
+            x_nan = x.isnan().any().item()
+            print(f"[DBG] call={_call} wte_nan={wte_nan} lm_nan={lm_nan} x_nan={x_nan}")
+        self._pdlm_emb_call = _call + 1
+
+        for block in self.transformer.h:
             x = block(x, cos_sin, kv_cache=None, attn_mask=attn_mask)
-            if _dbg: print(f"[DBG] after block {i}: nan={x.isnan().any().item()}, inf={x.isinf().any().item()}")
         x = norm(x)
-        if _dbg: print(f"[DBG] after final norm: nan={x.isnan().any().item()}")
 
         # Compute logits (lm_head outputs pure_vocab_size)
         softcap = 15
         logits = self.lm_head(x)  # (B, 2L, pure_vocab_size)
-        if _dbg: print(f"[DBG] logits raw: nan={logits.isnan().any().item()}, inf={logits.isinf().any().item()}")
         logits = logits.float()
         logits = softcap * torch.tanh(logits / softcap)
-        if _dbg: print(f"[DBG] logits softcapped: nan={logits.isnan().any().item()}")
 
         # Unified loss on xt half only
         xt_logits = logits[:, :T, :]  # (B, T, pure_vocab_size)
@@ -1027,9 +1023,9 @@ class PDLM(nn.Module):
         target_log_probs = torch.gather(log_probs, dim=-1, index=targets.unsqueeze(-1))
         nll = -target_log_probs.squeeze(-1)  # (B, T)
         loss = (nll * loss_mask).sum() / loss_mask.sum().clamp(min=1)
-        if _dbg:
-            print(f"[DBG] loss: {loss.item()}")
-            self._pdlm_emb_debug = False  # only debug first call
+
+        if _call < 20 or loss.isnan().item():
+            print(f"[DBG] call={_call} loss={loss.item()}")
 
         if return_nll:
             return loss
