@@ -154,8 +154,11 @@ echo "=== Tokenizer path: ${TOKENIZER_PATH} ==="
 # Handle existing local model dir
 if [ -d "${NANOCHAT_BASE_DIR}" ]; then
     if [ "${TEST_MODE}" = "true" ]; then
-        echo "Test mode: Removing old local model dir ${NANOCHAT_BASE_DIR}"
-        rm -rf "${NANOCHAT_BASE_DIR}"
+        echo "Test mode: Cleaning old checkpoints but preserving dataset..."
+        rm -rf "${NANOCHAT_BASE_DIR}/base_checkpoints"
+        rm -rf "${NANOCHAT_BASE_DIR}/tokenizer"
+        rm -rf "${NANOCHAT_BASE_DIR}/tokenized_data"
+        rm -f "${NANOCHAT_BASE_DIR}/report.json"
     else
         TIMESTAMP=$(date +%Y%m%d_%H%M%S)
         BACKUP_DIR="${NANOCHAT_BASE_DIR}_backup_${TIMESTAMP}"
