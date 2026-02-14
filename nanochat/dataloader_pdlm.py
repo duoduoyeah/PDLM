@@ -66,8 +66,11 @@ def pdlm_data_loader(
         split, resume_state_dict, tokenizer_threads, tokenizer_batch_size
     )
 
-    # Load token_map for group token conversion
-    token_map = get_token_map(device="cpu")
+    # Load token_map for group token conversion (not needed for pdlm_emb)
+    if stage != "pdlm_emb":
+        token_map = get_token_map(device="cpu")
+    else:
+        token_map = None
 
     use_cuda = device == "cuda"
 
@@ -589,6 +592,51 @@ def pdlm_data_loader(
             loss_mask = loss_mask.to(device=device, non_blocking=use_cuda)
 
             loss_extras = {"loss_mask": loss_mask}
+
+        elif stage == "pdlm_emb":
+            # PDLM Embedding: replace group tokens with averaged noise embeddings.
+            # No group tokenizer needed — noise is random pure tokens.
+            # inputs_cpu is a placeholder (targets_cpu.clone()); the model overrides
+            # block positions with averaged noise embeddings in the forward pass.
+
+            prefix_sliding_tokens = 0
+            num_blocks = (T - prefix_sliding_tokens) // block_size
+            block_region_len = num_blocks * block_size
+            block_start = prefix_sliding_tokens
+
+            pure_vocab_size = model_config.pure_vocab_size
+            noise_count = model_config.noise_count
+            soft_p_within = model_config.soft_p_within
+
+            # inputs: placeholder (block positions will be overridden by model)
+            inputs_cpu = targets_cpu.clone()
+
+            # Generate noise_tokens: (B, block_region_len, noise_count)
+            noise_tokens = torch.randint(0, pure_vocab_size, (B, block_region_len, noise_count))
+
+            # Position 0 in noise_tokens is the target token (when soft_p_within >= 1.0)
+            # or random with prob (1 - soft_p_within)
+            block_targets = targets_cpu[:, block_start:block_start + block_region_len]  # (B, block_region_len)
+            if soft_p_within >= 1.0:
+                noise_tokens[:, :, 0] = block_targets
+            else:
+                within_mask = torch.rand(B, block_region_len) < soft_p_within
+                noise_tokens[:, :, 0] = torch.where(within_mask, block_targets, noise_tokens[:, :, 0])
+
+            # loss_mask: True at block positions, False at prefix
+            loss_mask = torch.zeros(B, T, dtype=torch.bool)
+            loss_mask[:, block_start:block_start + block_region_len] = True
+
+            if prefix_pure_tokens > 0:
+                loss_mask[:, :prefix_pure_tokens] = False
+
+            # Move to device
+            inputs = inputs_cpu.to(device=device, non_blocking=use_cuda)
+            targets = targets_cpu.to(device=device, non_blocking=use_cuda)
+            loss_mask = loss_mask.to(device=device, non_blocking=use_cuda)
+            noise_tokens = noise_tokens.to(device=device, non_blocking=use_cuda)
+
+            loss_extras = {"loss_mask": loss_mask, "noise_tokens": noise_tokens}
 
         elif stage == "both_mask":
             # Both stages with MASK instead of MTP - placeholder

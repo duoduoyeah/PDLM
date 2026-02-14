@@ -16,7 +16,7 @@ from nanochat.bd3lm import BDLM, BDLMConfig
 from nanochat.gpt_mtp import GPTMTP, GPTMTPConfig
 from nanochat.dataloader import get_data_loader
 from nanochat.bd3lm_eval import eval_bd3lm
-from nanochat.pdlm_eval import eval_pdlm, eval_pdlm_stage1_mask, eval_pdlm_stage1_block, eval_pdlm_both_block, eval_pdlm_full, eval_block_pdlm_inference, eval_mask_pdlm
+from nanochat.pdlm_eval import eval_pdlm, eval_pdlm_stage1_mask, eval_pdlm_stage1_block, eval_pdlm_both_block, eval_pdlm_full, eval_block_pdlm_inference, eval_mask_pdlm, eval_pdlm_emb
 from nanochat.mtp_eval import eval_mtp
 from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, print_banner, get_base_dir, autodetect_device_type
 from nanochat.tokenizer import get_tokenizer
@@ -50,6 +50,7 @@ mtp_loss_beta = 0.8 # MTP: exponential decay factor for loss weighting (β^k)
 n_future_tokens = 4 # MTP/both_mtp: number of future group tokens to predict (K)
 mtp_loss_weight = 1.0 # both_mtp: Stage 1 MTP loss weight relative to Stage 2
 soft_p_within = 1.0 # stage2: prob of correct group mapping (1.0 = hard, <1.0 = soft noise)
+noise_count = 64 # pdlm_emb: total tokens in noise average (including target)
 loss_weight_mode = "manual" # "manual" or "fixed" - fixed computes weight from warmup batches
 loss_weight_warmup_steps = 10 # number of batches for estimating loss ratio (used when loss_weight_mode="fixed")
 stage1_target_mode = "pure" # MTP: "pure" (default) or "group" (legacy) - determines target format and loss
@@ -112,9 +113,14 @@ elif model_type == "bd3lm":
     pure_vocab_size = all_vocab_size - 1  # MASK is the only extra token
     token_map = None
 elif model_type == "pdlm":
-    token_map = get_token_map(device="cpu")
-    pure_vocab_size = token_map.pure_vocab_size
-    num_groups = token_map.num_groups
+    if pdlm_stage == "pdlm_emb":
+        token_map = None
+        pure_vocab_size = all_vocab_size
+        num_groups = 0
+    else:
+        token_map = get_token_map(device="cpu")
+        pure_vocab_size = token_map.pure_vocab_size
+        num_groups = token_map.num_groups
 elif model_type == "mtp":
     token_map = get_token_map(device="cpu")
     pure_vocab_size = token_map.pure_vocab_size
@@ -131,7 +137,7 @@ except KeyError:
     pass
 print0(f"Vocab size: {all_vocab_size:,}")
 print0(f"Pure vocab size: {pure_vocab_size:,}")
-if model_type in {"pdlm", "mtp"}:
+if model_type in {"pdlm", "mtp"} and num_groups > 0:
     print0(f"Num groups: {num_groups:,}")
 if mask_token_id != -1:
     print0(f"Mask token id: {mask_token_id}")
@@ -211,6 +217,9 @@ elif model_type == "pdlm":
     # Add loss weight for combined stages
     if pdlm_stage in ("both_mtp", "both_block", "block_pdlm_inference"):
         model_config_kwargs["mtp_loss_weight"] = mtp_loss_weight
+    # Add noise_count for pdlm_emb stage
+    if pdlm_stage == "pdlm_emb":
+        model_config_kwargs["noise_count"] = noise_count
     # Add MTP-specific params for both_mtp stage
     if pdlm_stage == "both_mtp":
         model_config_kwargs.update(
@@ -732,6 +741,32 @@ while True:
                     log_data[f"eval/end2end_pos_{pos}_loss"] = e2ep["loss"]
                     log_data[f"eval/end2end_pos_{pos}_ppl"] = e2ep["ppl"]
                 wandb_run.log(log_data)
+            elif pdlm_stage == "pdlm_emb":
+                print0(f"Running pdlm_emb evaluation at step {step} ({current_eval_batches} batches)...")
+                eval_result = eval_pdlm_emb(
+                    model=orig_model,
+                    val_loader=val_loader,
+                    block_size=block_size,
+                    num_batches=current_eval_batches,
+                    attn_mask=eval_attn_mask,
+                    device=device,
+                    autocast_ctx=autocast_ctx,
+                    prefix_pure_tokens=prefix_pure_tokens,
+                )
+                print0(f"  [pdlm_emb] overall_loss: {eval_result['overall_loss']:.4f}, overall_ppl: {eval_result['overall_ppl']:.2f}")
+                for pos in range(block_size):
+                    pos_data = eval_result["positions"][pos]
+                    print0(f"    pos {pos}: loss={pos_data['loss']:.4f}, ppl={pos_data['ppl']:.2f}")
+                log_data = {
+                    "step": step,
+                    "eval/overall_loss": eval_result["overall_loss"],
+                    "eval/overall_ppl": eval_result["overall_ppl"],
+                }
+                for pos in range(block_size):
+                    pos_data = eval_result["positions"][pos]
+                    log_data[f"eval/pos_{pos}_loss"] = pos_data["loss"]
+                    log_data[f"eval/pos_{pos}_ppl"] = pos_data["ppl"]
+                wandb_run.log(log_data)
             elif pdlm_stage == "mask_pdlm":
                 print0(f"Running mask_pdlm evaluation at step {step} ({current_eval_batches} batches)...")
                 eval_result = eval_mask_pdlm(
@@ -954,6 +989,16 @@ while True:
                 nll = None  # skip per-position path
             elif model_type == "pdlm" and pdlm_stage == "mask_pdlm":
                 nll_loss = orig_model._forward_mask_pdlm(
+                    x, y, attn_mask=block_diff_masks[0],
+                    loss_extras=loss_extras, return_nll=True)
+                from nanochat.gradient_tracking import compute_stage_gradient_metrics
+                grad_metrics = compute_stage_gradient_metrics(
+                    orig_model, [nll_loss], ["unified"])
+                wandb_run.log({"step": step, **grad_metrics})
+                print0(f"[gradient_tracking] step {step}: logged {len(grad_metrics)} metrics")
+                nll = None  # skip per-position path
+            elif model_type == "pdlm" and pdlm_stage == "pdlm_emb":
+                nll_loss = orig_model._forward_pdlm_emb(
                     x, y, attn_mask=block_diff_masks[0],
                     loss_extras=loss_extras, return_nll=True)
                 from nanochat.gradient_tracking import compute_stage_gradient_metrics

@@ -69,7 +69,7 @@ def any_correct_ce_loss(logits, valid_targets, loss_mask=None, reduction="mean")
         return nll.mean()
 
 # Stage types for PDLM
-PDLMStage = Literal["stage1_mtp", "stage1_mask", "stage1_block", "stage2", "both_mtp", "both_mask", "both_block", "block_pdlm_inference", "mask_pdlm"]
+PDLMStage = Literal["stage1_mtp", "stage1_mask", "stage1_block", "stage2", "both_mtp", "both_mask", "both_block", "block_pdlm_inference", "mask_pdlm", "pdlm_emb"]
 
 @dataclass
 class PDLMConfig:
@@ -91,6 +91,7 @@ class PDLMConfig:
     mask_token_id: int = -1  # only needed for stage1_mask and both_mask
     soft_p_within: float = 1.0  # 1.0 = hard mapping, <1.0 = soft (prob of correct group)
     stage1_target_mode: str = "pure"  # "pure" (CE over pure_vocab) or "group" (any_correct_ce over num_groups)
+    noise_count: int = 64  # pdlm_emb: total tokens in noise average (including target)
 
     # MTP (Multi-Token Prediction) config for both_mtp stage
     n_future_tokens: int = 4       # K: number of group tokens to predict for Stage 1
@@ -98,7 +99,7 @@ class PDLMConfig:
     mtp_loss_weight: float = 1.0   # Stage 1 MTP loss weight relative to Stage 2 (which is 1.0)
 
     def __post_init__(self):
-        valid_stages = {"stage1_mtp", "stage1_mask", "stage1_block", "stage2", "both_mtp", "both_mask", "both_block", "block_pdlm_inference", "mask_pdlm"}
+        valid_stages = {"stage1_mtp", "stage1_mask", "stage1_block", "stage2", "both_mtp", "both_mask", "both_block", "block_pdlm_inference", "mask_pdlm", "pdlm_emb"}
         if self.stage not in valid_stages:
             raise ValueError(f"Invalid stage: {self.stage}. Must be one of {valid_stages}")
 
@@ -135,6 +136,9 @@ class PDLMConfig:
             lm_head_size = self.pure_vocab_size + self.num_groups
         elif self.stage == "mask_pdlm":
             wte_size = self.pure_vocab_size + self.num_groups + 1  # pure + groups + mask
+            lm_head_size = self.pure_vocab_size
+        elif self.stage == "pdlm_emb":
+            wte_size = self.pure_vocab_size  # no group tokens in wte
             lm_head_size = self.pure_vocab_size
         else:
             raise ValueError(f"Unknown stage: {self.stage}")
@@ -420,6 +424,8 @@ class PDLM(nn.Module):
             return self._forward_block_pdlm_inference(idx, targets, attn_mask, loss_extras, return_separate_losses)
         if self.config.stage == "mask_pdlm" and targets is not None:
             return self._forward_mask_pdlm(idx, targets, attn_mask, loss_extras, return_nll=return_nll)
+        if self.config.stage == "pdlm_emb" and targets is not None:
+            return self._forward_pdlm_emb(idx, targets, attn_mask, loss_extras, return_nll=return_nll)
         if self.config.stage == "both_mtp" and targets is not None:
             return self._forward_both_mtp(idx, targets, attn_mask, loss_extras)
 
@@ -932,6 +938,132 @@ class PDLM(nn.Module):
         x = norm(x)
 
         # Compute logits (lm_head outputs pure_vocab_size)
+        softcap = 15
+        logits = self.lm_head(x)  # (B, 2L, pure_vocab_size)
+        logits = logits.float()
+        logits = softcap * torch.tanh(logits / softcap)
+
+        # Return only xt half logits
+        return logits[:, :T, :]  # (B, L, pure_vocab_size)
+
+    def _forward_pdlm_emb(self, idx, targets, attn_mask, loss_extras, return_nll=False):
+        """
+        Forward pass for pdlm_emb stage.
+
+        Same 2L structure as mask_pdlm but replaces discrete group tokens with
+        averaged noise embeddings at block positions.
+
+        For each block position, construct:
+            norm(mean(norm(wte(tok_i)) for tok_i in noise_set))
+        where noise_set is randomly sampled pure tokens (including the target).
+
+        Args:
+            idx: (B, L) input tokens (xt: placeholder at block positions)
+            targets: (B, L) target tokens (x0: pure tokens)
+            attn_mask: (2L, 2L) block diffusion attention mask
+            loss_extras: dict with "loss_mask" (B, L) and "noise_tokens" (B, block_region_len, noise_count)
+            return_nll: if True, return single NLL scalar for gradient tracking
+
+        Returns:
+            loss: scalar loss
+        """
+        B, T = idx.size()
+        assert attn_mask is not None, "Train should have attn mask"
+        assert self.config.sequence_len == T, "use double seq length when train"
+        assert targets.size(1) == T, "Targets should match the base sequence length"
+
+        # Concatenate [xt | x0] to form (B, 2L) input
+        combined_idx = torch.cat((idx, targets), dim=1)  # (B, 2L)
+
+        # Get rotary embeddings for 2L sequence (same positions for both halves)
+        cos = self.cos[:, :T]
+        sin = self.sin[:, :T]
+        cos_sin = (torch.cat((cos, cos), dim=1), torch.cat((sin, sin), dim=1))
+
+        # Forward through transformer: embed tokens then override block positions
+        x = self.transformer.wte(combined_idx)
+        x = norm(x)
+
+        # Override xt block positions with averaged noise embeddings
+        noise_tokens = loss_extras["noise_tokens"]  # (B, block_region_len, noise_count)
+        B_n, block_region_len, noise_count = noise_tokens.shape
+        D = x.size(-1)
+        block_start = 0  # pdlm_emb uses prefix_sliding_tokens=0
+
+        noise_embs = self.transformer.wte(noise_tokens.reshape(-1))  # (B*block_len*nc, D)
+        noise_embs = noise_embs.view(B_n * block_region_len, noise_count, D)
+        noise_embs = norm(noise_embs)
+        avg_embs = norm(noise_embs.mean(dim=1)).view(B_n, block_region_len, D)
+        x[:, block_start:block_start + block_region_len] = avg_embs
+
+        for block in self.transformer.h:
+            x = block(x, cos_sin, kv_cache=None, attn_mask=attn_mask)
+        x = norm(x)
+
+        # Compute logits (lm_head outputs pure_vocab_size)
+        softcap = 15
+        logits = self.lm_head(x)  # (B, 2L, pure_vocab_size)
+        logits = logits.float()
+        logits = softcap * torch.tanh(logits / softcap)
+
+        # Unified loss on xt half only
+        xt_logits = logits[:, :T, :]  # (B, T, pure_vocab_size)
+        loss_mask = loss_extras["loss_mask"]  # (B, T)
+
+        log_probs = F.log_softmax(xt_logits, dim=-1)
+        target_log_probs = torch.gather(log_probs, dim=-1, index=targets.unsqueeze(-1))
+        nll = -target_log_probs.squeeze(-1)  # (B, T)
+        loss = (nll * loss_mask).sum() / loss_mask.sum().clamp(min=1)
+
+        if return_nll:
+            return loss
+
+        return loss
+
+    def forward_for_eval_pdlm_emb(self, idx, targets, attn_mask, noise_tokens):
+        """
+        Forward pass for pdlm_emb evaluation that returns xt-half logits.
+
+        Args:
+            idx: (B, L) input tokens (xt: placeholder at block positions)
+            targets: (B, L) target tokens (x0: pure tokens)
+            attn_mask: (2L, 2L) block diffusion attention mask
+            noise_tokens: (B, block_region_len, noise_count)
+
+        Returns:
+            logits: (B, L, pure_vocab_size) logits from xt half
+        """
+        B, T = idx.size()
+        assert targets.size(1) == T, "Targets should match input length"
+
+        # Concatenate [xt | x0] = [idx | targets]
+        combined_idx = torch.cat((idx, targets), dim=1)  # (B, 2L)
+
+        # Get rotary embeddings for 2L sequence
+        cos = self.cos[:, :T]
+        sin = self.sin[:, :T]
+        cos_sin = (torch.cat((cos, cos), dim=1), torch.cat((sin, sin), dim=1))
+
+        # Forward through transformer: embed tokens then override block positions
+        x = self.transformer.wte(combined_idx)
+        x = norm(x)
+
+        # Override xt block positions with averaged noise embeddings
+        B_n, block_region_len, noise_count = noise_tokens.shape
+        D = x.size(-1)
+        block_start = 0
+
+        noise_embs = self.transformer.wte(noise_tokens.reshape(-1))
+        noise_embs = noise_embs.view(B_n * block_region_len, noise_count, D)
+        noise_embs = norm(noise_embs)
+        avg_embs = norm(noise_embs.mean(dim=1)).view(B_n, block_region_len, D)
+        x[:, block_start:block_start + block_region_len] = avg_embs
+
+        for block in self.transformer.h:
+            x = block(x, cos_sin, kv_cache=None, attn_mask=attn_mask)
+        x = norm(x)
+
+        # Compute logits
         softcap = 15
         logits = self.lm_head(x)  # (B, 2L, pure_vocab_size)
         logits = logits.float()
