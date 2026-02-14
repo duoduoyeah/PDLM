@@ -24,6 +24,7 @@ BLOCK_SIZE="4"             # bucket_size for block diffusion
 SOFT_P_WITHIN="1.0"        # prob of including correct target in noise (1.0 = always include)
 DRIVE_OUTPUT_FOLDER=""     # subfolder under DRIVE_BASE for outputs (empty = save directly under DRIVE_BASE)
 GRADIENT_TRACK_EVERY="0"   # 0 = disabled, >0 = log gradient metrics every N steps
+TOKENIZER_PATH=""          # REQUIRED: path to tokenizer dir containing tokenizer.pkl (e.g. .../simplestory_tokenizer/4096/tokenizer)
 
 # Common training arguments
 MAX_SEQ_LEN="512"
@@ -74,12 +75,18 @@ for arg in "$@"; do
         --gradient_track_every=*)
             GRADIENT_TRACK_EVERY="${arg#*=}"
             ;;
+        --tokenizer_path=*)
+            TOKENIZER_PATH="${arg#*=}"
+            ;;
         *)
             echo "Unknown argument: $arg"
-            echo "Usage: bash launch/run_pdlm_emb.sh [--noise_count=64] [--depth=4] [--block_size=4]"
+            echo "Usage: bash launch/run_pdlm_emb.sh --tokenizer_path=<path> [--noise_count=64] [--depth=4] [--block_size=4]"
             echo "       [--test_mode=true] [--data_ratio=10]"
             echo "       [--max_seq_len=512] [--device_batch_size=64]"
             echo "       [--drive_output_folder=<folder>]"
+            echo ""
+            echo "  --tokenizer_path: REQUIRED. Path to tokenizer dir containing tokenizer.pkl"
+            echo "                    e.g. /content/drive/MyDrive/nanochat/tokenizer/simplestory_tokenizer/4096/tokenizer"
             exit 1
             ;;
     esac
@@ -94,10 +101,12 @@ DRIVE_BASE="/content/drive/MyDrive/nanochat"
 # Local training base (faster than Drive)
 LOCAL_TRAIN_BASE="/content/pdlm_emb_temp_train"
 
-# Tokenizer path: any existing group tokenizer folder that contains tokenizer.pkl
-# For pdlm_emb we only need tokenizer.pkl (no token_maps.pt)
-# Default: look for a common tokenizer location
-TOKENIZER_SOURCE="${DRIVE_BASE}/group_tokenizers"
+# Validate required tokenizer_path
+if [ -z "${TOKENIZER_PATH}" ]; then
+    echo "ERROR: --tokenizer_path is required."
+    echo "  e.g. --tokenizer_path=/content/drive/MyDrive/nanochat/tokenizer/simplestory_tokenizer/4096/tokenizer"
+    exit 1
+fi
 
 # Load secrets from .env file
 if [ -f "launch/.env" ]; then
@@ -136,6 +145,7 @@ echo "=== Depth: ${DEPTH} ==="
 echo "=== Block size (bucket): ${BLOCK_SIZE} ==="
 echo "=== Noise count: ${NOISE_COUNT} ==="
 echo "=== Soft p within: ${SOFT_P_WITHIN} ==="
+echo "=== Tokenizer path: ${TOKENIZER_PATH} ==="
 
 # ============================================================
 # Setup (run once per model)
@@ -157,28 +167,13 @@ fi
 # Create local base directory
 mkdir -p "${NANOCHAT_BASE_DIR}/tokenizer"
 
-# Copy tokenizer.pkl from any existing group tokenizer folder
-# pdlm_emb does NOT need token_maps.pt
-echo "Looking for tokenizer.pkl..."
-FOUND_TOKENIZER=""
-if [ -d "${TOKENIZER_SOURCE}" ]; then
-    # Find first available tokenizer.pkl in any group tokenizer subfolder
-    for dir in "${TOKENIZER_SOURCE}"/*/; do
-        if [ -f "${dir}tokenizer.pkl" ]; then
-            FOUND_TOKENIZER="${dir}tokenizer.pkl"
-            break
-        fi
-    done
-fi
-
-if [ -n "${FOUND_TOKENIZER}" ]; then
-    echo "Copying tokenizer from: ${FOUND_TOKENIZER}"
-    cp "${FOUND_TOKENIZER}" "${NANOCHAT_BASE_DIR}/tokenizer/"
-else
-    echo "ERROR: No tokenizer.pkl found in ${TOKENIZER_SOURCE}"
-    echo "Please ensure at least one group tokenizer has been built, or copy tokenizer.pkl manually."
+# Copy tokenizer.pkl (no token_maps.pt needed for pdlm_emb)
+if [ ! -f "${TOKENIZER_PATH}/tokenizer.pkl" ]; then
+    echo "ERROR: tokenizer.pkl not found at ${TOKENIZER_PATH}"
     exit 1
 fi
+echo "Copying tokenizer from: ${TOKENIZER_PATH}"
+cp "${TOKENIZER_PATH}/tokenizer.pkl" "${NANOCHAT_BASE_DIR}/tokenizer/"
 
 echo "Tokenizer setup complete (no token_maps.pt needed for pdlm_emb):"
 ls -la "${NANOCHAT_BASE_DIR}/tokenizer/"
