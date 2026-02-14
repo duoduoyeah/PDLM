@@ -985,15 +985,16 @@ class PDLM(nn.Module):
         x = norm(x)
 
         # Override xt block positions with averaged noise embeddings
+        # Precompute normed embeddings for entire vocab (4096 norms instead of 8.4M),
+        # then use embedding_bag to fuse lookup + sum without materializing the intermediate.
         noise_tokens = loss_extras["noise_tokens"]  # (B, block_region_len, noise_count)
         B_n, block_region_len, noise_count = noise_tokens.shape
-        D = x.size(-1)
         block_start = 0  # pdlm_emb uses prefix_sliding_tokens=0
 
-        noise_embs = self.transformer.wte(noise_tokens.reshape(-1))  # (B*block_len*nc, D)
-        noise_embs = noise_embs.view(B_n * block_region_len, noise_count, D)
-        noise_embs = norm(noise_embs)
-        avg_embs = norm(noise_embs.mean(dim=1)).view(B_n, block_region_len, D)
+        normed_wte = norm(self.transformer.wte.weight)  # (vocab_size, D)
+        flat_noise = noise_tokens.view(B_n * block_region_len, noise_count)  # (32K, nc)
+        sum_embs = F.embedding_bag(flat_noise, normed_wte, mode='sum')  # (32K, D)
+        avg_embs = norm(sum_embs / noise_count).view(B_n, block_region_len, -1)
         x[:, block_start:block_start + block_region_len] = avg_embs
 
         for block in self.transformer.h:
@@ -1050,13 +1051,12 @@ class PDLM(nn.Module):
 
         # Override xt block positions with averaged noise embeddings
         B_n, block_region_len, noise_count = noise_tokens.shape
-        D = x.size(-1)
         block_start = 0
 
-        noise_embs = self.transformer.wte(noise_tokens.reshape(-1))
-        noise_embs = noise_embs.view(B_n * block_region_len, noise_count, D)
-        noise_embs = norm(noise_embs)
-        avg_embs = norm(noise_embs.mean(dim=1)).view(B_n, block_region_len, D)
+        normed_wte = norm(self.transformer.wte.weight)  # (vocab_size, D)
+        flat_noise = noise_tokens.view(B_n * block_region_len, noise_count)
+        sum_embs = F.embedding_bag(flat_noise, normed_wte, mode='sum')
+        avg_embs = norm(sum_embs / noise_count).view(B_n, block_region_len, -1)
         x[:, block_start:block_start + block_region_len] = avg_embs
 
         for block in self.transformer.h:
