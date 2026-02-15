@@ -56,7 +56,7 @@ def eval_pdlm_emb(
                             nll_by_pos[pos]["entropy"] += entropy[:, pos_in_seq].sum().item()
 
                             # Set recall: sum of probs on noise set tokens
-                            noise_idx = (block_idx - 1) * block_size + pos
+                            noise_idx = block_idx * block_size + pos
                             noise_tok_ids = noise_tokens[:, noise_idx, :]  # (B, noise_count)
                             pos_probs = probs[:, pos_in_seq, :]  # (B, vocab_size)
                             noise_probs = pos_probs.gather(-1, noise_tok_ids)  # (B, noise_count)
