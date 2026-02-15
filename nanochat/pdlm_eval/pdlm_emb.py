@@ -26,7 +26,7 @@ def eval_pdlm_emb(
 
     Returns a dict with per-position loss/ppl breakdown.
     """
-    nll_by_pos = {p: {"nll": 0.0, "entropy": 0.0, "tokens": 0} for p in range(block_size)}
+    nll_by_pos = {p: {"nll": 0.0, "entropy": 0.0, "set_recall": 0.0, "tokens": 0} for p in range(block_size)}
 
     with model_eval_context(model):
         with torch.no_grad():
@@ -44,6 +44,7 @@ def eval_pdlm_emb(
                     log_probs = F.log_softmax(logits.float(), dim=-1)
                     target_log_probs = log_probs.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
                     entropy = -(log_probs.exp() * log_probs).sum(dim=-1)  # (B, T)
+                    probs = log_probs.exp()  # (B, T, vocab_size)
 
                     num_blocks = T // block_size
 
@@ -53,6 +54,15 @@ def eval_pdlm_emb(
                             nll = -target_log_probs[:, pos_in_seq]  # (B,)
                             nll_by_pos[pos]["nll"] += nll.sum().item()
                             nll_by_pos[pos]["entropy"] += entropy[:, pos_in_seq].sum().item()
+
+                            # Set recall: sum of probs on noise set tokens
+                            noise_idx = (block_idx - 1) * block_size + pos
+                            noise_tok_ids = noise_tokens[:, noise_idx, :]  # (B, noise_count)
+                            pos_probs = probs[:, pos_in_seq, :]  # (B, vocab_size)
+                            noise_probs = pos_probs.gather(-1, noise_tok_ids)  # (B, noise_count)
+                            set_recall = noise_probs.sum(dim=-1)  # (B,)
+                            nll_by_pos[pos]["set_recall"] += set_recall.sum().item()
+
                             nll_by_pos[pos]["tokens"] += B
 
     return build_result_dict(nll_by_pos, block_size, include_accuracy=False)

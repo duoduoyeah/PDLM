@@ -753,19 +753,25 @@ while True:
                     autocast_ctx=autocast_ctx,
                     prefix_pure_tokens=prefix_pure_tokens,
                 )
-                print0(f"  [pdlm_emb] overall_loss: {eval_result['overall_loss']:.4f}, overall_ppl: {eval_result['overall_ppl']:.2f}")
+                eppl = f", entropy_ppl: {eval_result['overall_entropy_ppl']:.2f}" if "overall_entropy_ppl" in eval_result else ""
+                sr = f", set_recall: {eval_result['overall_set_recall']:.4f}" if "overall_set_recall" in eval_result else ""
+                print0(f"  [pdlm_emb] overall_loss: {eval_result['overall_loss']:.4f}{eppl}{sr}")
                 for pos in range(block_size):
                     pos_data = eval_result["positions"][pos]
-                    print0(f"    pos {pos}: loss={pos_data['loss']:.4f}, ppl={pos_data['ppl']:.2f}")
+                    eppl_p = f", entropy_ppl={pos_data['entropy_ppl']:.2f}" if "entropy_ppl" in pos_data else ""
+                    sr_p = f", set_recall={pos_data['set_recall']:.4f}" if "set_recall" in pos_data else ""
+                    print0(f"    pos {pos}: loss={pos_data['loss']:.4f}{eppl_p}{sr_p}")
                 log_data = {
                     "step": step,
                     "eval/overall_loss": eval_result["overall_loss"],
-                    "eval/overall_ppl": eval_result["overall_ppl"],
+                    "eval/overall_entropy_ppl": eval_result.get("overall_entropy_ppl", 0.0),
+                    "eval/overall_set_recall": eval_result.get("overall_set_recall", 0.0),
                 }
                 for pos in range(block_size):
                     pos_data = eval_result["positions"][pos]
                     log_data[f"eval/pos_{pos}_loss"] = pos_data["loss"]
-                    log_data[f"eval/pos_{pos}_ppl"] = pos_data["ppl"]
+                    log_data[f"eval/pos_{pos}_entropy_ppl"] = pos_data.get("entropy_ppl", 0.0)
+                    log_data[f"eval/pos_{pos}_set_recall"] = pos_data.get("set_recall", 0.0)
                 wandb_run.log(log_data)
             elif pdlm_stage == "mask_pdlm":
                 print0(f"Running mask_pdlm evaluation at step {step} ({current_eval_batches} batches)...")

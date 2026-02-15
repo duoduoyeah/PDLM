@@ -23,7 +23,7 @@ import torch
 from nanochat.common import compute_init, autodetect_device_type, get_base_dir, print0
 from nanochat.checkpoint_manager import load_checkpoint, find_last_step, find_largest_model
 from nanochat.pdlm import PDLM, PDLMConfig
-from nanochat.pdlm_eval import eval_pdlm, eval_pdlm_stage1_mask, eval_pdlm_stage1_block, eval_pdlm_compatibility, eval_pdlm_full, eval_pdlm_both_block, eval_block_pdlm_inference, eval_mask_pdlm, dump_batch_to_file, dump_stage1_block_batch
+from nanochat.pdlm_eval import eval_pdlm, eval_pdlm_stage1_mask, eval_pdlm_stage1_block, eval_pdlm_compatibility, eval_pdlm_full, eval_pdlm_both_block, eval_block_pdlm_inference, eval_mask_pdlm, eval_pdlm_emb, dump_batch_to_file, dump_stage1_block_batch
 from nanochat.dataloader import get_data_loader
 from nanochat.attn_masks import gen_mask, gen_block_causal_mask
 from nanochat.group_tokenizer.token_map import get_token_map
@@ -256,6 +256,18 @@ def run_eval(
             autocast_ctx=autocast_ctx,
             prefix_pure_tokens=prefix_pure_tokens,
         )
+    elif stage == "pdlm_emb":
+        print0(f"Running pdlm_emb evaluation...")
+        eval_result = eval_pdlm_emb(
+            model=model,
+            val_loader=val_loader,
+            block_size=block_size,
+            num_batches=num_batches,
+            attn_mask=attn_mask,
+            device=device,
+            autocast_ctx=autocast_ctx,
+            prefix_pure_tokens=prefix_pure_tokens,
+        )
     elif run_compatibility or run_oracle_accuracy:
         extras = []
         if run_compatibility:
@@ -414,6 +426,20 @@ def print_results(eval_result, block_size):
             for pos in range(block_size):
                 pos_data = e2e["positions"][pos]
                 print0(f"    pos {pos}: loss={pos_data['loss']:.4f}, ppl={pos_data['ppl']:.2f}")
+
+    elif stage == "pdlm_emb":
+        print0("PDLM EMB EVALUATION RESULTS")
+        print0("=" * 60)
+
+        sr = f", set_recall: {eval_result['overall_set_recall']:.4f}" if "overall_set_recall" in eval_result else ""
+        eppl = f", entropy_ppl: {eval_result['overall_entropy_ppl']:.2f}" if "overall_entropy_ppl" in eval_result else ""
+        print0(f"\n[pdlm_emb] overall_loss: {eval_result['overall_loss']:.4f}{eppl}{sr}")
+
+        for pos in range(block_size):
+            pos_data = eval_result["positions"][pos]
+            eppl_p = f", entropy_ppl={pos_data['entropy_ppl']:.2f}" if "entropy_ppl" in pos_data else ""
+            sr_p = f", set_recall={pos_data['set_recall']:.4f}" if "set_recall" in pos_data else ""
+            print0(f"    pos {pos}: loss={pos_data['loss']:.4f}{eppl_p}{sr_p}")
 
     else:
         if stage == "stage1_mask":

@@ -34,6 +34,11 @@ def build_result_dict(metrics_by_pos, block_size, include_accuracy=False):
         avg_entropy = total_entropy / total_tokens if total_tokens > 0 else 0.0
         result["overall_entropy_ppl"] = torch.exp(torch.tensor(avg_entropy)).item()
 
+    # Set recall (fraction of probability mass on noise set)
+    if "set_recall" in metrics_by_pos[0]:
+        total_set_recall = sum(metrics_by_pos[p]["set_recall"] for p in range(block_size))
+        result["overall_set_recall"] = total_set_recall / total_tokens if total_tokens > 0 else 0.0
+
     if include_accuracy:
         total_correct = sum(metrics_by_pos[p]["correct"] for p in range(block_size))
         result["overall_accuracy"] = total_correct / total_tokens if total_tokens > 0 else 0.0
@@ -59,6 +64,9 @@ def build_position_result(pos_metrics, include_accuracy=False):
     if "entropy" in pos_metrics:
         avg_entropy = pos_metrics["entropy"] / tokens if tokens > 0 else 0.0
         result["entropy_ppl"] = torch.exp(torch.tensor(avg_entropy)).item()
+
+    if "set_recall" in pos_metrics:
+        result["set_recall"] = pos_metrics["set_recall"] / tokens if tokens > 0 else 0.0
 
     if include_accuracy:
         correct = pos_metrics["correct"]
