@@ -18,11 +18,11 @@ All experiments use data-to-parameter ratio 40. Model size 30M. Dataset: TinySto
 
 ## Tier 2 — Important
 
-### Table 3: Exp C — Group tokens help
-- **Purpose**: Show group tokens improve prediction at different noise levels
+### Table 3: Exp C + D — Group tokens help, and stage 1 can produce them
+- **Purpose**: Show group tokens improve prediction at different noise levels (exp-c), and that stage 1 reliably transitions mask→group (exp-d); unified by num_groups axis
 - **Rows**: num_groups (16, 64, 256, 1024)
-- **Columns**: loss, accuracy (overall or per-position)
-- **Models needed**: PDLM stage2 with different num_groups, fixed block_size=4, overlap_k=1
+- **Columns**: oracle accuracy (exp-c: group tokens given), transition success rate (exp-d: predicted group contains target), end-to-end accuracy (stage1+stage2 chained)
+- **Models needed**: PDLM stage2 with different num_groups (exp-c), PDLM stage1 with different num_groups (exp-d), fixed block_size=4, overlap_k=1
 
 ### Table 6: Per-position breakdown
 - **Purpose**: Show where group tokens help most
