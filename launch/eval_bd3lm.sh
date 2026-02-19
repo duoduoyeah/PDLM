@@ -19,6 +19,9 @@ NUM_BATCHES="20"
 LOCAL_DIR="/tmp/bd3lm_eval"
 ADJUST="true"  # Use _adjust suffix models
 HF_REPO=""  # Empty = use default pattern (duoduoyeah/bd3lm_d${DEPTH})
+HF_MODEL=""  # If set, download only this model folder and skip discovery
+TOTAL_SEQUENCES=""  # If set, overrides NUM_BATCHES: num_batches = total_sequences // device_batch_size
+PUSH_RESULTS="false"  # If true, upload eval_result.json + args.json to duoduoyeah/eval_results
 
 # Parse named arguments
 for arg in "$@"; do
@@ -47,11 +50,21 @@ for arg in "$@"; do
         --repo=*)
             HF_REPO="${arg#*=}"
             ;;
+        --model=*)
+            HF_MODEL="${arg#*=}"
+            ;;
+        --total_sequences=*)
+            TOTAL_SEQUENCES="${arg#*=}"
+            ;;
+        --push_results)
+            PUSH_RESULTS="true"
+            ;;
         *)
             echo "Unknown argument: $arg"
             echo "Usage: bash launch/eval_bd3lm.sh --depth=8 [--variant=normal] [--data_ratio=20]"
-            echo "       [--block_size=4] [--num_batches=20] [--local_dir=/tmp/bd3lm_eval] [--adjust=true]"
-            echo "       [--repo=duoduoyeah/bd3lm_d8]"
+            echo "       [--block_size=4] [--num_batches=20] [--total_sequences=3200]"
+            echo "       [--local_dir=/tmp/bd3lm_eval] [--adjust=true] [--repo=duoduoyeah/bd3lm_d8] [--model=bd3lm_d8_b4_normal_r40]"
+            echo "       [--push_results]"
             exit 1
             ;;
     esac
@@ -71,6 +84,7 @@ echo "============================================================"
 echo "BD3LM Evaluation"
 echo "============================================================"
 echo "HF Repo:      ${HF_REPO}"
+echo "Model:        ${HF_MODEL:-<discover by pattern>}"
 echo "Depth:        ${DEPTH}"
 echo "Variant:      ${VARIANT:-all}"
 echo "Data Ratio:   ${DATA_RATIO}"
@@ -120,12 +134,15 @@ import os
 
 repo_id = '${HF_REPO}'
 local_dir = '${LOCAL_DIR}'
+hf_model = '${HF_MODEL}'
 
 print(f'Downloading {repo_id} to {local_dir}...')
 snapshot_download(
     repo_id=repo_id,
     local_dir=local_dir,
     repo_type='model',
+    allow_patterns=f'{hf_model}/**' if hf_model else None,
+    token=os.environ.get('HF_TOKEN'),
 )
 print('Download complete!')
 "
@@ -136,58 +153,23 @@ if [ $? -ne 0 ]; then
 fi
 
 # ============================================================
-# Step 2: Discover models
+# Build eval size arg (total_sequences takes priority over num_batches)
 # ============================================================
-echo ""
-echo "Step 2: Discovering models..."
-
-# Build pattern for model directories
-# Pattern: bd3lm_d{depth}_b{block}_{variant}_r{ratio}[_adjust]
-BASE_PATTERN="bd3lm_d${DEPTH}_b${BLOCK_SIZE}"
-
-# Find all matching model directories
-MODELS=()
-for dir in "${LOCAL_DIR}"/${BASE_PATTERN}*_r${DATA_RATIO}${SUFFIX}; do
-    if [ -d "$dir" ]; then
-        MODELS+=("$dir")
-    fi
-done
-
-if [ ${#MODELS[@]} -eq 0 ]; then
-    echo "Error: No models found matching pattern ${BASE_PATTERN}*_r${DATA_RATIO}${SUFFIX}"
-    echo "Available directories in ${LOCAL_DIR}:"
-    ls -la "${LOCAL_DIR}/"
-    exit 1
+if [ -n "${TOTAL_SEQUENCES}" ]; then
+    EVAL_SIZE_ARG="--total_sequences=${TOTAL_SEQUENCES}"
+    RUN_FOLDER="seq${TOTAL_SEQUENCES}"
+else
+    EVAL_SIZE_ARG="--num_batches=${NUM_BATCHES}"
+    RUN_FOLDER="batches${NUM_BATCHES}"
 fi
 
-echo "Found ${#MODELS[@]} model(s):"
-for m in "${MODELS[@]}"; do
-    echo "  - $(basename "$m")"
-done
-
-# ============================================================
-# Step 3: Run evaluation for each model
-# ============================================================
-echo ""
-echo "Step 3: Running evaluation..."
-
-# Store results for summary
-declare -a RESULTS
-
-for MODEL_DIR in "${MODELS[@]}"; do
-    MODEL_NAME=$(basename "$MODEL_DIR")
-
-    # Skip if variant filter is set and doesn't match the folder name
-    if [ -n "${VARIANT}" ] && [[ ! "$MODEL_NAME" == *"_${VARIANT}_"* ]]; then
-        echo "Skipping ${MODEL_NAME} (does not match variant filter: ${VARIANT})"
-        continue
-    fi
-
+if [ -n "${HF_MODEL}" ]; then
+    # ==========================================================
+    # Fast path: single model specified via --model
+    # ==========================================================
+    MODEL_DIR="${LOCAL_DIR}/${HF_MODEL}"
     echo ""
-    echo "------------------------------------------------------------"
-    echo "Evaluating: ${MODEL_NAME}"
-    echo "  (target_shift auto-detected from checkpoint)"
-    echo "------------------------------------------------------------"
+    echo "Step 2: Using model dir: ${MODEL_DIR}"
 
     # Create symlink to shared data directory so get_base_dir() finds data
     if [ ! -e "${MODEL_DIR}/simple_story_data" ]; then
@@ -195,44 +177,177 @@ for MODEL_DIR in "${MODELS[@]}"; do
         echo "  Created symlink: ${MODEL_DIR}/simple_story_data -> ${DATA_DIR}"
     fi
 
-    # Set NANOCHAT_BASE_DIR to model directory so get_base_dir() finds both:
-    # - tokenizer at ${MODEL_DIR}/tokenizer
-    # - data at ${MODEL_DIR}/simple_story_data (symlink)
     export NANOCHAT_BASE_DIR="${MODEL_DIR}"
 
-    # Find the directory containing model_*.pt files (handles nested structures)
     CKPT_DIRS=$(find "${MODEL_DIR}/base_checkpoints" -name "model_*.pt" -printf '%h\n' 2>/dev/null | sort -u)
     CKPT_COUNT=$(echo "$CKPT_DIRS" | grep -c . 2>/dev/null || echo 0)
 
     if [ "$CKPT_COUNT" -eq 0 ]; then
         echo "Error: No checkpoints found in ${MODEL_DIR}/base_checkpoints"
-        RESULTS+=("${MODEL_NAME}|-,-|NO CKPT")
-        continue
-    elif [ "$CKPT_COUNT" -gt 1 ]; then
-        echo "Warning: Multiple checkpoint directories found:"
-        echo "$CKPT_DIRS"
-        echo "Skipping - please specify which one to use."
-        RESULTS+=("${MODEL_NAME}|-,-|MULTI CKPT")
-        continue
+        exit 1
     fi
 
     CKPT_DIR="$CKPT_DIRS"
     echo "  Checkpoint dir: ${CKPT_DIR}"
 
-    # Run evaluation with direct checkpoint path
-    # Python script reads target_shift from checkpoint metadata automatically
-    OUTPUT=$(python -m scripts.bd3lm_eval \
+    echo ""
+    echo "Step 3: Running evaluation..."
+
+    python -m scripts.bd3lm_eval \
         --ckpt_dir="${CKPT_DIR}" \
-        --num_batches=${NUM_BATCHES} \
-        --output_json="${MODEL_DIR}/eval_result.json" 2>&1)
+        ${EVAL_SIZE_ARG} \
+        --output_json="${MODEL_DIR}/eval_result.json"
 
-    EVAL_STATUS=$?
-    echo "$OUTPUT"
+    if [ $? -ne 0 ]; then
+        echo "Error: Evaluation failed"
+        exit 1
+    fi
 
-    if [ $EVAL_STATUS -eq 0 ]; then
-        # Extract key metrics from JSON
-        if [ -f "${MODEL_DIR}/eval_result.json" ]; then
-            METRICS=$(python -c "
+    echo ""
+    echo "Results saved to: ${MODEL_DIR}/eval_result.json"
+
+    if [ "${PUSH_RESULTS}" = "true" ]; then
+        echo ""
+        echo "Uploading results to duoduoyeah/eval_results..."
+        python -c "
+import json, os, tempfile, shutil
+from huggingface_hub import upload_folder
+
+model_name = '${HF_MODEL}'
+run_folder  = '${RUN_FOLDER}'
+model_dir   = '${MODEL_DIR}'
+
+args = {k: v for k, v in {
+    'script':           'eval_bd3lm.sh',
+    'hf_repo':          '${HF_REPO}',
+    'model':            model_name,
+    'total_sequences':  '${TOTAL_SEQUENCES}',
+    'num_batches':      '${NUM_BATCHES}',
+    'local_dir':        '${LOCAL_DIR}',
+}.items() if v}
+
+tmp = tempfile.mkdtemp()
+try:
+    shutil.copy(f'{model_dir}/eval_result.json', f'{tmp}/eval_result.json')
+    with open(f'{tmp}/args.json', 'w') as f:
+        json.dump(args, f, indent=2)
+    upload_folder(
+        folder_path=tmp,
+        path_in_repo=f'bd3lm/{model_name}/{run_folder}',
+        repo_id='duoduoyeah/eval_results',
+        repo_type='dataset',
+        token=os.environ.get('HF_TOKEN'),
+        commit_message=f'eval: bd3lm {model_name} {run_folder}',
+    )
+    print(f'Uploaded to duoduoyeah/eval_results/bd3lm/{model_name}/{run_folder}/')
+finally:
+    shutil.rmtree(tmp)
+" || echo "Warning: Failed to upload results to HuggingFace"
+    fi
+
+else
+    # ==========================================================
+    # Discovery path: find models by depth/variant/ratio pattern
+    # ==========================================================
+
+    # ============================================================
+    # Step 2: Discover models
+    # ============================================================
+    echo ""
+    echo "Step 2: Discovering models..."
+
+    # Build pattern for model directories
+    # Pattern: bd3lm_d{depth}_b{block}_{variant}_r{ratio}[_adjust]
+    BASE_PATTERN="bd3lm_d${DEPTH}_b${BLOCK_SIZE}"
+
+    # Find all matching model directories
+    MODELS=()
+    for dir in "${LOCAL_DIR}"/${BASE_PATTERN}*_r${DATA_RATIO}${SUFFIX}; do
+        if [ -d "$dir" ]; then
+            MODELS+=("$dir")
+        fi
+    done
+
+    if [ ${#MODELS[@]} -eq 0 ]; then
+        echo "Error: No models found matching pattern ${BASE_PATTERN}*_r${DATA_RATIO}${SUFFIX}"
+        echo "Available directories in ${LOCAL_DIR}:"
+        ls -la "${LOCAL_DIR}/"
+        exit 1
+    fi
+
+    echo "Found ${#MODELS[@]} model(s):"
+    for m in "${MODELS[@]}"; do
+        echo "  - $(basename "$m")"
+    done
+
+    # ============================================================
+    # Step 3: Run evaluation for each model
+    # ============================================================
+    echo ""
+    echo "Step 3: Running evaluation..."
+
+    # Store results for summary
+    declare -a RESULTS
+
+    for MODEL_DIR in "${MODELS[@]}"; do
+        MODEL_NAME=$(basename "$MODEL_DIR")
+
+        # Skip if variant filter is set and doesn't match the folder name
+        if [ -n "${VARIANT}" ] && [[ ! "$MODEL_NAME" == *"_${VARIANT}_"* ]]; then
+            echo "Skipping ${MODEL_NAME} (does not match variant filter: ${VARIANT})"
+            continue
+        fi
+
+        echo ""
+        echo "------------------------------------------------------------"
+        echo "Evaluating: ${MODEL_NAME}"
+        echo "  (target_shift auto-detected from checkpoint)"
+        echo "------------------------------------------------------------"
+
+        # Create symlink to shared data directory so get_base_dir() finds data
+        if [ ! -e "${MODEL_DIR}/simple_story_data" ]; then
+            ln -s "${DATA_DIR}" "${MODEL_DIR}/simple_story_data"
+            echo "  Created symlink: ${MODEL_DIR}/simple_story_data -> ${DATA_DIR}"
+        fi
+
+        # Set NANOCHAT_BASE_DIR to model directory so get_base_dir() finds both:
+        # - tokenizer at ${MODEL_DIR}/tokenizer
+        # - data at ${MODEL_DIR}/simple_story_data (symlink)
+        export NANOCHAT_BASE_DIR="${MODEL_DIR}"
+
+        # Find the directory containing model_*.pt files (handles nested structures)
+        CKPT_DIRS=$(find "${MODEL_DIR}/base_checkpoints" -name "model_*.pt" -printf '%h\n' 2>/dev/null | sort -u)
+        CKPT_COUNT=$(echo "$CKPT_DIRS" | grep -c . 2>/dev/null || echo 0)
+
+        if [ "$CKPT_COUNT" -eq 0 ]; then
+            echo "Error: No checkpoints found in ${MODEL_DIR}/base_checkpoints"
+            RESULTS+=("${MODEL_NAME}|-,-|NO CKPT")
+            continue
+        elif [ "$CKPT_COUNT" -gt 1 ]; then
+            echo "Warning: Multiple checkpoint directories found:"
+            echo "$CKPT_DIRS"
+            echo "Skipping - please specify which one to use."
+            RESULTS+=("${MODEL_NAME}|-,-|MULTI CKPT")
+            continue
+        fi
+
+        CKPT_DIR="$CKPT_DIRS"
+        echo "  Checkpoint dir: ${CKPT_DIR}"
+
+        # Run evaluation with direct checkpoint path
+        # Python script reads target_shift from checkpoint metadata automatically
+        OUTPUT=$(python -m scripts.bd3lm_eval \
+            --ckpt_dir="${CKPT_DIR}" \
+            ${EVAL_SIZE_ARG} \
+            --output_json="${MODEL_DIR}/eval_result.json" 2>&1)
+
+        EVAL_STATUS=$?
+        echo "$OUTPUT"
+
+        if [ $EVAL_STATUS -eq 0 ]; then
+            # Extract key metrics from JSON
+            if [ -f "${MODEL_DIR}/eval_result.json" ]; then
+                METRICS=$(python -c "
 import json
 with open('${MODEL_DIR}/eval_result.json', 'r') as f:
     result = json.load(f)
@@ -242,32 +357,75 @@ if 'overall_loss' in result:
 else:
     print(f\"{result['loss']:.4f},{result['ppl']:.2f}\")
 " 2>/dev/null)
-            RESULTS+=("${MODEL_NAME}|${METRICS}|OK")
+                RESULTS+=("${MODEL_NAME}|${METRICS}|OK")
+            else
+                RESULTS+=("${MODEL_NAME}|-,-|OK (no JSON)")
+            fi
+
+            if [ "${PUSH_RESULTS}" = "true" ]; then
+                echo "  Uploading ${MODEL_NAME} results to duoduoyeah/eval_results..."
+                python -c "
+import json, os, tempfile, shutil
+from huggingface_hub import upload_folder
+
+model_name = '${MODEL_NAME}'
+run_folder  = '${RUN_FOLDER}'
+model_dir   = '${MODEL_DIR}'
+
+args = {k: v for k, v in {
+    'script':       'eval_bd3lm.sh',
+    'hf_repo':      '${HF_REPO}',
+    'depth':        '${DEPTH}',
+    'variant':      '${VARIANT}',
+    'data_ratio':   '${DATA_RATIO}',
+    'block_size':   '${BLOCK_SIZE}',
+    'adjust':       '${ADJUST}',
+    'total_sequences': '${TOTAL_SEQUENCES}',
+    'num_batches':  '${NUM_BATCHES}',
+    'local_dir':    '${LOCAL_DIR}',
+}.items() if v}
+
+tmp = tempfile.mkdtemp()
+try:
+    shutil.copy(f'{model_dir}/eval_result.json', f'{tmp}/eval_result.json')
+    with open(f'{tmp}/args.json', 'w') as f:
+        json.dump(args, f, indent=2)
+    upload_folder(
+        folder_path=tmp,
+        path_in_repo=f'bd3lm/{model_name}/{run_folder}',
+        repo_id='duoduoyeah/eval_results',
+        repo_type='dataset',
+        token=os.environ.get('HF_TOKEN'),
+        commit_message=f'eval: bd3lm {model_name} {run_folder}',
+    )
+    print(f'  Uploaded to duoduoyeah/eval_results/bd3lm/{model_name}/{run_folder}/')
+finally:
+    shutil.rmtree(tmp)
+" || echo "  Warning: Failed to upload ${MODEL_NAME} results"
+            fi
         else
-            RESULTS+=("${MODEL_NAME}|-,-|OK (no JSON)")
+            RESULTS+=("${MODEL_NAME}|-,-|FAILED")
         fi
-    else
-        RESULTS+=("${MODEL_NAME}|-,-|FAILED")
-    fi
-done
+    done
 
-# ============================================================
-# Step 4: Print summary
-# ============================================================
-echo ""
-echo "============================================================"
-echo "EVALUATION SUMMARY"
-echo "============================================================"
-echo ""
-printf "%-40s | %-10s | %-10s | %-10s\n" "Model" "Loss" "PPL" "Status"
-printf "%s\n" "-------------------------------------------------------------------------"
+    # ============================================================
+    # Step 4: Print summary
+    # ============================================================
+    echo ""
+    echo "============================================================"
+    echo "EVALUATION SUMMARY"
+    echo "============================================================"
+    echo ""
+    printf "%-40s | %-10s | %-10s | %-10s\n" "Model" "Loss" "PPL" "Status"
+    printf "%s\n" "-------------------------------------------------------------------------"
 
-for result in "${RESULTS[@]}"; do
-    IFS='|' read -r model metrics status <<< "$result"
-    IFS=',' read -r loss ppl <<< "$metrics"
-    printf "%-40s | %-10s | %-10s | %-10s\n" "$model" "$loss" "$ppl" "$status"
-done
+    for result in "${RESULTS[@]}"; do
+        IFS='|' read -r model metrics status <<< "$result"
+        IFS=',' read -r loss ppl <<< "$metrics"
+        printf "%-40s | %-10s | %-10s | %-10s\n" "$model" "$loss" "$ppl" "$status"
+    done
 
-echo ""
-echo "Results saved to: ${LOCAL_DIR}/*/eval_result.json"
-echo "============================================================"
+    echo ""
+    echo "Results saved to: ${LOCAL_DIR}/*/eval_result.json"
+    echo "============================================================"
+fi
