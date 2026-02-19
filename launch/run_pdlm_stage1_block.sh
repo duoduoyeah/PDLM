@@ -27,6 +27,8 @@ DEPTH="4"               # model depth
 BLOCK_SIZE="4"          # bucket size (parallel block prediction)
 PREFIX_PURE_TOKENS="0"  # pure prefix tokens for conditioning
 IS_CAUSAL="False"       # bidirectional attention within blocks
+STAGE1_TARGET_MODE="pure"  # "pure" (CE over pure_vocab) or "group" (any_correct_ce over num_groups)
+GRADIENT_TRACK_EVERY="0"  # gradient tracking interval (0 = disabled)
 DRIVE_OUTPUT_FOLDER=""  # subfolder under DRIVE_BASE for outputs (empty = save directly under DRIVE_BASE)
 
 # Common training arguments
@@ -66,6 +68,9 @@ for arg in "$@"; do
         --is_causal=*)
             IS_CAUSAL="${arg#*=}"
             ;;
+        --stage1_target_mode=*)
+            STAGE1_TARGET_MODE="${arg#*=}"
+            ;;
         --max_seq_len=*)
             MAX_SEQ_LEN="${arg#*=}"
             ;;
@@ -81,15 +86,19 @@ for arg in "$@"; do
         --eval_num_batches_final=*)
             EVAL_NUM_BATCHES_FINAL="${arg#*=}"
             ;;
+        --gradient_track_every=*)
+            GRADIENT_TRACK_EVERY="${arg#*=}"
+            ;;
         --drive_output_folder=*)
             DRIVE_OUTPUT_FOLDER="${arg#*=}"
             ;;
         *)
             echo "Unknown argument: $arg"
             echo "Usage: bash launch/run_pdlm_stage1_block.sh [--noise_level=64] [--overlap_k=1] [--num_groups=64]"
-            echo "       [--depth=4] [--block_size=8] [--prefix_pure_tokens=0] [--is_causal=False]"
+            echo "       [--depth=4] [--block_size=8] [--prefix_pure_tokens=0] [--is_causal=False] [--stage1_target_mode=pure]"
             echo "       [--test_mode=true] [--data_ratio=10]"
-            echo "       [--max_seq_len=512] [--device_batch_size=64] [--drive_output_folder=<folder>]"
+            echo "       [--max_seq_len=512] [--device_batch_size=64] [--gradient_track_every=0]"
+            echo "       [--drive_output_folder=<folder>]"
             echo ""
             echo "Use --drive_output_folder to save outputs to a subfolder under DRIVE_BASE"
             exit 1
@@ -103,7 +112,11 @@ TOKENIZER_VARIANT="n${NOISE_LEVEL}_k${OVERLAP_K}_g${NUM_GROUPS}"
 # Build model name
 BASE_MODEL_NAME="pdlm_s1b_d${DEPTH}_b${BLOCK_SIZE}_${TOKENIZER_VARIANT}"
 
-WANDB_GROUP="pdlm_s1b_d${DEPTH}"
+if [ "${GRADIENT_TRACK_EVERY}" != "0" ]; then
+    WANDB_GROUP="s1b_d${DEPTH}_gradient_tracking"
+else
+    WANDB_GROUP="pdlm_s1b_d${DEPTH}"
+fi
 DRIVE_BASE="/content/drive/MyDrive/nanochat"
 
 # Local training base (faster than Drive)
@@ -149,6 +162,7 @@ echo "=== Depth: ${DEPTH} ==="
 echo "=== Block size: ${BLOCK_SIZE} ==="
 echo "=== Prefix pure tokens: ${PREFIX_PURE_TOKENS} ==="
 echo "=== Is causal: ${IS_CAUSAL} ==="
+echo "=== Stage1 target mode: ${STAGE1_TARGET_MODE} ==="
 echo "=== Tokenizer: ${TOKENIZER_VARIANT} (noise=${NOISE_LEVEL}, overlap_k=${OVERLAP_K}, num_groups=${NUM_GROUPS}) ==="
 echo "=== Group tokenizer path: ${GROUP_TOKENIZER_PATH} ==="
 
@@ -224,7 +238,9 @@ python -m scripts.base_train \
     --target_param_data_ratio=${DATA_RATIO} \
     --eval_every=${EVAL_EVERY} \
     --eval_num_batches=${EVAL_NUM_BATCHES} \
-    --eval_num_batches_final=${EVAL_NUM_BATCHES_FINAL}
+    --eval_num_batches_final=${EVAL_NUM_BATCHES_FINAL} \
+    --stage1_target_mode=${STAGE1_TARGET_MODE} \
+    --gradient_track_every=${GRADIENT_TRACK_EVERY}
 
 # ============================================================
 # Post-training: copy to Drive

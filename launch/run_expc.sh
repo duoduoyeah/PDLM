@@ -200,10 +200,14 @@ print(f'Token map: pure_vocab={tm.pure_vocab_size}, num_groups={tm.num_groups}, 
 # Prepare report
 python -m nanochat.report reset
 
-# Download dataset to local base dir
-echo "Downloading dataset to local base dir..."
-python -m nanochat.dataset -n 10 --split both
-echo "Dataset download complete."
+# Download dataset to local base dir (skip if already exists)
+if [ -d "${NANOCHAT_BASE_DIR}/simple_story_data" ]; then
+    echo "Dataset already exists, skipping download."
+else
+    echo "Downloading dataset to local base dir..."
+    python -m nanochat.dataset -n 10 --split both
+    echo "Dataset download complete."
+fi
 
 # ============================================================
 # Training - PDLM Stage 2 (Group → Pure)

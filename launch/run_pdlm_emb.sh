@@ -1,35 +1,27 @@
 #!/bin/bash
 
-## Block-PDLM Training Script
-## Single-pass model that performs:
-##   - Stage 1 (Block→Block: position k in block i predicts group at position k in block i+1)
-##   - Stage 2 (Group → Pure denoising) on the first L positions
+## PDLM Embedding Training Script
+## Replaces discrete group token IDs with continuous averaged embeddings as noise input.
+## Constructs norm(mean(norm(wte(tok_i)) for tok_i in noise_set)) at block positions.
+## Eliminates group tokenizer infrastructure entirely — no clustering, no token_maps.pt.
 ##
 ## Architecture uses 2L input: [xt | x0] with block diffusion mask.
-## Stage 1 uses block→block prediction via lm_head (no MTP head).
-##
-## Tokenizer naming: n{noise}_k{overlap_k}_g{num_groups}
-##   - noise_level: tokens per final group (e.g., 64, 1024)
-##   - overlap_k: how many groups each token appears in
-##   - num_groups: number of final groups
+## wte: pure_vocab_size only, lm_head: pure_vocab_size
 ##
 ## Usage:
-##   bash launch/run_block_pdlm.sh --noise_level=64 --overlap_k=1 --num_groups=64
-##   bash launch/run_block_pdlm.sh --noise_level=1024 --overlap_k=7 --num_groups=28 --depth=8
-##   bash launch/run_block_pdlm.sh --noise_level=64 --num_groups=64 --test_mode=false --data_ratio=20
+##   bash launch/run_pdlm_emb.sh
+##   bash launch/run_pdlm_emb.sh --noise_count=64 --depth=4 --block_size=4
+##   bash launch/run_pdlm_emb.sh --test_mode=false --data_ratio=20
 
 # ============================================================
 # Default values
 # ============================================================
-NOISE_LEVEL="64"           # tokens per final group
-OVERLAP_K="1"              # how many groups each token appears in
-NUM_GROUPS="64"            # number of final groups
+NOISE_COUNT="64"           # total tokens in noise average (including target)
 TEST_MODE="true"
 DATA_RATIO="10"            # default 10 for test mode
 DEPTH="4"                  # model depth
 BLOCK_SIZE="4"             # bucket_size for block diffusion
-MTP_LOSS_WEIGHT="1.0"      # Stage 1 loss weight relative to Stage 2
-LOSS_WEIGHT_MODE="manual"  # "manual" or "fixed" - fixed computes weight from warmup batches
+SOFT_P_WITHIN="1.0"        # prob of including correct target in noise (1.0 = always include)
 DRIVE_OUTPUT_FOLDER=""     # subfolder under DRIVE_BASE for outputs (empty = save directly under DRIVE_BASE)
 GRADIENT_TRACK_EVERY="0"   # 0 = disabled, >0 = log gradient metrics every N steps
 
@@ -43,14 +35,8 @@ EVAL_NUM_BATCHES_FINAL="100"
 # Parse named arguments
 for arg in "$@"; do
     case $arg in
-        --noise_level=*)
-            NOISE_LEVEL="${arg#*=}"
-            ;;
-        --overlap_k=*)
-            OVERLAP_K="${arg#*=}"
-            ;;
-        --num_groups=*)
-            NUM_GROUPS="${arg#*=}"
+        --noise_count=*)
+            NOISE_COUNT="${arg#*=}"
             ;;
         --test_mode=*)
             TEST_MODE="${arg#*=}"
@@ -64,11 +50,8 @@ for arg in "$@"; do
         --block_size=*)
             BLOCK_SIZE="${arg#*=}"
             ;;
-        --mtp_loss_weight=*)
-            MTP_LOSS_WEIGHT="${arg#*=}"
-            ;;
-        --loss_weight_mode=*)
-            LOSS_WEIGHT_MODE="${arg#*=}"
+        --soft_p_within=*)
+            SOFT_P_WITHIN="${arg#*=}"
             ;;
         --max_seq_len=*)
             MAX_SEQ_LEN="${arg#*=}"
@@ -93,42 +76,28 @@ for arg in "$@"; do
             ;;
         *)
             echo "Unknown argument: $arg"
-            echo "Usage: bash launch/run_block_pdlm.sh [--noise_level=64] [--overlap_k=1] [--num_groups=64]"
-            echo "       [--depth=4] [--block_size=8] [--mtp_loss_weight=1.0] [--loss_weight_mode=manual]"
+            echo "Usage: bash launch/run_pdlm_emb.sh [--noise_count=64] [--depth=4] [--block_size=4]"
             echo "       [--test_mode=true] [--data_ratio=10]"
             echo "       [--max_seq_len=512] [--device_batch_size=64]"
             echo "       [--drive_output_folder=<folder>]"
-            echo ""
-            echo "Tokenizer naming: n{noise}_k{overlap_k}_g{num_groups}"
-            echo "Examples: n64_k1_g64, n1024_k7_g28, n1024_k55_g220"
-            echo ""
-            echo "Parameters:"
-            echo "  --noise_level       Tokens per final group (e.g., 64, 1024)"
-            echo "  --overlap_k         How many groups each token appears in"
-            echo "  --num_groups        Number of final groups"
-            echo "  --block_size        Bucket size for block diffusion"
-            echo "  --mtp_loss_weight   Stage 1 loss weight relative to Stage 2 (used when loss_weight_mode=manual)"
-            echo "  --loss_weight_mode  'manual' (use mtp_loss_weight) or 'fixed' (compute from warmup batches)"
-            echo "  --drive_output_folder  Save outputs to subfolder under DRIVE_BASE"
             exit 1
             ;;
     esac
 done
 
-# Build tokenizer variant name (matches folder naming convention)
-TOKENIZER_VARIANT="n${NOISE_LEVEL}_k${OVERLAP_K}_g${NUM_GROUPS}"
-
 # Build model name
-BASE_MODEL_NAME="block_pdlm_d${DEPTH}_b${BLOCK_SIZE}_${TOKENIZER_VARIANT}"
+BASE_MODEL_NAME="pdlm_emb_d${DEPTH}_b${BLOCK_SIZE}_nc${NOISE_COUNT}"
 
-WANDB_GROUP="block_pdlm_d${DEPTH}"
+WANDB_GROUP="pdlm_emb_d${DEPTH}"
 DRIVE_BASE="/content/drive/MyDrive/nanochat"
 
 # Local training base (faster than Drive)
-LOCAL_TRAIN_BASE="/content/block_pdlm_temp_train"
+LOCAL_TRAIN_BASE="/content/pdlm_emb_temp_train"
 
-# Group tokenizer path on Drive
-GROUP_TOKENIZER_PATH="${DRIVE_BASE}/group_tokenizers/${TOKENIZER_VARIANT}"
+# Tokenizer path: any existing group tokenizer folder that contains tokenizer.pkl
+# For pdlm_emb we only need tokenizer.pkl (no token_maps.pt)
+# Default: look for a common tokenizer location
+TOKENIZER_SOURCE="${DRIVE_BASE}/group_tokenizers"
 
 # Load secrets from .env file
 if [ -f "launch/.env" ]; then
@@ -157,7 +126,7 @@ export DEPTH
 export WANDB_GROUP
 export NANOCHAT_BASE_DIR="${LOCAL_TRAIN_BASE}/${MODEL_NAME}"
 
-echo "=== Running Combined PDLM (block_pdlm): ${MODEL_NAME} ==="
+echo "=== Running PDLM Embedding: ${MODEL_NAME} ==="
 echo "=== Local base dir: ${NANOCHAT_BASE_DIR} ==="
 echo "=== Drive base: ${DRIVE_BASE} ==="
 echo "=== Drive output folder: ${DRIVE_OUTPUT_FOLDER:-<root>} ==="
@@ -165,21 +134,12 @@ echo "=== Test mode: ${TEST_MODE} ==="
 echo "=== Data ratio: ${DATA_RATIO} ==="
 echo "=== Depth: ${DEPTH} ==="
 echo "=== Block size (bucket): ${BLOCK_SIZE} ==="
-echo "=== MTP loss weight: ${MTP_LOSS_WEIGHT} ==="
-echo "=== Loss weight mode: ${LOSS_WEIGHT_MODE} ==="
-echo "=== Tokenizer: ${TOKENIZER_VARIANT} (noise=${NOISE_LEVEL}, overlap_k=${OVERLAP_K}, num_groups=${NUM_GROUPS}) ==="
-echo "=== Group tokenizer path: ${GROUP_TOKENIZER_PATH} ==="
+echo "=== Noise count: ${NOISE_COUNT} ==="
+echo "=== Soft p within: ${SOFT_P_WITHIN} ==="
 
 # ============================================================
 # Setup (run once per model)
 # ============================================================
-
-# Verify group tokenizer exists on Drive
-if [ ! -f "${GROUP_TOKENIZER_PATH}/token_maps.pt" ]; then
-    echo "ERROR: Group tokenizer not found at ${GROUP_TOKENIZER_PATH}"
-    echo "Run build_group_tokenizer.sh first to generate group tokenizers"
-    exit 1
-fi
 
 # Handle existing local model dir
 if [ -d "${NANOCHAT_BASE_DIR}" ]; then
@@ -197,23 +157,34 @@ fi
 # Create local base directory
 mkdir -p "${NANOCHAT_BASE_DIR}/tokenizer"
 
-# Copy tokenizer files from Drive to local (group tokenizer is self-contained)
-echo "Copying tokenizer files from Drive to local..."
-cp "${GROUP_TOKENIZER_PATH}/tokenizer.pkl" "${NANOCHAT_BASE_DIR}/tokenizer/"
-cp "${GROUP_TOKENIZER_PATH}/token_maps.pt" "${NANOCHAT_BASE_DIR}/tokenizer/"
+# Copy tokenizer.pkl from any existing group tokenizer folder
+# pdlm_emb does NOT need token_maps.pt
+echo "Looking for tokenizer.pkl..."
+FOUND_TOKENIZER=""
+if [ -d "${TOKENIZER_SOURCE}" ]; then
+    # Find first available tokenizer.pkl in any group tokenizer subfolder
+    for dir in "${TOKENIZER_SOURCE}"/*/; do
+        if [ -f "${dir}tokenizer.pkl" ]; then
+            FOUND_TOKENIZER="${dir}tokenizer.pkl"
+            break
+        fi
+    done
+fi
 
-echo "Tokenizer setup complete:"
+if [ -n "${FOUND_TOKENIZER}" ]; then
+    echo "Copying tokenizer from: ${FOUND_TOKENIZER}"
+    cp "${FOUND_TOKENIZER}" "${NANOCHAT_BASE_DIR}/tokenizer/"
+else
+    echo "ERROR: No tokenizer.pkl found in ${TOKENIZER_SOURCE}"
+    echo "Please ensure at least one group tokenizer has been built, or copy tokenizer.pkl manually."
+    exit 1
+fi
+
+echo "Tokenizer setup complete (no token_maps.pt needed for pdlm_emb):"
 ls -la "${NANOCHAT_BASE_DIR}/tokenizer/"
 
 # Validate base dir
 python -c "from nanochat.common import get_base_dir; print('Base dir:', get_base_dir())"
-
-# Validate token map
-python -c "
-from nanochat.group_tokenizer.token_map import get_token_map
-tm = get_token_map()
-print(f'Token map: pure_vocab={tm.pure_vocab_size}, num_groups={tm.num_groups}, overlap_k={tm.overlap_k}')
-"
 
 # Prepare report
 python -m nanochat.report reset
@@ -228,19 +199,19 @@ else
 fi
 
 # ============================================================
-# Training - Combined PDLM (block_pdlm)
+# Training - PDLM Embedding
 # ============================================================
 
-echo "Starting Combined PDLM (block_pdlm) training..."
+echo "Starting PDLM Embedding training..."
 python -m scripts.base_train \
     --run="${MODEL_NAME}" \
     --wandb_group="${WANDB_GROUP}" \
     --model_type=pdlm \
-    --pdlm_stage=both_block \
+    --pdlm_stage=pdlm_emb \
     --depth=${DEPTH} \
     --block_size=${BLOCK_SIZE} \
-    --mtp_loss_weight=${MTP_LOSS_WEIGHT} \
-    --loss_weight_mode=${LOSS_WEIGHT_MODE} \
+    --noise_count=${NOISE_COUNT} \
+    --soft_p_within=${SOFT_P_WITHIN} \
     --max_seq_len=${MAX_SEQ_LEN} \
     --device_batch_size=${DEVICE_BATCH_SIZE} \
     --target_param_data_ratio=${DATA_RATIO} \

@@ -28,6 +28,12 @@ def build_result_dict(metrics_by_pos, block_size, include_accuracy=False):
         "positions": {},
     }
 
+    # Entropy-based perplexity (distribution confidence, target-independent)
+    if "entropy" in metrics_by_pos[0]:
+        total_entropy = sum(metrics_by_pos[p]["entropy"] for p in range(block_size))
+        avg_entropy = total_entropy / total_tokens if total_tokens > 0 else 0.0
+        result["overall_entropy_ppl"] = torch.exp(torch.tensor(avg_entropy)).item()
+
     if include_accuracy:
         total_correct = sum(metrics_by_pos[p]["correct"] for p in range(block_size))
         result["overall_accuracy"] = total_correct / total_tokens if total_tokens > 0 else 0.0
@@ -49,6 +55,10 @@ def build_position_result(pos_metrics, include_accuracy=False):
         "ppl": torch.exp(torch.tensor(loss)).item(),
         "tokens": tokens,
     }
+
+    if "entropy" in pos_metrics:
+        avg_entropy = pos_metrics["entropy"] / tokens if tokens > 0 else 0.0
+        result["entropy_ppl"] = torch.exp(torch.tensor(avg_entropy)).item()
 
     if include_accuracy:
         correct = pos_metrics["correct"]

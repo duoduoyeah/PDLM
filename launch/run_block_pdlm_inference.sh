@@ -1,22 +1,19 @@
 #!/bin/bash
 
-## Block-PDLM Training Script
-## Single-pass model that performs:
-##   - Stage 1 (Block→Block: position k in block i predicts group at position k in block i+1)
-##   - Stage 2 (Group → Pure denoising) on the first L positions
+## Block-PDLM Inference Training Script
+## New variant that trains Stage 2 with mixed pure/group inputs.
+## All targets are pure tokens (pure-target mode for both stages).
+## Enables iterative inference: 5 steps per block (1 stage-1 + 4 denoising steps).
 ##
 ## Architecture uses 2L input: [xt | x0] with block diffusion mask.
-## Stage 1 uses block→block prediction via lm_head (no MTP head).
+## wte: pure_vocab_size + num_groups, lm_head: pure_vocab_size
 ##
 ## Tokenizer naming: n{noise}_k{overlap_k}_g{num_groups}
-##   - noise_level: tokens per final group (e.g., 64, 1024)
-##   - overlap_k: how many groups each token appears in
-##   - num_groups: number of final groups
 ##
 ## Usage:
-##   bash launch/run_block_pdlm.sh --noise_level=64 --overlap_k=1 --num_groups=64
-##   bash launch/run_block_pdlm.sh --noise_level=1024 --overlap_k=7 --num_groups=28 --depth=8
-##   bash launch/run_block_pdlm.sh --noise_level=64 --num_groups=64 --test_mode=false --data_ratio=20
+##   bash launch/run_block_pdlm_inference.sh --noise_level=64 --overlap_k=1 --num_groups=64
+##   bash launch/run_block_pdlm_inference.sh --noise_level=1024 --overlap_k=7 --num_groups=28 --depth=8
+##   bash launch/run_block_pdlm_inference.sh --noise_level=64 --num_groups=64 --test_mode=false --data_ratio=20
 
 # ============================================================
 # Default values
@@ -30,6 +27,7 @@ DEPTH="4"                  # model depth
 BLOCK_SIZE="4"             # bucket_size for block diffusion
 MTP_LOSS_WEIGHT="1.0"      # Stage 1 loss weight relative to Stage 2
 LOSS_WEIGHT_MODE="manual"  # "manual" or "fixed" - fixed computes weight from warmup batches
+SOFT_P_WITHIN="1.0"        # prob of correct group mapping (1.0 = hard, <1.0 = soft)
 DRIVE_OUTPUT_FOLDER=""     # subfolder under DRIVE_BASE for outputs (empty = save directly under DRIVE_BASE)
 GRADIENT_TRACK_EVERY="0"   # 0 = disabled, >0 = log gradient metrics every N steps
 
@@ -51,6 +49,9 @@ for arg in "$@"; do
             ;;
         --num_groups=*)
             NUM_GROUPS="${arg#*=}"
+            ;;
+        --soft_p_within=*)
+            SOFT_P_WITHIN="${arg#*=}"
             ;;
         --test_mode=*)
             TEST_MODE="${arg#*=}"
@@ -93,23 +94,11 @@ for arg in "$@"; do
             ;;
         *)
             echo "Unknown argument: $arg"
-            echo "Usage: bash launch/run_block_pdlm.sh [--noise_level=64] [--overlap_k=1] [--num_groups=64]"
-            echo "       [--depth=4] [--block_size=8] [--mtp_loss_weight=1.0] [--loss_weight_mode=manual]"
+            echo "Usage: bash launch/run_block_pdlm_inference.sh [--noise_level=64] [--overlap_k=1] [--num_groups=64]"
+            echo "       [--soft_p_within=1.0] [--depth=4] [--block_size=4] [--mtp_loss_weight=1.0] [--loss_weight_mode=manual]"
             echo "       [--test_mode=true] [--data_ratio=10]"
             echo "       [--max_seq_len=512] [--device_batch_size=64]"
             echo "       [--drive_output_folder=<folder>]"
-            echo ""
-            echo "Tokenizer naming: n{noise}_k{overlap_k}_g{num_groups}"
-            echo "Examples: n64_k1_g64, n1024_k7_g28, n1024_k55_g220"
-            echo ""
-            echo "Parameters:"
-            echo "  --noise_level       Tokens per final group (e.g., 64, 1024)"
-            echo "  --overlap_k         How many groups each token appears in"
-            echo "  --num_groups        Number of final groups"
-            echo "  --block_size        Bucket size for block diffusion"
-            echo "  --mtp_loss_weight   Stage 1 loss weight relative to Stage 2 (used when loss_weight_mode=manual)"
-            echo "  --loss_weight_mode  'manual' (use mtp_loss_weight) or 'fixed' (compute from warmup batches)"
-            echo "  --drive_output_folder  Save outputs to subfolder under DRIVE_BASE"
             exit 1
             ;;
     esac
@@ -118,14 +107,19 @@ done
 # Build tokenizer variant name (matches folder naming convention)
 TOKENIZER_VARIANT="n${NOISE_LEVEL}_k${OVERLAP_K}_g${NUM_GROUPS}"
 
-# Build model name
-BASE_MODEL_NAME="block_pdlm_d${DEPTH}_b${BLOCK_SIZE}_${TOKENIZER_VARIANT}"
+# Build model name (include soft value if not 1.0)
+SOFT_INT=$(python3 -c "print(int(float('${SOFT_P_WITHIN}') * 100))")
+if [ "${SOFT_P_WITHIN}" = "1.0" ]; then
+    BASE_MODEL_NAME="block_pdlm_inference_d${DEPTH}_b${BLOCK_SIZE}_${TOKENIZER_VARIANT}"
+else
+    BASE_MODEL_NAME="block_pdlm_inference_d${DEPTH}_b${BLOCK_SIZE}_${TOKENIZER_VARIANT}_soft${SOFT_INT}"
+fi
 
-WANDB_GROUP="block_pdlm_d${DEPTH}"
+WANDB_GROUP="block_pdlm_inference_d${DEPTH}"
 DRIVE_BASE="/content/drive/MyDrive/nanochat"
 
 # Local training base (faster than Drive)
-LOCAL_TRAIN_BASE="/content/block_pdlm_temp_train"
+LOCAL_TRAIN_BASE="/content/block_pdlm_inference_temp_train"
 
 # Group tokenizer path on Drive
 GROUP_TOKENIZER_PATH="${DRIVE_BASE}/group_tokenizers/${TOKENIZER_VARIANT}"
@@ -157,7 +151,7 @@ export DEPTH
 export WANDB_GROUP
 export NANOCHAT_BASE_DIR="${LOCAL_TRAIN_BASE}/${MODEL_NAME}"
 
-echo "=== Running Combined PDLM (block_pdlm): ${MODEL_NAME} ==="
+echo "=== Running Block PDLM Inference: ${MODEL_NAME} ==="
 echo "=== Local base dir: ${NANOCHAT_BASE_DIR} ==="
 echo "=== Drive base: ${DRIVE_BASE} ==="
 echo "=== Drive output folder: ${DRIVE_OUTPUT_FOLDER:-<root>} ==="
@@ -167,6 +161,7 @@ echo "=== Depth: ${DEPTH} ==="
 echo "=== Block size (bucket): ${BLOCK_SIZE} ==="
 echo "=== MTP loss weight: ${MTP_LOSS_WEIGHT} ==="
 echo "=== Loss weight mode: ${LOSS_WEIGHT_MODE} ==="
+echo "=== soft_p_within: ${SOFT_P_WITHIN} ==="
 echo "=== Tokenizer: ${TOKENIZER_VARIANT} (noise=${NOISE_LEVEL}, overlap_k=${OVERLAP_K}, num_groups=${NUM_GROUPS}) ==="
 echo "=== Group tokenizer path: ${GROUP_TOKENIZER_PATH} ==="
 
@@ -228,19 +223,20 @@ else
 fi
 
 # ============================================================
-# Training - Combined PDLM (block_pdlm)
+# Training - Block PDLM Inference
 # ============================================================
 
-echo "Starting Combined PDLM (block_pdlm) training..."
+echo "Starting Block PDLM Inference training with soft_p_within=${SOFT_P_WITHIN}..."
 python -m scripts.base_train \
     --run="${MODEL_NAME}" \
     --wandb_group="${WANDB_GROUP}" \
     --model_type=pdlm \
-    --pdlm_stage=both_block \
+    --pdlm_stage=block_pdlm_inference \
     --depth=${DEPTH} \
     --block_size=${BLOCK_SIZE} \
     --mtp_loss_weight=${MTP_LOSS_WEIGHT} \
     --loss_weight_mode=${LOSS_WEIGHT_MODE} \
+    --soft_p_within=${SOFT_P_WITHIN} \
     --max_seq_len=${MAX_SEQ_LEN} \
     --device_batch_size=${DEVICE_BATCH_SIZE} \
     --target_param_data_ratio=${DATA_RATIO} \

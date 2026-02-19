@@ -167,6 +167,10 @@ class PDLMConfig:
 
 **Overlap semantics**: When overlap_k > 1, during training the model may see different group tokens for the same pure target. This tests whether the model can learn to denoise regardless of which group is given.
 
+### Soft Mapping (`soft_p_within`)
+
+During Stage 2 training, each block position's input group token is the correct group (containing the target pure token) with probability `soft_p_within`, and a uniformly random group with probability `1 - soft_p_within`. When `soft_p_within = 1.0` (default), every input group is guaranteed correct — hard mapping. When `soft_p_within < 1.0`, some positions receive a wrong group that carries no signal about the target, forcing the model to rely on context rather than the group hint alone. A model trained with `soft_p_within = 1.0` is a prerequisite — it must be trained first before experimenting with lower values. This is orthogonal to overlap_k: overlap controls how many groups a token belongs to, while soft_p_within controls whether the input group is even one of those correct groups.
+
 ### Models to Train
 
 | Model | num_groups | block_size | Notes |

@@ -1,3 +1,21 @@
+02/10
+1. the ppl, re-talking this stuff
+2. the api about wandb?
+
+02/08
+1. pdlm-mask, s1 pure
+2. pdlm-block,s1 pure
+
+02/07
+1. perpelxity, use new ppl, ask the bd3lm it use which kind of ppl -> so wierd
+2. s1b, block target
+3. block pdlm, with gradient check 
+
+02/06
+1. continue read the funnel transfer one
+2. impl gradient tracking for s1b model
+3. continue on stage_disambiguation
+
 02/05
 1. for splitting, we could use gpt eval on some text, and then read them, what do you think 
 

@@ -125,6 +125,12 @@ Beyond gradient **magnitude** (how much each group pushes), we can measure gradi
 
 **Key detail:** gradient compatibility can differ by depth. Two groups may agree in early layers but conflict in late layers (or vice versa). Always check the profile, not a single layer.
 
+**Observation: cosine similarity decreases over training in both models.**
+- PDLM: e.g., `cos_pos0_pos1` goes from 0.55 → 0.35
+- GPT: e.g., `cos_pos0_pos1` goes from 0.38 → 0.03
+
+Early in training, all positions learn the same basics (vocabulary, common patterns), so gradients are more aligned. As training progresses, each position specializes — focusing on its own challenges rather than shared structure.
+
 ## Key Insight
 
 From multitask_learning.md: **gradient magnitude determines what drives optimization, not loss value.** A position with 2x higher loss might contribute 10x less to parameter updates if its gradients are smaller.
