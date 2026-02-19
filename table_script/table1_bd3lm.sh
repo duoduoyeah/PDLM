@@ -25,6 +25,7 @@ BD3LM_REPO="duoduoyeah/bd3lm_d8"
 BD3LM_MODEL="bd3lm_d8_b4_normal_r40"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 OUT_DIR="${SCRIPT_DIR}/results/table1_bd3lm"
+TMP_BASE="${SCRATCH:-/tmp}"
 
 mkdir -p "${OUT_DIR}"
 
@@ -37,9 +38,10 @@ bash launch/eval_bd3lm.sh \
     --repo="${BD3LM_REPO}" \
     --model="${BD3LM_MODEL}" \
     --total_sequences=${TOTAL_SEQ} \
-    --local_dir="/tmp/table1_bd3lm/bd3lm"
+    --local_dir="${TMP_BASE}/table1_bd3lm/bd3lm" \
+    --push_results
 
-cp "/tmp/table1_bd3lm/bd3lm/${BD3LM_MODEL}/eval_result.json" \
+cp "${TMP_BASE}/table1_bd3lm/bd3lm/${BD3LM_MODEL}/eval_result.json" \
    "${OUT_DIR}/bd3lm_normal.json"
 
 # ============================================================
