@@ -990,10 +990,9 @@ class PDLM(nn.Module):
         D = x.size(-1)
         block_start = 0  # pdlm_emb uses prefix_sliding_tokens=0
 
-        noise_embs = self.transformer.wte(noise_tokens.reshape(-1))  # (B*block_len*nc, D)
-        noise_embs = noise_embs.view(B_n * block_region_len, noise_count, D)
-        noise_embs = norm(noise_embs)
-        avg_embs = norm(noise_embs.mean(dim=1)).view(B_n, block_region_len, D)
+        norm_of_emb = norm(self.transformer.wte.weight)  # (vocab_size, D)
+        noise_embs = norm_of_emb[noise_tokens]  # (B, block_region_len, noise_count, D)
+        avg_embs = norm(noise_embs.mean(dim=2)).view(B_n, block_region_len, D)
         x[:, block_start:block_start + block_region_len] = avg_embs
 
         for block in self.transformer.h:
@@ -1053,10 +1052,9 @@ class PDLM(nn.Module):
         D = x.size(-1)
         block_start = 0
 
-        noise_embs = self.transformer.wte(noise_tokens.reshape(-1))
-        noise_embs = noise_embs.view(B_n * block_region_len, noise_count, D)
-        noise_embs = norm(noise_embs)
-        avg_embs = norm(noise_embs.mean(dim=1)).view(B_n, block_region_len, D)
+        norm_of_emb = norm(self.transformer.wte.weight)  # (vocab_size, D)
+        noise_embs = norm_of_emb[noise_tokens]  # (B, block_region_len, noise_count, D)
+        avg_embs = norm(noise_embs.mean(dim=2)).view(B_n, block_region_len, D)
         x[:, block_start:block_start + block_region_len] = avg_embs
 
         for block in self.transformer.h:

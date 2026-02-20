@@ -203,9 +203,9 @@ def _eval_end2end(model, cached_batches, block_size, attn_mask, device, autocast
                 nll_by_pos[denoise_step]["entropy"] += entropy[pos_masks[denoise_step]].sum().item()
                 nll_by_pos[denoise_step]["tokens"] += pos_masks[denoise_step].sum().item()
 
-                # Sample pure token at denoise_step position of all target blocks
-                sampled = logits.argmax(dim=-1)  # (B, T)
-                eval_inputs[pos_masks[denoise_step]] = sampled[pos_masks[denoise_step]]
+                # Use ground truth pure token at denoise_step position (teacher forcing on P)
+                # Previous positions' errors must not propagate — same principle as AR eval
+                eval_inputs[pos_masks[denoise_step]] = targets[pos_masks[denoise_step]]
 
                 # Collapse remaining positions back to groups
                 if denoise_step < block_size - 1:

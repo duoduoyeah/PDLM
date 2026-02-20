@@ -1,3 +1,6 @@
+02/20
+* mask pdlm for different block size
+
 02/10
 1. the ppl, re-talking this stuff
 2. the api about wandb?
