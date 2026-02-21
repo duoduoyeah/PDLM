@@ -18,6 +18,9 @@ command -v uv &> /dev/null || { curl -LsSf https://astral.sh/uv/install.sh | sh 
 # Python env (builds rustbpe via maturin; requires Rust)
 # ============================================================
 cd ~/PDLM
+source launch/.env
+export HF_TOKEN
+
 uv venv $SCRATCH/.venv_pdlm
 source $SCRATCH/.venv_pdlm/bin/activate
 uv sync --extra gpu
