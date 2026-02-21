@@ -27,3 +27,11 @@ A pure token is noised by averaging its embedding with 63 randomly sampled token
 ## Why This Experiment
 
 Unlike experiment_c where groups are fixed clusters, here the noising is random — each token gets a different set of 63 random companions every time. There's no fixed group structure to memorize, just a noise level. The question is whether the transformer can learn to extract the original token's signal from an arbitrary random average.
+
+## Three Key Features
+
+1. **Intermediate state** (`pdlm.py`): Block positions are replaced by `norm(mean(norm(wte(noise_tokens))))` — a continuous intermediate derived directly from the embedding space rather than a discrete group token.
+
+2. **Boundary-aligned splitting** (`long_splitting_to_fix_length_tensor.md`): Text is split at punctuation/whitespace boundaries so block boundaries align with natural sentence/clause breaks, minimizing cross-boundary information loss.
+
+3. **Bubble padding** (`dataloader_pdlm.py`, TODO): When a sequence is shorter than a full block, pad tokens are scattered randomly within the sequence rather than appended at the end, so every pad position retains real context on both sides.
