@@ -15,23 +15,12 @@ export UV_CACHE_DIR=$SCRATCH/.uv_cache
 command -v uv &> /dev/null || { curl -LsSf https://astral.sh/uv/install.sh | sh && source $HOME/.local/bin/env; }
 
 # ============================================================
-# Clone repo
-# ============================================================
-cd $SCRATCH
-git clone git@github.com:duoduoyeah/PDLM.git repo_table1_ar
-cd repo_table1_ar
-
-# ============================================================
 # Python env (builds rustbpe via maturin; requires Rust)
 # ============================================================
-uv venv
+cd ~/PDLM
+uv venv $SCRATCH/.venv_pdlm
+source $SCRATCH/.venv_pdlm/bin/activate
 uv sync --extra gpu
-source .venv/bin/activate
-
-# ============================================================
-# Copy secrets (not in git)
-# ============================================================
-cp ~/PDLM/launch/.env launch/.env
 
 # ============================================================
 # Run
