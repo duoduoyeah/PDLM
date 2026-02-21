@@ -5,7 +5,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=50G
 #SBATCH --time=2:00:00
-#SBATCH --output=table1_ar_%j.out
+#SBATCH --output=/rhome/sli588/temp/table1_ar_%j.out
 
 # ============================================================
 # Setup
@@ -15,23 +15,15 @@ export UV_CACHE_DIR=$SCRATCH/.uv_cache
 command -v uv &> /dev/null || { curl -LsSf https://astral.sh/uv/install.sh | sh && source $HOME/.local/bin/env; }
 
 # ============================================================
-# Clone repo
-# ============================================================
-cd $SCRATCH
-git clone git@github.com:duoduoyeah/PDLM.git repo_table1_ar
-cd repo_table1_ar
-
-# ============================================================
 # Python env (builds rustbpe via maturin; requires Rust)
 # ============================================================
-uv venv
-uv sync --extra gpu
-source .venv/bin/activate
+cd ~/PDLM
+source launch/.env
+export HF_TOKEN
 
-# ============================================================
-# Copy secrets (not in git)
-# ============================================================
-cp ~/PDLM/launch/.env launch/.env
+uv venv $SCRATCH/.venv_pdlm
+source $SCRATCH/.venv_pdlm/bin/activate
+uv sync --extra gpu
 
 # ============================================================
 # Run
