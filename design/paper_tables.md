@@ -2,45 +2,27 @@
 
 All experiments use data-to-parameter ratio 40. Model size 30M. Dataset: TinyStories.
 
-## Tier 1 — Must Have
-
-### Table 1+2: Exp A/B (Analysis section)
+## Table 1+2: Exp A/B (Analysis section)
 - **Purpose**: Show distance degrades prediction, mask tokens don't help
 - **Rows**: target_shift / position k (1, 2, 3, 4)
-- **Columns**: AR loss (target_shift=k), BD3-LM loss (predict i+k with mask fill), accuracy
-- **Models needed**: AR (GPT-2) with target_shift 1-4, BD3-LM with block_size 4
+- **Columns**: AR loss (target_shift=k), BD3-LM loss (predict i+k with mask fill)
+- **Models needed**: AR with target_shift 1-4, BD3-LM with block_size 4
 
-### Table 4: Comparison — PDLM vs BD3-LM vs AR
-- **Purpose**: Headline result, head-to-head comparison
-- **Rows**: PDLM, BD3-LM, AR
-- **Columns**: perplexity, accuracy
-- **Models needed**: PDLM (both stages), BD3-LM, AR baseline
+## Table 3: Exp C + D — Group tokens as noisy intermediates
+- **Purpose**: Show group tokens carry real info (exp-c), and stage 1 can produce them (exp-d)
+- **Rows**: num_groups (16, 64, 256, 1024) × position (avg, pos0, pos1, pos2, pos3)
+- **Columns**: Oracle PPL (exp-c, ground truth G given), Acc (exp-d, stage-1 group prediction accuracy)
+- **Models needed**: mask-PDLM with different num_groups, fixed block_size=4, overlap_k=1
 
-## Tier 2 — Important
+## Table 4: End-to-End Results — PDLM vs BD3-LM vs AR
+- **Purpose**: Headline result; also shows block size effect folded in
+- **Rows**: AR (no block size), BD3-LM × block_size (2,4,8,16), PDLM × block_size (2,4,8,16)
+- **Columns**: PPL (realistic decoding: predicted G, ground truth P), Entropy PPL (target-free)
+- **Metric note**: PPL uses teacher-forced P but model-predicted G from previous step (not oracle). Using ground truth G would reduce to exp-c and be artificially lower.
+- **Models needed**: AR, BD3-LM with block_size 2/4/8/16, mask-PDLM with block_size 2/4/8/16
 
-### Table 3: Exp C + D — Group tokens help, and stage 1 can produce them
-- **Purpose**: Show group tokens improve prediction at different noise levels (exp-c), and that stage 1 reliably transitions mask→group (exp-d); unified by num_groups axis
-- **Rows**: num_groups (16, 64, 256, 1024)
-- **Columns**: oracle accuracy (exp-c: group tokens given), transition success rate (exp-d: predicted group contains target), end-to-end accuracy (stage1+stage2 chained)
-- **Models needed**: PDLM stage2 with different num_groups (exp-c), PDLM stage1 with different num_groups (exp-d), fixed block_size=4, overlap_k=1
-
-### Table 6: Per-position breakdown
-- **Purpose**: Show where group tokens help most
-- **Rows**: position (i+1, i+2, i+3, i+4)
-- **Columns**: AR accuracy, BD3-LM accuracy, PDLM accuracy
-- **Models needed**: same as Table 4, just different eval
-
-## Tier 3 — Nice to Have
-
-### Table 5: Ablation — block size
-- **Purpose**: Quality vs block size tradeoff
-- **Rows**: block_size (4, 8)
-- **Columns**: perplexity, accuracy
-- **Models needed**: PDLM with block_size 4 and 8
-
-### Table 7: Qualitative — blind head-to-head judging
-- **Purpose**: Show generation quality beyond perplexity
-- **Rows**: PDLM, BD3-LM, AR
-- **Columns**: coherence, grammar, quality
-- **Method**: same prefix, three models generate, judge scores blindly
-- **Models needed**: same as Table 4, plus eval pipeline
+## Robustness: Group Granularity
+- **Purpose**: Show PDLM is not sensitive to num_groups (group token is an intermediate step, not final design)
+- **Rows**: num_groups (64, 256, 1024)
+- **Columns**: PPL
+- **Models needed**: mask-PDLM with different num_groups, fixed block_size=4
