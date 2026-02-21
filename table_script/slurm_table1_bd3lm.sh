@@ -5,7 +5,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=50G
 #SBATCH --time=1:00:00
-#SBATCH --output=table1_bd3lm_%j.out
+#SBATCH --output=/rhome/sli588/temp/table1_bd3lm_%j.out
 
 # ============================================================
 # Setup

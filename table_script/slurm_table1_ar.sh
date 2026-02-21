@@ -5,7 +5,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=50G
 #SBATCH --time=2:00:00
-#SBATCH --output=table1_ar_%j.out
+#SBATCH --output=/rhome/sli588/temp/table1_ar_%j.out
 
 # ============================================================
 # Setup
