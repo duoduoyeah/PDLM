@@ -64,9 +64,9 @@ bd3lm = load('${OUT_DIR}/bd3lm_normal.json')
 
 print()
 print(f'  BD3LM normal (all-masked, predicts position k within block):')
-print(f'    k=1 : PPL = {bd3lm[\"positions\"][0][\"ppl\"]:.2f}')
-print(f'    k=2 : PPL = {bd3lm[\"positions\"][1][\"ppl\"]:.2f}')
-print(f'    k=4 : PPL = {bd3lm[\"positions\"][3][\"ppl\"]:.2f}')
+print(f'    k=1 : PPL = {bd3lm[\"positions\"][\"0\"][\"ppl\"]:.2f}')
+print(f'    k=2 : PPL = {bd3lm[\"positions\"][\"1\"][\"ppl\"]:.2f}')
+print(f'    k=4 : PPL = {bd3lm[\"positions\"][\"3\"][\"ppl\"]:.2f}')
 print()
 "
 
