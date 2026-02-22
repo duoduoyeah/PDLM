@@ -167,18 +167,14 @@ def run_eval(
     print0(f"Batch: device_batch_size={device_batch_size}, num_batches={num_batches}, "
            f"total_sequences={num_batches * device_batch_size}")
 
+    bdlm_config = BDLMConfig(**{**model_config, "target_shift": target_shift, "mask_token_id": mask_token_id})
     val_loader = tokenizing_distributed_data_loader_with_state(
         device_batch_size,
         max_seq_len,
         split="val",
         device=device,
         resume_state_dict=None,
-        noise_total_steps=0,
-        prefix_pure_tokens=prefix_pure_tokens,
-        model_type="bd3lm",
-        target_shift=target_shift,
-        bd3lm_block_size=block_size,
-        bd3lm_mask_token_id=mask_token_id,
+        model_config=bdlm_config,
     )
 
     # Generate attention mask for eval (prefix_sliding_tokens=0 for eval)
