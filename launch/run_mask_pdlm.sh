@@ -99,8 +99,11 @@ done
 # Build tokenizer variant name (matches folder naming convention)
 TOKENIZER_VARIANT="n${NOISE_LEVEL}_k${OVERLAP_K}_g${NUM_GROUPS}"
 
+# Convert soft_p_within to integer percentage (e.g. 0.7 -> 70)
+SOFT_P_INT=$(python3 -c "print(int(float('${SOFT_P_WITHIN}') * 100))")
+
 # Build model name
-BASE_MODEL_NAME="mask_pdlm_d${DEPTH}_b${BLOCK_SIZE}_${TOKENIZER_VARIANT}"
+BASE_MODEL_NAME="mask_pdlm_d${DEPTH}_b${BLOCK_SIZE}_${TOKENIZER_VARIANT}_p${SOFT_P_INT}"
 
 WANDB_GROUP="mask_pdlm_d${DEPTH}"
 DRIVE_BASE="/content/drive/MyDrive/nanochat"
