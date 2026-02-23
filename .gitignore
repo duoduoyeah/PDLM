@@ -19,3 +19,4 @@ wandb_export/**/*.json
 wandb_export/**/*.csv
 wandb_export/**/*.md
 table_script/results/
+wandb/
