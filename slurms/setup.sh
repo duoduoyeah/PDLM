@@ -18,3 +18,6 @@ export PATH="$SCRATCH/.venv_gpu/bin:$PATH"
 # Load credentials and export to child processes (wandb_v1_* service account key — do NOT use wandb login)
 source launch/.env
 export WANDB_API_KEY HF_TOKEN
+
+# Store wandb run data on scratch to avoid filling home quota
+export WANDB_DIR=$SCRATCH
