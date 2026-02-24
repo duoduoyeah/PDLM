@@ -1,3 +1,6 @@
+02/24
+* we are going add the padding to the mask pdlm
+
 02/20
 * mask pdlm for different block size
 
