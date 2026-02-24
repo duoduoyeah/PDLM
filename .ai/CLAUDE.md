@@ -1,2 +1,1 @@
-- User runs commands on VM, so just provide the `python -m` command instead of running directly.
 - When slurm run: new file in slurms/ -> call the script in launch/ -> codebase
