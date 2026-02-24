@@ -112,6 +112,7 @@ def run_eval(
     model_tag=None,
     step=None,
     num_batches=20,
+    total_sequences=None,
     device_type="auto",
     ckpt_dir=None,
     run_compatibility=False,
@@ -125,7 +126,9 @@ def run_eval(
     Args:
         model_tag: Model directory name
         step: Checkpoint step
-        num_batches: Number of validation batches to evaluate
+        num_batches: Number of validation batches to evaluate (ignored if total_sequences is set)
+        total_sequences: Total number of sequences to evaluate (overrides num_batches).
+            num_batches is derived as total_sequences // device_batch_size.
         device_type: Device type
         ckpt_dir: Direct path to checkpoint directory. If provided, overrides model_tag.
         run_compatibility: Whether to run compatibility evaluation (Stage 2 only)
@@ -156,6 +159,17 @@ def run_eval(
 
     # Create validation dataloader
     device_batch_size = user_config.get("device_batch_size", 32)
+
+    # Resolve num_batches from total_sequences if provided
+    if total_sequences is not None:
+        num_batches = total_sequences // device_batch_size
+        if num_batches == 0:
+            raise ValueError(f"total_sequences={total_sequences} < device_batch_size={device_batch_size}")
+        actual_sequences = num_batches * device_batch_size
+        if actual_sequences != total_sequences:
+            print0(f"Warning: total_sequences={total_sequences} not divisible by device_batch_size={device_batch_size}, "
+                   f"evaluating {actual_sequences} sequences ({num_batches} batches)")
+
     val_loader = get_data_loader(
         device_batch_size,
         max_seq_len,
@@ -546,7 +560,8 @@ def main():
     parser.add_argument("--model_tag", type=str, default=None, help="Model directory name (e.g., d8)")
     parser.add_argument("--ckpt_dir", type=str, default=None, help="Direct path to checkpoint directory (overrides model_tag)")
     parser.add_argument("--step", type=int, default=None, help="Checkpoint step (default: last)")
-    parser.add_argument("--num_batches", type=int, default=20, help="Number of validation batches")
+    parser.add_argument("--num_batches", type=int, default=20, help="Number of validation batches (ignored if --total_sequences is set)")
+    parser.add_argument("--total_sequences", type=int, default=None, help="Total sequences to evaluate (overrides --num_batches); num_batches = total_sequences // device_batch_size")
     parser.add_argument("--device", type=str, default="auto", help="Device type (cuda/cpu/mps/auto)")
     parser.add_argument("--output_json", type=str, default=None, help="Optional: save results to JSON file")
     parser.add_argument("--run_compatibility", action="store_true", help="Run compatibility evaluation (also enables oracle accuracy unless --no_oracle_accuracy)")
@@ -653,6 +668,7 @@ def main():
         model_tag=args.model_tag,
         step=args.step,
         num_batches=args.num_batches,
+        total_sequences=args.total_sequences,
         device_type=args.device,
         ckpt_dir=args.ckpt_dir,
         run_compatibility=args.run_compatibility,

@@ -154,7 +154,7 @@ def _eval_end2end(model, cached_batches, block_size, attn_mask, device, autocast
 
     Total forward passes per batch: 1 + block_size.
     """
-    nll_by_pos = {p: {"nll": 0.0, "entropy": 0.0, "tokens": 0} for p in range(block_size)}
+    nll_by_pos = {p: {"nll": 0.0, "entropy": 0.0, "correct": 0, "tokens": 0} for p in range(block_size)}
     pure_vocab_size = model.config.pure_vocab_size
     num_groups = model.config.num_groups
     mask_token_id = pure_vocab_size + num_groups
@@ -202,6 +202,8 @@ def _eval_end2end(model, cached_batches, block_size, attn_mask, device, autocast
                 nll_by_pos[denoise_step]["nll"] += nll.sum().item()
                 nll_by_pos[denoise_step]["entropy"] += entropy[pos_masks[denoise_step]].sum().item()
                 nll_by_pos[denoise_step]["tokens"] += pos_masks[denoise_step].sum().item()
+                preds = logits[pos_masks[denoise_step]].argmax(dim=-1)
+                nll_by_pos[denoise_step]["correct"] += (preds == targets[pos_masks[denoise_step]]).sum().item()
 
                 # Use ground truth pure token at denoise_step position (teacher forcing on P)
                 # Previous positions' errors must not propagate — same principle as AR eval
@@ -213,4 +215,4 @@ def _eval_end2end(model, cached_batches, block_size, attn_mask, device, autocast
                     for rp in range(denoise_step + 1, block_size):
                         eval_inputs[pos_masks[rp]] = all_groups[pos_masks[rp]] + group_offset
 
-    return build_result_dict(nll_by_pos, block_size, include_accuracy=False)
+    return build_result_dict(nll_by_pos, block_size, include_accuracy=True)
