@@ -26,6 +26,7 @@ DATA_RATIO="10"            # default 10 for test mode
 DEPTH="4"                  # model depth
 BLOCK_SIZE="4"             # bucket_size for block diffusion
 SOFT_P_WITHIN="1.0"        # prob of correct group mapping (1.0 = hard, <1.0 = soft noise on group positions)
+MASK_PDLM_4STATE="false"   # use 4-state variant (k states instead of k+1)
 DRIVE_OUTPUT_FOLDER=""     # subfolder under DRIVE_BASE for outputs (empty = save directly under DRIVE_BASE)
 GRADIENT_TRACK_EVERY="0"   # 0 = disabled, >0 = log gradient metrics every N steps
 
@@ -62,6 +63,9 @@ for arg in "$@"; do
             ;;
         --soft_p_within=*)
             SOFT_P_WITHIN="${arg#*=}"
+            ;;
+        --mask_pdlm_4state=*)
+            MASK_PDLM_4STATE="${arg#*=}"
             ;;
         --max_seq_len=*)
             MAX_SEQ_LEN="${arg#*=}"
@@ -104,6 +108,9 @@ SOFT_P_INT=$(python3 -c "print(int(float('${SOFT_P_WITHIN}') * 100))")
 
 # Build model name
 BASE_MODEL_NAME="mask_pdlm_d${DEPTH}_b${BLOCK_SIZE}_${TOKENIZER_VARIANT}_p${SOFT_P_INT}"
+if [ "${MASK_PDLM_4STATE}" = "true" ]; then
+    BASE_MODEL_NAME="${BASE_MODEL_NAME}_4s"
+fi
 
 WANDB_GROUP="mask_pdlm_d${DEPTH}"
 DRIVE_BASE="/content/drive/MyDrive/nanochat"
@@ -150,6 +157,7 @@ echo "=== Data ratio: ${DATA_RATIO} ==="
 echo "=== Depth: ${DEPTH} ==="
 echo "=== Block size (bucket): ${BLOCK_SIZE} ==="
 echo "=== Soft p within: ${SOFT_P_WITHIN} ==="
+echo "=== 4-state: ${MASK_PDLM_4STATE} ==="
 echo "=== Tokenizer: ${TOKENIZER_VARIANT} (noise=${NOISE_LEVEL}, overlap_k=${OVERLAP_K}, num_groups=${NUM_GROUPS}) ==="
 echo "=== Group tokenizer path: ${GROUP_TOKENIZER_PATH} ==="
 
@@ -223,6 +231,7 @@ python -m scripts.base_train \
     --depth=${DEPTH} \
     --block_size=${BLOCK_SIZE} \
     --soft_p_within=${SOFT_P_WITHIN} \
+    --mask_pdlm_4state=${MASK_PDLM_4STATE} \
     --max_seq_len=${MAX_SEQ_LEN} \
     --device_batch_size=${DEVICE_BATCH_SIZE} \
     --target_param_data_ratio=${DATA_RATIO} \

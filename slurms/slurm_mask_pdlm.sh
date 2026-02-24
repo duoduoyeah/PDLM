@@ -21,7 +21,8 @@
 # ============================================================
 # Environment setup
 # ============================================================
-source ~/pdlm_mask/slurms/setup.sh
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/setup.sh"
 
 # ============================================================
 # Default parameters
@@ -34,6 +35,7 @@ DATA_RATIO="10"
 DEPTH="8"
 BLOCK_SIZE="4"
 SOFT_P_WITHIN="1.0"
+MASK_PDLM_4STATE="false"
 DRIVE_OUTPUT_FOLDER="mask_pdlm_soft_sweep"   # subfolder under gdrive:nanochat
 
 # Parse named arguments (passed after the script name to sbatch)
@@ -47,6 +49,7 @@ for arg in "$@"; do
         --depth=*)              DEPTH="${arg#*=}" ;;
         --block_size=*)         BLOCK_SIZE="${arg#*=}" ;;
         --soft_p_within=*)      SOFT_P_WITHIN="${arg#*=}" ;;
+        --mask_pdlm_4state=*)   MASK_PDLM_4STATE="${arg#*=}" ;;
         --drive_output_folder=*) DRIVE_OUTPUT_FOLDER="${arg#*=}" ;;
         *)
             echo "Unknown argument: $arg"
@@ -61,6 +64,9 @@ done
 TOKENIZER_VARIANT="n${NOISE_LEVEL}_k${OVERLAP_K}_g${NUM_GROUPS}"
 SOFT_P_INT=$(python3 -c "print(int(float('${SOFT_P_WITHIN}') * 100))")
 BASE_MODEL_NAME="mask_pdlm_d${DEPTH}_b${BLOCK_SIZE}_${TOKENIZER_VARIANT}_p${SOFT_P_INT}"
+if [ "${MASK_PDLM_4STATE}" = "true" ]; then
+    BASE_MODEL_NAME="${BASE_MODEL_NAME}_4s"
+fi
 
 if [ "${TEST_MODE}" = "true" ]; then
     MODEL_NAME="${BASE_MODEL_NAME}_r${DATA_RATIO}_test"
@@ -79,6 +85,7 @@ echo "=== mask_pdlm: ${MODEL_NAME} ==="
 echo "=== Scratch dir: ${NANOCHAT_BASE_DIR} ==="
 echo "=== Tokenizer: ${TOKENIZER_VARIANT} ==="
 echo "=== soft_p_within: ${SOFT_P_WITHIN} (p${SOFT_P_INT}) ==="
+echo "=== 4-state: ${MASK_PDLM_4STATE} ==="
 echo "=== test_mode: ${TEST_MODE}, data_ratio: ${DATA_RATIO} ==="
 
 # ============================================================
@@ -119,6 +126,7 @@ python -m scripts.base_train \
     --depth=${DEPTH} \
     --block_size=${BLOCK_SIZE} \
     --soft_p_within=${SOFT_P_WITHIN} \
+    --mask_pdlm_4state=${MASK_PDLM_4STATE} \
     --max_seq_len=512 \
     --device_batch_size=64 \
     --target_param_data_ratio=${DATA_RATIO} \
