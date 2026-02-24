@@ -1,0 +1,3 @@
+[submodule "design/paper_latex"]
+	path = design/paper_latex
+	url = git@github.com:duoduoyeah/Non-Inference-Mask-Language-Models-Speaks-Loud.git
