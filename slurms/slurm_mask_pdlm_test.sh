@@ -2,8 +2,8 @@
 ## Interactive test script — run inside srun session to debug the full pipeline.
 ## Usage: bash slurms/slurm_mask_pdlm_test.sh
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/setup.sh"
+REPO_ROOT="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+source "$REPO_ROOT/slurms/setup.sh"
 
 MODEL_NAME="mask_pdlm_d8_b4_n512_k15_g120_p50_r1_test"
 TOKENIZER_VARIANT="n512_k15_g120"
