@@ -1,3 +1,6 @@
+02/25
+* we need to find some confidence related metrics? like entrophy-ppl?
+
 02/24
 * we are going add the padding to the mask pdlm
 

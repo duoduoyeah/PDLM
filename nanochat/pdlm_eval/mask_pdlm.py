@@ -340,6 +340,123 @@ def _eval_end2end_with_schedule(
     return build_result_dict(nll_by_pos, block_size, include_accuracy=True)
 
 
+def _eval_end2end_refresh(model, cached_batches, block_size, attn_mask, device, autocast_ctx):
+    """
+    End-to-end iterative inference evaluation with group token refresh.
+
+    Same as _eval_end2end but before recording loss at pos k, runs an extra
+    "refresh" forward pass to update remaining group tokens with the current
+    ground-truth context (P_gt at positions 0..k-1). This removes the bias
+    against high-p (soft) models caused by stale group tokens.
+
+    Forward passes per batch: 1 (init) + 2 * block_size (refresh + eval per step).
+    """
+    nll_by_pos = {p: {"nll": 0.0, "entropy": 0.0, "correct": 0, "tokens": 0} for p in range(block_size)}
+    pure_vocab_size = model.config.pure_vocab_size
+    num_groups = model.config.num_groups
+    mask_token_id = pure_vocab_size + num_groups
+    group_offset = pure_vocab_size
+
+    for inputs, targets, loss_extras, _ in cached_batches:
+        B, T = inputs.shape
+        num_blocks = T // block_size
+
+        with autocast_ctx:
+            # Pre-build position masks: pos_masks[p] is True at position p of each target block (2..N-1)
+            pos_masks = []
+            for p in range(block_size):
+                mask = torch.zeros(B, T, dtype=torch.bool, device=device)
+                for block_idx in range(2, num_blocks):
+                    mask[:, block_idx * block_size + p] = True
+                pos_masks.append(mask)
+            target_mask = torch.zeros(B, T, dtype=torch.bool, device=device)
+            for p in range(block_size):
+                target_mask |= pos_masks[p]
+
+            # Init: mask all target blocks → forward → collapse to groups
+            eval_inputs = targets.clone()
+            eval_inputs[target_mask] = mask_token_id
+            logits = model.forward_for_eval_mask_pdlm(eval_inputs, targets, attn_mask=attn_mask)
+            all_groups = model.collapse_pure_to_group(logits)
+            eval_inputs[target_mask] = all_groups[target_mask] + group_offset
+
+            for k in range(block_size):
+                # eval_inputs: [P_gt_0..k-1, G_k, ..., G_{n-1}]
+                # G comes from prior step's eval forward collapse
+
+                # Step A: Refresh forward — update G for positions k..n-1
+                # so they are aware of P_gt at positions 0..k-1
+                logits_r = model.forward_for_eval_mask_pdlm(eval_inputs, targets, attn_mask=attn_mask)
+                g_refresh = model.collapse_pure_to_group(logits_r)
+                del logits_r  # free before step B forward
+                for rp in range(k, block_size):
+                    eval_inputs[pos_masks[rp]] = g_refresh[pos_masks[rp]] + group_offset
+                del g_refresh
+
+                # Step B: Eval forward with refreshed groups → record loss at pos k
+                logits = model.forward_for_eval_mask_pdlm(eval_inputs, targets, attn_mask=attn_mask)
+                log_probs = F.log_softmax(logits.float(), dim=-1)
+                target_log_probs = log_probs.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
+                entropy = -(log_probs.exp() * log_probs).sum(dim=-1)
+                del log_probs  # free large tensor before collapse
+
+                nll = -target_log_probs[pos_masks[k]]
+                nll_by_pos[k]["nll"] += nll.sum().item()
+                nll_by_pos[k]["entropy"] += entropy[pos_masks[k]].sum().item()
+                nll_by_pos[k]["tokens"] += pos_masks[k].sum().item()
+                preds = logits[pos_masks[k]].argmax(dim=-1)
+                nll_by_pos[k]["correct"] += (preds == targets[pos_masks[k]]).sum().item()
+
+                # Teacher-force pos k to ground truth
+                eval_inputs[pos_masks[k]] = targets[pos_masks[k]]
+
+                # Collapse remaining positions from eval forward for next iter's starting G
+                if k < block_size - 1:
+                    g_next = model.collapse_pure_to_group(logits)
+                    for rp in range(k + 1, block_size):
+                        eval_inputs[pos_masks[rp]] = g_next[pos_masks[rp]] + group_offset
+                del logits
+
+    return build_result_dict(nll_by_pos, block_size, include_accuracy=True)
+
+
+def eval_mask_pdlm_refresh(
+    model,
+    val_loader,
+    block_size,
+    num_batches,
+    attn_mask,
+    device,
+    autocast_ctx,
+    prefix_pure_tokens=0,
+):
+    """
+    Evaluate mask_pdlm with group token refresh between denoising steps.
+
+    Before recording loss at each position k, runs a refresh forward pass to
+    update remaining group tokens with the current ground-truth context. This
+    removes the staleness bias against high-p (soft) models in the standard
+    end2end eval.
+
+    Returns:
+        {
+            "stage": "mask_pdlm",
+            "end2end_refresh": result_dict,
+        }
+    """
+    with model_eval_context(model):
+        with torch.no_grad():
+            cached_batches = [next(val_loader) for _ in range(num_batches)]
+            refresh_result = _eval_end2end_refresh(
+                model, cached_batches, block_size, attn_mask, device, autocast_ctx,
+            )
+
+    return {
+        "stage": "mask_pdlm",
+        "end2end_refresh": refresh_result,
+    }
+
+
 def eval_mask_pdlm_parallel(
     model,
     val_loader,

@@ -23,7 +23,7 @@ import torch
 from nanochat.common import compute_init, autodetect_device_type, get_base_dir, print0
 from nanochat.checkpoint_manager import load_checkpoint, find_last_step, find_largest_model
 from nanochat.pdlm import PDLM, PDLMConfig
-from nanochat.pdlm_eval import eval_pdlm, eval_pdlm_stage1_mask, eval_pdlm_stage1_block, eval_pdlm_compatibility, eval_pdlm_full, eval_pdlm_both_block, eval_block_pdlm_inference, eval_mask_pdlm, eval_mask_pdlm_parallel, dump_batch_to_file, dump_stage1_block_batch
+from nanochat.pdlm_eval import eval_pdlm, eval_pdlm_stage1_mask, eval_pdlm_stage1_block, eval_pdlm_compatibility, eval_pdlm_full, eval_pdlm_both_block, eval_block_pdlm_inference, eval_mask_pdlm, eval_mask_pdlm_parallel, eval_mask_pdlm_refresh, dump_batch_to_file, dump_stage1_block_batch
 from nanochat.dataloader import get_data_loader
 from nanochat.attn_masks import gen_mask, gen_block_causal_mask
 from nanochat.group_tokenizer.token_map import get_token_map
@@ -120,6 +120,7 @@ def run_eval(
     run_oracle_accuracy=False,
     oracle_accuracy_batches=None,
     parallel_decode=False,
+    refresh_decode=False,
 ):
     """
     Run PDLM evaluation (Stage 1 MASK or Stage 2).
@@ -259,6 +260,18 @@ def run_eval(
             autocast_ctx=autocast_ctx, prefix_pure_tokens=prefix_pure_tokens,
             mtp_loss_weight=mtp_loss_weight,
         )
+    elif stage == "mask_pdlm" and refresh_decode:
+        print0(f"Running mask_pdlm refresh decode evaluation...")
+        eval_result = eval_mask_pdlm_refresh(
+            model=model,
+            val_loader=val_loader,
+            block_size=block_size,
+            num_batches=num_batches,
+            attn_mask=attn_mask,
+            device=device,
+            autocast_ctx=autocast_ctx,
+            prefix_pure_tokens=prefix_pure_tokens,
+        )
     elif stage == "mask_pdlm" and parallel_decode:
         print0(f"Running mask_pdlm parallel decode evaluation (parallel_mid + parallel_end)...")
         eval_result = eval_mask_pdlm_parallel(
@@ -330,6 +343,28 @@ def print_results(eval_result, block_size):
     if stage == "mask_pdlm":
         print0("PDLM MASK_PDLM EVALUATION RESULTS")
         print0("=" * 60)
+
+        if "unified" not in eval_result:
+            # parallel or refresh decode result — print per-variant summary
+            variants = []
+            if "parallel_mid" in eval_result or "parallel_end" in eval_result:
+                variants = [("parallel_mid", "parallel_mid"), ("parallel_end", "parallel_end")]
+            elif "end2end_refresh" in eval_result:
+                variants = [("end2end_refresh", "end2end_refresh")]
+            for key, label in variants:
+                res = eval_result.get(key)
+                if res is None:
+                    continue
+                e_eppl = f", entropy_ppl={res['overall_entropy_ppl']:.2f}" if "overall_entropy_ppl" in res else ""
+                acc = f", accuracy={res['overall_accuracy']:.2%}" if "overall_accuracy" in res else ""
+                print0(f"\n[{label}]: loss={res['overall_loss']:.4f}, ppl={res['overall_ppl']:.2f}{e_eppl}{acc}")
+                for pos in range(block_size):
+                    pos_data = res["positions"][pos]
+                    eppl = f", entropy_ppl={pos_data['entropy_ppl']:.2f}" if "entropy_ppl" in pos_data else ""
+                    pacc = f", accuracy={pos_data['accuracy']:.2%}" if "accuracy" in pos_data else ""
+                    print0(f"    pos {pos}: loss={pos_data['loss']:.4f}, ppl={pos_data['ppl']:.2f}{eppl}{pacc}")
+            print0("\n" + "=" * 60)
+            return
 
         unified = eval_result["unified"]
         e2e = eval_result["end2end"]
@@ -593,6 +628,8 @@ def main():
     parser.add_argument("--dump_sequences", type=int, default=5, help="Number of sequences to dump (default: 5)")
     parser.add_argument("--parallel_decode", action="store_true",
                         help="Run parallel decode variants (parallel_mid + parallel_end) instead of standard eval. mask_pdlm only.")
+    parser.add_argument("--refresh_decode", action="store_true",
+                        help="Run refresh end2end eval: updates group tokens after each teacher-force step. mask_pdlm only.")
     args = parser.parse_args()
 
     # Handle generation mode (mask_pdlm only)
@@ -691,6 +728,7 @@ def main():
         run_oracle_accuracy=run_oracle,
         oracle_accuracy_batches=args.oracle_accuracy_batches,
         parallel_decode=args.parallel_decode,
+        refresh_decode=args.refresh_decode,
     )
 
     # Get block_size for printing
