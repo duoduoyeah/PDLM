@@ -23,7 +23,7 @@ import torch
 from nanochat.common import compute_init, autodetect_device_type, get_base_dir, print0
 from nanochat.checkpoint_manager import load_checkpoint, find_last_step, find_largest_model
 from nanochat.pdlm import PDLM, PDLMConfig
-from nanochat.pdlm_eval import eval_pdlm, eval_pdlm_stage1_mask, eval_pdlm_stage1_block, eval_pdlm_compatibility, eval_pdlm_full, eval_pdlm_both_block, eval_block_pdlm_inference, eval_mask_pdlm, dump_batch_to_file, dump_stage1_block_batch
+from nanochat.pdlm_eval import eval_pdlm, eval_pdlm_stage1_mask, eval_pdlm_stage1_block, eval_pdlm_compatibility, eval_pdlm_full, eval_pdlm_both_block, eval_block_pdlm_inference, eval_mask_pdlm, eval_mask_pdlm_parallel, dump_batch_to_file, dump_stage1_block_batch
 from nanochat.dataloader import get_data_loader
 from nanochat.attn_masks import gen_mask, gen_block_causal_mask
 from nanochat.group_tokenizer.token_map import get_token_map
@@ -119,6 +119,7 @@ def run_eval(
     compatibility_batches=None,
     run_oracle_accuracy=False,
     oracle_accuracy_batches=None,
+    parallel_decode=False,
 ):
     """
     Run PDLM evaluation (Stage 1 MASK or Stage 2).
@@ -257,6 +258,18 @@ def run_eval(
             num_batches=num_batches, attn_mask=attn_mask, device=device,
             autocast_ctx=autocast_ctx, prefix_pure_tokens=prefix_pure_tokens,
             mtp_loss_weight=mtp_loss_weight,
+        )
+    elif stage == "mask_pdlm" and parallel_decode:
+        print0(f"Running mask_pdlm parallel decode evaluation (parallel_mid + parallel_end)...")
+        eval_result = eval_mask_pdlm_parallel(
+            model=model,
+            val_loader=val_loader,
+            block_size=block_size,
+            num_batches=num_batches,
+            attn_mask=attn_mask,
+            device=device,
+            autocast_ctx=autocast_ctx,
+            prefix_pure_tokens=prefix_pure_tokens,
         )
     elif stage == "mask_pdlm":
         print0(f"Running mask_pdlm evaluation...")
@@ -578,6 +591,8 @@ def main():
     parser.add_argument("--dump_batch", type=str, default=None, help="Dump one batch to file for debugging (path to output txt)")
     parser.add_argument("--dump_stage1_block", type=str, default=None, help="Dump stage1_block predictions to file (path to output txt)")
     parser.add_argument("--dump_sequences", type=int, default=5, help="Number of sequences to dump (default: 5)")
+    parser.add_argument("--parallel_decode", action="store_true",
+                        help="Run parallel decode variants (parallel_mid + parallel_end) instead of standard eval. mask_pdlm only.")
     args = parser.parse_args()
 
     # Handle generation mode (mask_pdlm only)
@@ -675,6 +690,7 @@ def main():
         compatibility_batches=args.compatibility_batches,
         run_oracle_accuracy=run_oracle,
         oracle_accuracy_batches=args.oracle_accuracy_batches,
+        parallel_decode=args.parallel_decode,
     )
 
     # Get block_size for printing

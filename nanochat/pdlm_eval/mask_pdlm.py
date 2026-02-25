@@ -216,3 +216,179 @@ def _eval_end2end(model, cached_batches, block_size, attn_mask, device, autocast
                         eval_inputs[pos_masks[rp]] = all_groups[pos_masks[rp]] + group_offset
 
     return build_result_dict(nll_by_pos, block_size, include_accuracy=True)
+
+
+def _make_parallel_schedules(block_size):
+    """
+    Generate parallel decode schedules for a given block_size.
+
+    Returns (schedule_mid, schedule_end) where each is a list of position tuples.
+    - schedule_mid: pair at positions (block_size//2 - 1, block_size//2)
+    - schedule_end: pair at last two positions (block_size-2, block_size-1)
+
+    For block_size=1: (None, None)
+    For block_size=2: ([(0,1)], [(0,1)])  — only option
+    For block_size=4: ([(0,),(1,2),(3,)], [(0,),(1,),(2,3)])
+    For block_size=8: ([(0,),(1,),(2,),(3,4),(5,),(6,),(7,)], [(0,),...,(6,7)])
+    """
+    if block_size <= 1:
+        return None, None
+
+    if block_size == 2:
+        both = [(0, 1)]
+        return both, both
+
+    mid = block_size // 2 - 1  # e.g. 1 for bs=4, 3 for bs=8
+
+    # parallel_mid: pair at (mid, mid+1), all others solo
+    schedule_mid = []
+    i = 0
+    while i < block_size:
+        if i == mid:
+            schedule_mid.append((mid, mid + 1))
+            i += 2
+        else:
+            schedule_mid.append((i,))
+            i += 1
+
+    # parallel_end: pair at last two positions, all others solo
+    schedule_end = [(p,) for p in range(block_size - 2)] + [(block_size - 2, block_size - 1)]
+
+    return schedule_mid, schedule_end
+
+
+def _eval_end2end_with_schedule(
+    model, cached_batches, block_size, attn_mask, device, autocast_ctx, decode_schedule,
+):
+    """
+    End-to-end iterative inference evaluation with a custom decode schedule.
+
+    decode_schedule: list of tuples of positions to decode in each step.
+      Each tuple is decoded in ONE forward pass — positions in the tuple share
+      the same input context (no GT reveal between them within the step).
+
+    Examples:
+      [(0,),(1,),(2,),(3,)]    — sequential (same as _eval_end2end)
+      [(0,),(1,2),(3,)]        — parallel_mid: pos 1+2 together
+      [(0,),(1,),(2,3)]        — parallel_end: pos 2+3 together
+
+    Total forward passes per batch: 1 (init) + len(decode_schedule).
+    """
+    nll_by_pos = {p: {"nll": 0.0, "entropy": 0.0, "correct": 0, "tokens": 0} for p in range(block_size)}
+    pure_vocab_size = model.config.pure_vocab_size
+    num_groups = model.config.num_groups
+    mask_token_id = pure_vocab_size + num_groups
+    group_offset = pure_vocab_size
+
+    for inputs, targets, loss_extras, _ in cached_batches:
+        B, T = inputs.shape
+        num_blocks = T // block_size
+
+        with autocast_ctx:
+            # Pre-build position masks: pos_masks[p] is True at position p of each target block (2..N-1)
+            pos_masks = []
+            for p in range(block_size):
+                mask = torch.zeros(B, T, dtype=torch.bool, device=device)
+                for block_idx in range(2, num_blocks):
+                    mask[:, block_idx * block_size + p] = True
+                pos_masks.append(mask)
+            target_mask = torch.zeros(B, T, dtype=torch.bool, device=device)
+            for p in range(block_size):
+                target_mask |= pos_masks[p]
+
+            # Init: MASK → groups (identical to _eval_end2end)
+            eval_inputs = targets.clone()
+            eval_inputs[target_mask] = mask_token_id
+            logits = model.forward_for_eval_mask_pdlm(eval_inputs, targets, attn_mask=attn_mask)
+            all_groups = model.collapse_pure_to_group(logits)
+            eval_inputs[target_mask] = all_groups[target_mask] + group_offset
+
+            # Execute decode schedule
+            for step_idx, step_positions in enumerate(decode_schedule):
+                # One forward pass for all positions in this step
+                logits = model.forward_for_eval_mask_pdlm(eval_inputs, targets, attn_mask=attn_mask)
+
+                log_probs = F.log_softmax(logits.float(), dim=-1)
+                target_log_probs = log_probs.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
+                entropy = -(log_probs.exp() * log_probs).sum(dim=-1)
+
+                # Capture CE + accuracy for every position in this step (same forward pass / same context)
+                for p in step_positions:
+                    nll = -target_log_probs[pos_masks[p]]
+                    nll_by_pos[p]["nll"] += nll.sum().item()
+                    nll_by_pos[p]["entropy"] += entropy[pos_masks[p]].sum().item()
+                    nll_by_pos[p]["tokens"] += pos_masks[p].sum().item()
+                    preds = logits[pos_masks[p]].argmax(dim=-1)
+                    nll_by_pos[p]["correct"] += (preds == targets[pos_masks[p]]).sum().item()
+
+                # Teacher-force all positions in this step to GT
+                for p in step_positions:
+                    eval_inputs[pos_masks[p]] = targets[pos_masks[p]]
+
+                # Determine positions still pending after this step
+                decoded_so_far = set()
+                for prev_positions in decode_schedule[:step_idx + 1]:
+                    decoded_so_far.update(prev_positions)
+                remaining = [rp for rp in range(block_size) if rp not in decoded_so_far]
+
+                # Collapse remaining positions back to groups
+                if remaining:
+                    all_groups = model.collapse_pure_to_group(logits)
+                    for rp in remaining:
+                        eval_inputs[pos_masks[rp]] = all_groups[pos_masks[rp]] + group_offset
+
+    return build_result_dict(nll_by_pos, block_size, include_accuracy=True)
+
+
+def eval_mask_pdlm_parallel(
+    model,
+    val_loader,
+    block_size,
+    num_batches,
+    attn_mask,
+    device,
+    autocast_ctx,
+    prefix_pure_tokens=0,
+):
+    """
+    Evaluate mask_pdlm with parallel decode variants.
+
+    Runs two variants (parallel_mid and parallel_end) without re-running unified loss.
+    - parallel_mid: decode the middle pair of positions in one step
+    - parallel_end: decode the last pair of positions in one step
+
+    For block_size=4:
+      parallel_mid schedule: [(0,), (1,2), (3,)]   — 4 total forward passes
+      parallel_end schedule: [(0,), (1,), (2,3)]   — 4 total forward passes
+
+    Returns:
+        {
+            "stage": "mask_pdlm",
+            "parallel_mid": result_dict or None,
+            "parallel_end": result_dict or None,
+        }
+    """
+    schedule_mid, schedule_end = _make_parallel_schedules(block_size)
+
+    with model_eval_context(model):
+        with torch.no_grad():
+            cached_batches = [next(val_loader) for _ in range(num_batches)]
+
+            result_mid = (
+                _eval_end2end_with_schedule(
+                    model, cached_batches, block_size, attn_mask, device, autocast_ctx, schedule_mid,
+                )
+                if schedule_mid is not None else None
+            )
+            result_end = (
+                _eval_end2end_with_schedule(
+                    model, cached_batches, block_size, attn_mask, device, autocast_ctx, schedule_end,
+                )
+                if schedule_end is not None else None
+            )
+
+    return {
+        "stage": "mask_pdlm",
+        "parallel_mid": result_mid,
+        "parallel_end": result_end,
+    }
