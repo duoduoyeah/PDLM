@@ -51,7 +51,7 @@ n_future_tokens = 4 # MTP/both_mtp: number of future group tokens to predict (K)
 mtp_loss_weight = 1.0 # both_mtp: Stage 1 MTP loss weight relative to Stage 2
 soft_p_within = 1.0 # stage2: prob of correct group mapping (1.0 = hard, <1.0 = soft noise)
 noise_count = 64 # pdlm_emb: total tokens in noise average (including target)
-mask_pdlm_4state = False # mask_pdlm: use 4-state variant (k states instead of k+1)
+mask_pdlm_4state = "false" # mask_pdlm: use 4-state variant (k states instead of k+1)
 loss_weight_mode = "manual" # "manual" or "fixed" - fixed computes weight from warmup batches
 loss_weight_warmup_steps = 10 # number of batches for estimating loss ratio (used when loss_weight_mode="fixed")
 stage1_target_mode = "pure" # MTP: "pure" (default) or "group" (legacy) - determines target format and loss
@@ -229,7 +229,7 @@ elif model_type == "pdlm":
         )
     # Add 4-state flag for mask_pdlm stage
     if pdlm_stage == "mask_pdlm":
-        model_config_kwargs["mask_pdlm_4state"] = mask_pdlm_4state
+        model_config_kwargs["mask_pdlm_4state"] = (mask_pdlm_4state == "true")
 elif model_type == "mtp":
     ModelConfig, Model = GPTMTPConfig, GPTMTP
     model_config_kwargs = dict(
