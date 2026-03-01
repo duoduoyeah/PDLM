@@ -19,7 +19,7 @@ set -e
 # ============================================================
 # Environment setup (uv/venv/credentials)
 # ============================================================
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 source "${REPO_ROOT}/slurms/setup.sh"
 
 # ============================================================

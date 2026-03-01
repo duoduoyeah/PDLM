@@ -2,7 +2,7 @@
 ## Interactive test script — run inside srun session to debug the full pipeline.
 ## Usage: bash slurms/slurm_mask_pdlm_test.sh
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 source "${REPO_ROOT}/slurms/setup.sh"
 
 MODEL_NAME="mask_pdlm_d8_b4_n512_k15_g120_p50_r1_test"
