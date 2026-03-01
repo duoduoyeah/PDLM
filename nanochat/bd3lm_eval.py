@@ -63,17 +63,21 @@ def eval_bd3lm(
         dict with evaluation results:
         - target_shift >= 1 (e.g., ts=1, block_size=4):
             {
-                "loss": float, "ppl": float,  # all masked (core metric)
-                "loss_1suffix": float, "ppl_1suffix": float,  # pos 1 clear
-                "loss_2suffix": float, "ppl_2suffix": float,  # pos 1,2 clear
-                "loss_3suffix": float, "ppl_3suffix": float,  # pos 1,2,3 clear
+                "loss": float, "ppl": float,              # all masked (core metric)
+                "entropy_ppl": float,                     # distribution entropy at target pos
+                "argmax_prob": float,                     # avg prob of top-1 prediction
+                "loss_1suffix": float, "ppl_1suffix": float,
+                "entropy_ppl_1suffix": float, "argmax_prob_1suffix": float,
+                ...
             }
         - target_shift < 0, left_to_right=False (normal mode):
             {
                 "overall_loss": float, "overall_ppl": float,
                 "positions": {
-                    0: {"loss": X, "ppl": Y, "loss_1suffix": A, "ppl_1suffix": B, ...},
-                    1: {"loss": X, "ppl": Y, "loss_1suffix": A, ...},
+                    0: {"loss": X, "ppl": Y, "entropy_ppl": Z, "argmax_prob": W,
+                        "loss_1suffix": A, "ppl_1suffix": B,
+                        "entropy_ppl_1suffix": C, "argmax_prob_1suffix": D, ...},
+                    1: {"loss": X, "ppl": Y, "entropy_ppl": Z, "argmax_prob": W, ...},
                     ...
                 },
                 "suffix_overall": {
@@ -212,10 +216,13 @@ def _eval_left_to_right_mode(
     total_tokens = sum(nll_data[k]["tokens"] for k in range(block_size))
     total_correct = sum(acc_data[k]["correct"] for k in range(block_size))
 
+    total_entropy = sum(nll_data[k]["entropy"] for k in range(block_size))
     overall_loss = total_nll / total_tokens if total_tokens > 0 else 0.0
+    overall_entropy = total_entropy / total_tokens if total_tokens > 0 else 0.0
     result = {
         "overall_loss": overall_loss,
         "overall_ppl": torch.exp(torch.tensor(overall_loss)).item(),
+        "overall_entropy_ppl": torch.exp(torch.tensor(overall_entropy)).item(),
         "overall_accuracy": total_correct / total_tokens if total_tokens > 0 else 0.0,
         "positions": {},
     }
@@ -223,10 +230,12 @@ def _eval_left_to_right_mode(
     for k in range(block_size):
         tokens_k = nll_data[k]["tokens"]
         loss_k = nll_data[k]["nll"] / tokens_k if tokens_k > 0 else 0.0
+        entropy_k = nll_data[k]["entropy"] / tokens_k if tokens_k > 0 else 0.0
         acc_k = acc_data[k]["correct"] / acc_data[k]["total"] if acc_data[k]["total"] > 0 else 0.0
         result["positions"][k] = {
             "loss": loss_k,
             "ppl": torch.exp(torch.tensor(loss_k)).item(),
+            "entropy_ppl": torch.exp(torch.tensor(entropy_k)).item(),
             "accuracy": acc_k,
         }
 
@@ -311,6 +320,8 @@ def _eval_target_shift_mode(
 
     # Accumulators for each suffix count (0 = all masked, 1 = 1 suffix clear, etc.)
     nll_by_suffix = {s: 0.0 for s in range(max_suffix + 1)}
+    entropy_by_suffix = {s: 0.0 for s in range(max_suffix + 1)}
+    argmax_prob_by_suffix = {s: 0.0 for s in range(max_suffix + 1)}
     tokens_by_suffix = {s: 0 for s in range(max_suffix + 1)}
 
     # Collect all batches first (we need to iterate multiple times for different suffix counts)
@@ -343,27 +354,42 @@ def _eval_target_shift_mode(
                 # Gather log probs for target tokens
                 target_log_probs = log_probs.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
 
-                # Compute NLL for the specific position in each block
+                # Entropy and argmax prob over the full distribution
+                probs = log_probs.exp()
+                entropy = -(probs * log_probs).sum(dim=-1)  # (B, L)
+                argmax_prob = probs.max(dim=-1)[0]           # (B, L)
+
+                # Compute metrics for the specific position in each block
                 # Skip block 0, compute from blocks 1 onwards
                 for block_idx in range(1, num_blocks):
                     pos_in_seq = block_idx * block_size + position
                     nll = -target_log_probs[:, pos_in_seq]
                     nll_by_suffix[num_suffix] += nll.sum().item()
+                    entropy_by_suffix[num_suffix] += entropy[:, pos_in_seq].sum().item()
+                    argmax_prob_by_suffix[num_suffix] += argmax_prob[:, pos_in_seq].sum().item()
                     tokens_by_suffix[num_suffix] += B
 
     # Build result dict
     result = {}
 
     # Core metrics (all masked)
-    avg_loss = nll_by_suffix[0] / tokens_by_suffix[0] if tokens_by_suffix[0] > 0 else 0.0
+    n = tokens_by_suffix[0]
+    avg_loss = nll_by_suffix[0] / n if n > 0 else 0.0
+    avg_entropy = entropy_by_suffix[0] / n if n > 0 else 0.0
     result["loss"] = avg_loss
     result["ppl"] = torch.exp(torch.tensor(avg_loss)).item()
+    result["entropy_ppl"] = torch.exp(torch.tensor(avg_entropy)).item()
+    result["argmax_prob"] = argmax_prob_by_suffix[0] / n if n > 0 else 0.0
 
     # Suffix metrics
     for num_suffix in range(1, max_suffix + 1):
-        avg_loss_suffix = nll_by_suffix[num_suffix] / tokens_by_suffix[num_suffix] if tokens_by_suffix[num_suffix] > 0 else 0.0
-        result[f"loss_{num_suffix}suffix"] = avg_loss_suffix
-        result[f"ppl_{num_suffix}suffix"] = torch.exp(torch.tensor(avg_loss_suffix)).item()
+        n_s = tokens_by_suffix[num_suffix]
+        avg_loss_s = nll_by_suffix[num_suffix] / n_s if n_s > 0 else 0.0
+        avg_entropy_s = entropy_by_suffix[num_suffix] / n_s if n_s > 0 else 0.0
+        result[f"loss_{num_suffix}suffix"] = avg_loss_s
+        result[f"ppl_{num_suffix}suffix"] = torch.exp(torch.tensor(avg_loss_s)).item()
+        result[f"entropy_ppl_{num_suffix}suffix"] = torch.exp(torch.tensor(avg_entropy_s)).item()
+        result[f"argmax_prob_{num_suffix}suffix"] = argmax_prob_by_suffix[num_suffix] / n_s if n_s > 0 else 0.0
 
     return result
 
@@ -390,10 +416,11 @@ def _eval_normal_mode(
         _, targets_batch, _, _ = next(val_loader)
         all_targets.append(targets_batch)
 
-    # Track metrics: nll_data[num_suffix][pos] = (total_nll, total_tokens)
+    # Track metrics: nll_data[num_suffix][pos]
     # num_suffix=0 means all masked (original eval)
     nll_data = {
-        s: {p: {"nll": 0.0, "tokens": 0} for p in range(block_size)}
+        s: {p: {"nll": 0.0, "entropy": 0.0, "argmax_prob": 0.0, "tokens": 0}
+            for p in range(block_size)}
         for s in range(max_suffix + 1)
     }
 
@@ -429,11 +456,18 @@ def _eval_normal_mode(
                     # Gather log probs for target tokens
                     target_log_probs = log_probs.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
 
-                    # Compute NLL at this position in each block (skip block 0)
+                    # Entropy and argmax prob over the full distribution
+                    probs = log_probs.exp()
+                    entropy = -(probs * log_probs).sum(dim=-1)  # (B, L)
+                    argmax_prob = probs.max(dim=-1)[0]           # (B, L)
+
+                    # Compute metrics at this position in each block (skip block 0)
                     for block_idx in range(1, num_blocks):
                         pos_in_seq = block_idx * block_size + pred_pos
                         nll = -target_log_probs[:, pos_in_seq]
                         nll_data[num_suffix][pred_pos]["nll"] += nll.sum().item()
+                        nll_data[num_suffix][pred_pos]["entropy"] += entropy[:, pos_in_seq].sum().item()
+                        nll_data[num_suffix][pred_pos]["argmax_prob"] += argmax_prob[:, pos_in_seq].sum().item()
                         nll_data[num_suffix][pred_pos]["tokens"] += B
 
     # Build position-centric result dict
@@ -451,17 +485,25 @@ def _eval_normal_mode(
         pos_data = {}
 
         # Base metrics (all masked)
-        base_loss = nll_data[0][pos]["nll"] / nll_data[0][pos]["tokens"] if nll_data[0][pos]["tokens"] > 0 else 0.0
+        n = nll_data[0][pos]["tokens"]
+        base_loss = nll_data[0][pos]["nll"] / n if n > 0 else 0.0
+        base_entropy = nll_data[0][pos]["entropy"] / n if n > 0 else 0.0
         pos_data["loss"] = base_loss
         pos_data["ppl"] = torch.exp(torch.tensor(base_loss)).item()
+        pos_data["entropy_ppl"] = torch.exp(torch.tensor(base_entropy)).item()
+        pos_data["argmax_prob"] = nll_data[0][pos]["argmax_prob"] / n if n > 0 else 0.0
 
         # Suffix metrics for this position
         # Position pos has (block_size - 1 - pos) suffixes available
         max_suffix_for_pos = block_size - 1 - pos
         for s in range(1, max_suffix_for_pos + 1):
-            suffix_loss = nll_data[s][pos]["nll"] / nll_data[s][pos]["tokens"] if nll_data[s][pos]["tokens"] > 0 else 0.0
+            n_s = nll_data[s][pos]["tokens"]
+            suffix_loss = nll_data[s][pos]["nll"] / n_s if n_s > 0 else 0.0
+            suffix_entropy = nll_data[s][pos]["entropy"] / n_s if n_s > 0 else 0.0
             pos_data[f"loss_{s}suffix"] = suffix_loss
             pos_data[f"ppl_{s}suffix"] = torch.exp(torch.tensor(suffix_loss)).item()
+            pos_data[f"entropy_ppl_{s}suffix"] = torch.exp(torch.tensor(suffix_entropy)).item()
+            pos_data[f"argmax_prob_{s}suffix"] = nll_data[s][pos]["argmax_prob"] / n_s if n_s > 0 else 0.0
 
         result["positions"][pos] = pos_data
 

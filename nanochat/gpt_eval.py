@@ -1,14 +1,15 @@
 """
 GPT Evaluation Module.
 
-Computes loss, perplexity, entropy-based perplexity, and accuracy metrics
-for autoregressive GPT models (both standard next-token and next-k prediction).
+Computes loss, perplexity, entropy-based perplexity, accuracy, and argmax
+probability metrics for autoregressive GPT models.
 
 Metrics:
 - loss: average negative log-likelihood per token
 - ppl: true perplexity = exp(loss)
 - entropy_ppl: exp(average entropy of predicted distributions)
 - accuracy: fraction of tokens where argmax prediction matches target
+- argmax_prob: average probability mass on the top-1 predicted token
 """
 
 import torch
@@ -41,6 +42,7 @@ def eval_gpt(
             "overall_ppl": float,
             "overall_entropy_ppl": float,
             "overall_accuracy": float,
+            "overall_argmax_prob": float,
             "num_tokens_evaluated": int,
         }
     """
@@ -50,6 +52,7 @@ def eval_gpt(
     total_nll = 0.0
     total_entropy = 0.0
     total_correct = 0
+    total_argmax_prob = 0.0
     total_tokens = 0
 
     with torch.no_grad():
@@ -78,9 +81,13 @@ def eval_gpt(
                 preds = logits.argmax(dim=-1)  # (B, T)
                 correct = (preds == targets)  # (B, T)
 
+                # Argmax prob: probability mass on the top-1 predicted token
+                argmax_prob = probs.max(dim=-1)[0]  # (B, T)
+
             total_nll += nll.sum().item()
             total_entropy += entropy.sum().item()
             total_correct += correct.sum().item()
+            total_argmax_prob += argmax_prob.sum().item()
             total_tokens += B * T
 
     if was_training:
@@ -95,5 +102,6 @@ def eval_gpt(
         "overall_ppl": torch.exp(torch.tensor(avg_loss)).item(),
         "overall_entropy_ppl": torch.exp(torch.tensor(avg_entropy)).item(),
         "overall_accuracy": total_correct / total_tokens if total_tokens > 0 else 0.0,
+        "overall_argmax_prob": total_argmax_prob / total_tokens if total_tokens > 0 else 0.0,
         "num_tokens_evaluated": total_tokens,
     }

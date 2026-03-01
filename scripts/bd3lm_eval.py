@@ -214,17 +214,19 @@ def print_results(eval_result, target_shift, block_size):
     # Left-to-right mode result
     if "left_to_right" in eval_result:
         ltr = eval_result["left_to_right"]
+        eppl = f", overall_entropy_ppl={ltr['overall_entropy_ppl']:.2f}" if "overall_entropy_ppl" in ltr else ""
         print0(f"\n[left_to_right] overall_loss={ltr['overall_loss']:.4f}, "
-               f"overall_ppl={ltr['overall_ppl']:.2f}, "
+               f"overall_ppl={ltr['overall_ppl']:.2f}{eppl}, "
                f"overall_accuracy={ltr['overall_accuracy']:.2%}")
-        print0(f"\nPer-position metrics (ppl / accuracy):")
+        print0(f"\nPer-position metrics (ppl / entropy_ppl / accuracy):")
         positions = ltr.get("positions", {})
         for k in range(block_size):
             pos_data = positions.get(k, positions.get(str(k), {}))
-            ppl = pos_data.get("ppl", float("nan"))
-            acc = pos_data.get("accuracy", float("nan"))
+            ppl  = pos_data.get("ppl", float("nan"))
+            eppl = pos_data.get("entropy_ppl", float("nan"))
+            acc  = pos_data.get("accuracy", float("nan"))
             print0(f"  pos {k}: loss={pos_data.get('loss', float('nan')):.4f}, "
-                   f"ppl={ppl:.2f}, accuracy={acc:.2%}")
+                   f"ppl={ppl:.2f}, entropy_ppl={eppl:.2f}, accuracy={acc:.2%}")
         print0("\n" + "=" * 60)
         return
 
