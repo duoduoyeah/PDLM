@@ -27,9 +27,8 @@ set -e
 # ============================================================
 # Environment setup (uv/venv/credentials via scratch venv)
 # ============================================================
-source ~/pdlm_mask/slurms/setup.sh
-# setup.sh does: cd ~/pdlm_mask, uv sync --extra gpu, activates scratch venv,
-#                exports HF_TOKEN, WANDB_API_KEY, WANDB_DIR
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${REPO_ROOT}/slurms/setup.sh"
 
 # ============================================================
 # Settings

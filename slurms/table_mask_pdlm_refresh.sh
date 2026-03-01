@@ -28,7 +28,8 @@ set -e
 # ============================================================
 # Environment setup
 # ============================================================
-source ~/pdlm_mask/slurms/setup.sh
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${REPO_ROOT}/slurms/setup.sh"
 
 # ============================================================
 # Settings

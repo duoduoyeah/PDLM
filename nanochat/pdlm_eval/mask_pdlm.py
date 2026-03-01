@@ -154,7 +154,11 @@ def _eval_end2end(model, cached_batches, block_size, attn_mask, device, autocast
 
     Total forward passes per batch: 1 + block_size.
     """
-    nll_by_pos = {p: {"nll": 0.0, "entropy": 0.0, "correct": 0, "tokens": 0} for p in range(block_size)}
+    nll_by_pos = {p: {
+        "nll": 0.0, "entropy": 0.0, "correct": 0, "tokens": 0,
+        "argmax_prob": 0.0, "second_prob": 0.0, "third_prob": 0.0,
+        "top3_sum": 0.0, "top5_sum": 0.0,
+    } for p in range(block_size)}
     pure_vocab_size = model.config.pure_vocab_size
     num_groups = model.config.num_groups
     mask_token_id = pure_vocab_size + num_groups
@@ -196,14 +200,24 @@ def _eval_end2end(model, cached_batches, block_size, attn_mask, device, autocast
 
                 # Compute CE for this position from current logits (model sees group/mask input)
                 log_probs = F.log_softmax(logits.float(), dim=-1)
+                probs = log_probs.exp()
                 target_log_probs = log_probs.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
-                entropy = -(log_probs.exp() * log_probs).sum(dim=-1)  # (B, T)
+                entropy = -(probs * log_probs).sum(dim=-1)  # (B, T)
                 nll = -target_log_probs[pos_masks[denoise_step]]
                 nll_by_pos[denoise_step]["nll"] += nll.sum().item()
                 nll_by_pos[denoise_step]["entropy"] += entropy[pos_masks[denoise_step]].sum().item()
                 nll_by_pos[denoise_step]["tokens"] += pos_masks[denoise_step].sum().item()
                 preds = logits[pos_masks[denoise_step]].argmax(dim=-1)
                 nll_by_pos[denoise_step]["correct"] += (preds == targets[pos_masks[denoise_step]]).sum().item()
+
+                # Top-5 confidence metrics
+                top5_probs, _ = probs.topk(5, dim=-1)  # (B, T, 5)
+                pos_top5 = top5_probs[pos_masks[denoise_step]]  # (N, 5)
+                nll_by_pos[denoise_step]["argmax_prob"] += pos_top5[:, 0].sum().item()
+                nll_by_pos[denoise_step]["second_prob"] += pos_top5[:, 1].sum().item()
+                nll_by_pos[denoise_step]["third_prob"]  += pos_top5[:, 2].sum().item()
+                nll_by_pos[denoise_step]["top3_sum"]    += pos_top5[:, :3].sum().item()
+                nll_by_pos[denoise_step]["top5_sum"]    += pos_top5[:, :5].sum().item()
 
                 # Use ground truth pure token at denoise_step position (teacher forcing on P)
                 # Previous positions' errors must not propagate — same principle as AR eval
@@ -351,7 +365,11 @@ def _eval_end2end_refresh(model, cached_batches, block_size, attn_mask, device, 
 
     Forward passes per batch: 1 (init) + 2 * block_size (refresh + eval per step).
     """
-    nll_by_pos = {p: {"nll": 0.0, "entropy": 0.0, "correct": 0, "tokens": 0} for p in range(block_size)}
+    nll_by_pos = {p: {
+        "nll": 0.0, "entropy": 0.0, "correct": 0, "tokens": 0,
+        "argmax_prob": 0.0, "second_prob": 0.0, "third_prob": 0.0,
+        "top3_sum": 0.0, "top5_sum": 0.0,
+    } for p in range(block_size)}
     pure_vocab_size = model.config.pure_vocab_size
     num_groups = model.config.num_groups
     mask_token_id = pure_vocab_size + num_groups
@@ -396,8 +414,9 @@ def _eval_end2end_refresh(model, cached_batches, block_size, attn_mask, device, 
                 # Step B: Eval forward with refreshed groups → record loss at pos k
                 logits = model.forward_for_eval_mask_pdlm(eval_inputs, targets, attn_mask=attn_mask)
                 log_probs = F.log_softmax(logits.float(), dim=-1)
+                probs = log_probs.exp()
                 target_log_probs = log_probs.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
-                entropy = -(log_probs.exp() * log_probs).sum(dim=-1)
+                entropy = -(probs * log_probs).sum(dim=-1)
                 del log_probs  # free large tensor before collapse
 
                 nll = -target_log_probs[pos_masks[k]]
@@ -406,6 +425,16 @@ def _eval_end2end_refresh(model, cached_batches, block_size, attn_mask, device, 
                 nll_by_pos[k]["tokens"] += pos_masks[k].sum().item()
                 preds = logits[pos_masks[k]].argmax(dim=-1)
                 nll_by_pos[k]["correct"] += (preds == targets[pos_masks[k]]).sum().item()
+
+                # Top-5 confidence metrics
+                top5_probs, _ = probs.topk(5, dim=-1)  # (B, T, 5)
+                pos_top5 = top5_probs[pos_masks[k]]    # (N, 5)
+                nll_by_pos[k]["argmax_prob"] += pos_top5[:, 0].sum().item()
+                nll_by_pos[k]["second_prob"] += pos_top5[:, 1].sum().item()
+                nll_by_pos[k]["third_prob"]  += pos_top5[:, 2].sum().item()
+                nll_by_pos[k]["top3_sum"]    += pos_top5[:, :3].sum().item()
+                nll_by_pos[k]["top5_sum"]    += pos_top5[:, :5].sum().item()
+                del probs
 
                 # Teacher-force pos k to ground truth
                 eval_inputs[pos_masks[k]] = targets[pos_masks[k]]
@@ -454,6 +483,149 @@ def eval_mask_pdlm_refresh(
     return {
         "stage": "mask_pdlm",
         "end2end_refresh": refresh_result,
+    }
+
+
+def _eval_end2end_fresh_mask_g(model, cached_batches, block_size, attn_mask, device, autocast_ctx):
+    """
+    End-to-end eval with fresh mask-derived G tokens at each step.
+
+    Like _eval_end2end_refresh, but Step A resets remaining positions to MASK
+    tokens before collapsing to G (instead of using stale G as context).
+    This removes trajectory inertia entirely: G is always derived from
+    [GT_0..k-1, MASK, MASK, ...] rather than [GT_0..k-1, stale_G, ...].
+
+    If fresh_acc ≈ p=0 acc, the inertia from stale G is the full explanation
+    for the accuracy gap in normal end2end eval.
+
+    Forward passes per batch: 1 (init) + 2 * block_size (mask-refresh + eval per step).
+    """
+    nll_by_pos = {p: {
+        "nll": 0.0, "entropy": 0.0, "correct": 0, "tokens": 0,
+        "argmax_prob": 0.0, "second_prob": 0.0, "third_prob": 0.0,
+        "top3_sum": 0.0, "top5_sum": 0.0,
+    } for p in range(block_size)}
+    pure_vocab_size = model.config.pure_vocab_size
+    num_groups = model.config.num_groups
+    mask_token_id = pure_vocab_size + num_groups
+    group_offset = pure_vocab_size
+
+    for inputs, targets, loss_extras, _ in cached_batches:
+        B, T = inputs.shape
+        num_blocks = T // block_size
+
+        with autocast_ctx:
+            pos_masks = []
+            for p in range(block_size):
+                mask = torch.zeros(B, T, dtype=torch.bool, device=device)
+                for block_idx in range(2, num_blocks):
+                    mask[:, block_idx * block_size + p] = True
+                pos_masks.append(mask)
+            target_mask = torch.zeros(B, T, dtype=torch.bool, device=device)
+            for p in range(block_size):
+                target_mask |= pos_masks[p]
+
+            # Init: mask all target blocks → forward → collapse to groups (same as other evals)
+            eval_inputs = targets.clone()
+            eval_inputs[target_mask] = mask_token_id
+            logits = model.forward_for_eval_mask_pdlm(eval_inputs, targets, attn_mask=attn_mask)
+            all_groups = model.collapse_pure_to_group(logits)
+            eval_inputs[target_mask] = all_groups[target_mask] + group_offset
+
+            for k in range(block_size):
+                # Step A: Build fresh_inputs with MASK for all remaining positions k..block_size-1.
+                # This removes trajectory inertia: G is derived from [GT_0..k-1, MASK, ...]
+                # rather than [GT_0..k-1, stale_G, ...].
+                fresh_inputs = eval_inputs.clone()
+                remaining_positions = torch.zeros(B, T, dtype=torch.bool, device=device)
+                for rp in range(k, block_size):
+                    remaining_positions |= pos_masks[rp]
+                fresh_inputs[remaining_positions] = mask_token_id
+
+                logits_r = model.forward_for_eval_mask_pdlm(fresh_inputs, targets, attn_mask=attn_mask)
+                g_fresh = model.collapse_pure_to_group(logits_r)
+                del logits_r, fresh_inputs, remaining_positions
+                for rp in range(k, block_size):
+                    eval_inputs[pos_masks[rp]] = g_fresh[pos_masks[rp]] + group_offset
+                del g_fresh
+
+                # Step B: Eval forward with mask-derived G → record loss at pos k
+                logits = model.forward_for_eval_mask_pdlm(eval_inputs, targets, attn_mask=attn_mask)
+                log_probs = F.log_softmax(logits.float(), dim=-1)
+                probs = log_probs.exp()
+                target_log_probs = log_probs.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
+                entropy = -(probs * log_probs).sum(dim=-1)
+                del log_probs
+
+                nll = -target_log_probs[pos_masks[k]]
+                nll_by_pos[k]["nll"] += nll.sum().item()
+                nll_by_pos[k]["entropy"] += entropy[pos_masks[k]].sum().item()
+                nll_by_pos[k]["tokens"] += pos_masks[k].sum().item()
+                preds = logits[pos_masks[k]].argmax(dim=-1)
+                nll_by_pos[k]["correct"] += (preds == targets[pos_masks[k]]).sum().item()
+
+                # Top-5 confidence metrics
+                top5_probs, _ = probs.topk(5, dim=-1)  # (B, T, 5)
+                pos_top5 = top5_probs[pos_masks[k]]    # (N, 5)
+                nll_by_pos[k]["argmax_prob"] += pos_top5[:, 0].sum().item()
+                nll_by_pos[k]["second_prob"] += pos_top5[:, 1].sum().item()
+                nll_by_pos[k]["third_prob"]  += pos_top5[:, 2].sum().item()
+                nll_by_pos[k]["top3_sum"]    += pos_top5[:, :3].sum().item()
+                nll_by_pos[k]["top5_sum"]    += pos_top5[:, :5].sum().item()
+                del probs
+
+                # Teacher-force pos k to ground truth
+                eval_inputs[pos_masks[k]] = targets[pos_masks[k]]
+
+                # Collapse remaining positions from eval forward for next iter's starting G
+                if k < block_size - 1:
+                    g_next = model.collapse_pure_to_group(logits)
+                    for rp in range(k + 1, block_size):
+                        eval_inputs[pos_masks[rp]] = g_next[pos_masks[rp]] + group_offset
+                del logits
+
+    return build_result_dict(nll_by_pos, block_size, include_accuracy=True)
+
+
+def eval_mask_pdlm_fresh_mask_g(
+    model,
+    val_loader,
+    block_size,
+    num_batches,
+    attn_mask,
+    device,
+    autocast_ctx,
+    prefix_pure_tokens=0,
+):
+    """
+    Evaluate mask_pdlm with fresh mask-derived G tokens at each step.
+
+    At each denoising step k, remaining positions are reset to MASK tokens before
+    collapsing to G. This removes the trajectory inertia caused by stale G tokens
+    carried from previous steps (unlike refresh eval which uses previous G as context).
+
+    If fresh_acc at pos1+ recovers toward p=0 levels, it confirms the accuracy drop
+    in normal end2end eval is caused by G-token inertia, not model capability.
+
+    Also reports top-5 confidence metrics per position to show that higher soft_p
+    leads to more confident predictions (higher argmax prob, sharper top-k distribution).
+
+    Returns:
+        {
+            "stage": "mask_pdlm",
+            "end2end_fresh_mask_g": result_dict,
+        }
+    """
+    with model_eval_context(model):
+        with torch.no_grad():
+            cached_batches = [next(val_loader) for _ in range(num_batches)]
+            fresh_result = _eval_end2end_fresh_mask_g(
+                model, cached_batches, block_size, attn_mask, device, autocast_ctx,
+            )
+
+    return {
+        "stage": "mask_pdlm",
+        "end2end_fresh_mask_g": fresh_result,
     }
 
 

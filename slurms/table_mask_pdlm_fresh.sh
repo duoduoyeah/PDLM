@@ -1,27 +1,33 @@
 #!/bin/bash -l
-#SBATCH --job-name="mask_pdlm_parallel"
+#SBATCH --job-name="mask_pdlm_fresh"
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:a100:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=50G
 #SBATCH --time=12:00:00
-#SBATCH --output=/rhome/sli588/temp/mask_pdlm_parallel_%j.out
+#SBATCH --output=/rhome/sli588/temp/mask_pdlm_fresh_%j.out
 
-## Evaluate all mask_pdlm sweep models with parallel decode variants.
+## Evaluate all mask_pdlm sweep models with the fresh-mask-G eval.
 ##
-## Runs two parallel decode variants for each model:
-##   parallel_mid: schedule [(0,),(1,2),(3,)] — pos 1+2 decoded together (4 forward passes)
-##   parallel_end: schedule [(0,),(1,),(2,3)] — pos 2+3 decoded together (4 forward passes)
+## Fresh-mask-G eval: at each denoising step k, remaining positions are reset
+## to MASK tokens before collapsing to G (instead of using stale G as context).
+## This removes trajectory inertia from G tokens and isolates whether the
+## accuracy drop at p>0 is from G inertia or fundamental model degradation.
+##
+## Also reports top-5 confidence metrics per position (argmax_prob, second_prob,
+## third_prob, top3_sum, top5_sum) to show that higher soft_p leads to more
+## confident predictions — supporting the paper claim that soft group tokens
+## carry real signal compared to uninformative mask tokens.
 ##
 ## Reuses already-downloaded models from mask_pdlm_sweep_eval in $SCRATCH.
 ## If a model is not found locally, downloads it from Google Drive first.
 ##
-## Results (JSON per model) saved to table_script/results/table_mask_pdlm_parallel/
+## Results (JSON per model) saved to table_script/results/table_mask_pdlm_fresh/
 ##
 ## Usage:
-##   sbatch slurms/table_mask_pdlm_parallel.sh
-##   SKIP_EXISTING=true sbatch slurms/table_mask_pdlm_parallel.sh   # resume interrupted run
-##   PRINT_ONLY=true  sbatch slurms/table_mask_pdlm_parallel.sh     # reprint table from cached JSONs
+##   sbatch slurms/table_mask_pdlm_fresh.sh
+##   SKIP_EXISTING=true sbatch slurms/table_mask_pdlm_fresh.sh   # resume interrupted run
+##   PRINT_ONLY=true  sbatch slurms/table_mask_pdlm_fresh.sh     # reprint table from cached JSONs
 
 set -e
 
@@ -37,15 +43,15 @@ source "${REPO_ROOT}/slurms/setup.sh"
 TOTAL_SEQ=3200
 GDRIVE_ROOT="gdrive:nanochat"
 GDRIVE_FOLDER="mask_pdlm_soft_sweep"
-OUT_DIR="table_script/results/table_mask_pdlm_parallel"
-LOCAL_DIR="${SCRATCH}/mask_pdlm_sweep_eval"   # same as table_mask_pdlm_sweep.sh — reuse downloads
+OUT_DIR="table_script/results/table_mask_pdlm_fresh"
+LOCAL_DIR="${SCRATCH}/mask_pdlm_sweep_eval"   # reuse downloads from table_mask_pdlm_sweep.sh
 SKIP_EXISTING="${SKIP_EXISTING:-false}"
 PRINT_ONLY="${PRINT_ONLY:-false}"
 
 mkdir -p "${OUT_DIR}"
 
 # ============================================================
-# Model lists (same as table_mask_pdlm_sweep.sh)
+# Model lists (same as table_mask_pdlm_refresh.sh)
 # ============================================================
 
 P_SWEEP_K31=(
@@ -86,7 +92,6 @@ _ensure_model() {
     local MODEL="$1"
     local MODEL_DIR="${LOCAL_DIR}/${MODEL}"
 
-    # If already downloaded, skip rclone
     if [ -d "${MODEL_DIR}/base_checkpoints" ]; then
         echo "  Model already at ${MODEL_DIR}"
     else
@@ -102,7 +107,6 @@ _ensure_model() {
         fi
     fi
 
-    # Set up dataset symlink if needed
     if [ -n "${NANOCHAT_BASE_DIR}" ]; then
         DATA_DIR="${NANOCHAT_BASE_DIR}/simple_story_data"
     else
@@ -112,7 +116,6 @@ _ensure_model() {
         ln -s "${DATA_DIR}" "${MODEL_DIR}/simple_story_data" 2>/dev/null || true
     fi
 
-    # Symlink tokenizer
     BASE_DIR=$(dirname "${DATA_DIR}")
     if [ -d "${MODEL_DIR}/tokenizer" ]; then
         TOKENIZER_LINK="${BASE_DIR}/tokenizer"
@@ -125,9 +128,7 @@ _ensure_model() {
 
 _find_ckpt() {
     local MODEL_DIR="$1"
-    local CKPT_DIR
-    CKPT_DIR=$(find "${MODEL_DIR}/base_checkpoints" -name "model_*.pt" -printf '%h\n' 2>/dev/null | sort -u | tail -1)
-    echo "${CKPT_DIR}"
+    find "${MODEL_DIR}/base_checkpoints" -name "model_*.pt" -printf '%h\n' 2>/dev/null | sort -u | tail -1
 }
 
 # ============================================================
@@ -150,7 +151,7 @@ fi
 if [ "${PRINT_ONLY}" != "true" ]; then
     echo ""
     echo "========================================================"
-    echo "Mask PDLM Parallel Decode Evaluation"
+    echo "Mask PDLM Fresh-Mask-G Evaluation"
     echo "  total_sequences=${TOTAL_SEQ}"
     echo "  models: ${#ALL_MODELS[@]}"
     echo "========================================================"
@@ -178,7 +179,7 @@ if [ "${PRINT_ONLY}" != "true" ]; then
         python -m scripts.pdlm_eval \
             --ckpt_dir="${CKPT_DIR}" \
             --total_sequences=${TOTAL_SEQ} \
-            --parallel_decode \
+            --fresh_mask_decode \
             --output_json="${RESULT_OUT}"
 
         if [ $? -ne 0 ]; then
@@ -193,8 +194,8 @@ fi
 # Analyze results: print tables + write summary.json + summary.csv
 # ============================================================
 echo ""
-python3 table_script/analyze_mask_pdlm_parallel.py \
-    --parallel_dir="${OUT_DIR}" \
+python3 table_script/analyze_mask_pdlm_fresh.py \
+    --fresh_dir="${OUT_DIR}" \
     --sequential_dir="table_script/results/table_mask_pdlm_sweep"
 
 echo ""

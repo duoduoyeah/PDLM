@@ -40,6 +40,7 @@ def eval_bd3lm(
     device,
     autocast_ctx,
     mask_token_id,
+    left_to_right=False,
 ):
     """
     Evaluate BD3LM model on validation set.
@@ -55,6 +56,8 @@ def eval_bd3lm(
         device: device to run on
         autocast_ctx: autocast context for mixed precision
         mask_token_id: token id for MASK token
+        left_to_right: if True and target_shift < 0, run left-to-right teacher-forced eval
+                       (one forward per position k, reveals prefix 0..k-1 within each block)
 
     Returns:
         dict with evaluation results:
@@ -65,7 +68,7 @@ def eval_bd3lm(
                 "loss_2suffix": float, "ppl_2suffix": float,  # pos 1,2 clear
                 "loss_3suffix": float, "ppl_3suffix": float,  # pos 1,2,3 clear
             }
-        - target_shift < 0 (normal mode):
+        - target_shift < 0, left_to_right=False (normal mode):
             {
                 "overall_loss": float, "overall_ppl": float,
                 "positions": {
@@ -78,12 +81,29 @@ def eval_bd3lm(
                     2: {...}, ...
                 }
             }
+        - target_shift < 0, left_to_right=True:
+            {
+                "stage": "bd3lm",
+                "left_to_right": {
+                    "overall_loss": float, "overall_ppl": float, "overall_accuracy": float,
+                    "positions": {
+                        0: {"loss": float, "ppl": float, "accuracy": float},
+                        ...
+                    }
+                }
+            }
     """
     was_training = model.training
     model.eval()
 
     with torch.no_grad():
-        if target_shift >= 1:
+        if left_to_right and target_shift < 0:
+            ltr_result = _eval_left_to_right_mode(
+                model, val_loader, block_size,
+                num_batches, attn_mask, device, autocast_ctx, mask_token_id
+            )
+            result = {"stage": "bd3lm", "left_to_right": ltr_result}
+        elif target_shift >= 1:
             result = _eval_target_shift_mode(
                 model, val_loader, block_size, target_shift,
                 num_batches, attn_mask, device, autocast_ctx, mask_token_id
@@ -96,6 +116,120 @@ def eval_bd3lm(
 
     if was_training:
         model.train()
+    return result
+
+
+def _prepare_ltr_batch(targets, mask_token_id, block_size, num_prefix):
+    """
+    Prepare left-to-right eval batch: reveal positions 0..num_prefix-1 in each block.
+
+    For each block, the first num_prefix positions are clean (revealed),
+    all remaining positions are MASK.
+
+    Args:
+        targets: (B, L) clean target tokens (already on device)
+        mask_token_id: token id for MASK
+        block_size: size of each block
+        num_prefix: number of prefix positions to reveal (0 = all masked)
+
+    Returns:
+        inputs: (B, L) tokens with prefix positions revealed, rest MASK
+    """
+    B, L = targets.shape
+    num_blocks = L // block_size
+
+    inputs = torch.full((B, L), mask_token_id, dtype=torch.long, device=targets.device)
+
+    if num_prefix > 0:
+        for block_idx in range(num_blocks):
+            block_start = block_idx * block_size
+            for j in range(num_prefix):
+                inputs[:, block_start + j] = targets[:, block_start + j]
+
+    return inputs
+
+
+def _eval_left_to_right_mode(
+    model, val_loader, block_size,
+    num_batches, attn_mask, device, autocast_ctx, mask_token_id
+):
+    """
+    Evaluate BD3LM in left-to-right teacher-forced mode.
+
+    Mirrors PDLM p=0 end2end eval: at each position k within a block, predicts
+    the token given ground-truth prefix (positions 0..k-1 in the block) plus
+    clean tokens from all previous blocks (available via x0 cross-attention).
+
+    One forward pass per k covers all blocks simultaneously (O(block_size) passes).
+    Block 0 is skipped (no previous context).
+
+    Returns:
+        {
+            "overall_loss": float, "overall_ppl": float, "overall_accuracy": float,
+            "positions": {
+                0: {"loss": float, "ppl": float, "accuracy": float},
+                1: {...}, ...
+            }
+        }
+    """
+    nll_data = {k: {"nll": 0.0, "entropy": 0.0, "tokens": 0} for k in range(block_size)}
+    acc_data = {k: {"correct": 0, "total": 0} for k in range(block_size)}
+
+    # Collect all batches (need to iterate block_size times)
+    all_targets = []
+    for _ in range(num_batches):
+        _, targets_batch, _, _ = next(val_loader)
+        all_targets.append(targets_batch)
+
+    for k in range(block_size):
+        for targets_batch in all_targets:
+            B, L = targets_batch.shape
+            num_blocks = L // block_size
+
+            inputs = _prepare_ltr_batch(targets_batch, mask_token_id, block_size, num_prefix=k)
+
+            with autocast_ctx:
+                logits = model.forward_for_eval(inputs, targets_batch, attn_mask=attn_mask)
+                log_probs = F.log_softmax(logits.float(), dim=-1)
+                entropy = -(log_probs.exp() * log_probs).sum(dim=-1)  # (B, L)
+
+                # Evaluate position k in each block, skipping block 0
+                for block_idx in range(1, num_blocks):
+                    pos_in_seq = block_idx * block_size + k
+
+                    nll = -log_probs[:, pos_in_seq, :].gather(
+                        -1, targets_batch[:, pos_in_seq].unsqueeze(-1)
+                    ).squeeze(-1)
+                    nll_data[k]["nll"] += nll.sum().item()
+                    nll_data[k]["entropy"] += entropy[:, pos_in_seq].sum().item()
+                    nll_data[k]["tokens"] += B
+
+                    preds = logits[:, pos_in_seq, :].argmax(dim=-1)
+                    acc_data[k]["correct"] += (preds == targets_batch[:, pos_in_seq]).sum().item()
+                    acc_data[k]["total"] += B
+
+    total_nll = sum(nll_data[k]["nll"] for k in range(block_size))
+    total_tokens = sum(nll_data[k]["tokens"] for k in range(block_size))
+    total_correct = sum(acc_data[k]["correct"] for k in range(block_size))
+
+    overall_loss = total_nll / total_tokens if total_tokens > 0 else 0.0
+    result = {
+        "overall_loss": overall_loss,
+        "overall_ppl": torch.exp(torch.tensor(overall_loss)).item(),
+        "overall_accuracy": total_correct / total_tokens if total_tokens > 0 else 0.0,
+        "positions": {},
+    }
+
+    for k in range(block_size):
+        tokens_k = nll_data[k]["tokens"]
+        loss_k = nll_data[k]["nll"] / tokens_k if tokens_k > 0 else 0.0
+        acc_k = acc_data[k]["correct"] / acc_data[k]["total"] if acc_data[k]["total"] > 0 else 0.0
+        result["positions"][k] = {
+            "loss": loss_k,
+            "ppl": torch.exp(torch.tensor(loss_k)).item(),
+            "accuracy": acc_k,
+        }
+
     return result
 
 

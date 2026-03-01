@@ -1,17 +1,17 @@
 #!/bin/bash
 
-## Mask PDLM evaluation from Google Drive.
+## BD3LM evaluation from Google Drive (left-to-right teacher-forced mode).
 ## Downloads model via rclone, runs evaluation, optionally pushes results to HuggingFace.
 ##
 ## Usage (standalone inside a SLURM job or interactive node):
-##   bash slurms/eval_mask_pdlm_gdrive.sh \
-##       --gdrive_folder=mask_pdlm_soft_sweep \
-##       --model=mask_pdlm_d8_b4_n512_k15_g120_p50_r40
-##   bash slurms/eval_mask_pdlm_gdrive.sh \
-##       --gdrive_folder=mask_pdlm_soft_sweep \
-##       --model=mask_pdlm_d8_b4_n512_k15_g120_p50_r40 \
+##   bash slurms/eval_bd3lm_gdrive.sh \
+##       --gdrive_folder=bd3lm_d8 \
+##       --model=bd3lm_d8_b4_normal_r40
+##   bash slurms/eval_bd3lm_gdrive.sh \
+##       --gdrive_folder=bd3lm_d8 \
+##       --model=bd3lm_d8_b4_normal_r40 \
 ##       --total_sequences=3200 \
-##       --local_dir=$SCRATCH/mask_pdlm_eval \
+##       --local_dir=$SCRATCH/bd3lm_eval \
 ##       --push_results
 
 set -e
@@ -29,7 +29,7 @@ GDRIVE_ROOT="gdrive:nanochat"
 GDRIVE_FOLDER=""
 MODEL=""
 TOTAL_SEQUENCES="3200"
-LOCAL_DIR="${SCRATCH:-/tmp}/mask_pdlm_eval"
+LOCAL_DIR="${SCRATCH:-/tmp}/bd3lm_eval"
 PUSH_RESULTS="false"
 
 # Parse named arguments
@@ -52,10 +52,10 @@ for arg in "$@"; do
             ;;
         *)
             echo "Unknown argument: $arg"
-            echo "Usage: bash slurms/eval_mask_pdlm_gdrive.sh \\"
-            echo "    --gdrive_folder=mask_pdlm_soft_sweep \\"
-            echo "    --model=mask_pdlm_d8_b4_n512_k15_g120_p50_r40 \\"
-            echo "    [--total_sequences=3200] [--local_dir=\$SCRATCH/mask_pdlm_eval] [--push_results]"
+            echo "Usage: bash slurms/eval_bd3lm_gdrive.sh \\"
+            echo "    --gdrive_folder=bd3lm_d8 \\"
+            echo "    --model=bd3lm_d8_b4_normal_r40 \\"
+            echo "    [--total_sequences=3200] [--local_dir=\$SCRATCH/bd3lm_eval] [--push_results]"
             exit 1
             ;;
     esac
@@ -68,11 +68,11 @@ fi
 
 GDRIVE_PATH="${GDRIVE_ROOT}/${GDRIVE_FOLDER}/${MODEL}"
 MODEL_DIR="${LOCAL_DIR}/${MODEL}"
-RUN_FOLDER="seq${TOTAL_SEQUENCES}"
+RUN_FOLDER="seq${TOTAL_SEQUENCES}_ltr"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
 echo "============================================================"
-echo "Mask PDLM Evaluation (Google Drive)"
+echo "BD3LM Left-to-Right Evaluation (Google Drive)"
 echo "============================================================"
 echo "GDrive path:     ${GDRIVE_PATH}"
 echo "Local dir:       ${MODEL_DIR}"
@@ -125,7 +125,7 @@ fi
 echo "Download complete: ${MODEL_DIR}"
 
 # ============================================================
-# Step 2: Set up NANOCHAT_BASE_DIR and tokenizer symlink
+# Step 2: Set up NANOCHAT_BASE_DIR and data symlink
 # ============================================================
 echo ""
 echo "Step 2: Setting up data links..."
@@ -134,19 +134,6 @@ echo "Step 2: Setting up data links..."
 if [ ! -e "${MODEL_DIR}/simple_story_data" ]; then
     ln -s "${DATA_DIR}" "${MODEL_DIR}/simple_story_data"
     echo "  Created symlink: ${MODEL_DIR}/simple_story_data -> ${DATA_DIR}"
-fi
-
-# Symlink tokenizer into NANOCHAT_BASE_DIR root (needed by get_base_dir)
-BASE_DIR=$(dirname "${DATA_DIR}")
-TOKENIZER_LINK="${BASE_DIR}/tokenizer"
-MODEL_TOKENIZER="${MODEL_DIR}/tokenizer"
-
-if [ -d "${MODEL_TOKENIZER}" ]; then
-    if [ -L "${TOKENIZER_LINK}" ]; then
-        rm "${TOKENIZER_LINK}"
-    fi
-    ln -s "${MODEL_TOKENIZER}" "${TOKENIZER_LINK}"
-    echo "  Created symlink: ${TOKENIZER_LINK} -> ${MODEL_TOKENIZER}"
 fi
 
 export NANOCHAT_BASE_DIR="${MODEL_DIR}"
@@ -168,13 +155,14 @@ fi
 echo "  Checkpoint dir: ${CKPT_DIR}"
 
 # ============================================================
-# Step 4: Run evaluation
+# Step 4: Run left-to-right evaluation
 # ============================================================
 echo ""
-echo "Step 4: Running evaluation (${TOTAL_SEQUENCES} sequences)..."
+echo "Step 4: Running BD3LM left-to-right evaluation (${TOTAL_SEQUENCES} sequences)..."
 
-python -m scripts.pdlm_eval \
+python -m scripts.bd3lm_eval \
     --ckpt_dir="${CKPT_DIR}" \
+    --left_to_right \
     --total_sequences=${TOTAL_SEQUENCES} \
     --output_json="${MODEL_DIR}/eval_result.json"
 
@@ -204,7 +192,7 @@ model_dir     = '${MODEL_DIR}'
 timestamp     = '${TIMESTAMP}'
 
 args = {k: v for k, v in {
-    'script':          'slurms/eval_mask_pdlm_gdrive.sh',
+    'script':          'slurms/eval_bd3lm_gdrive.sh',
     'gdrive_folder':   gdrive_folder,
     'model':           model_name,
     'total_sequences': '${TOTAL_SEQUENCES}',
@@ -219,12 +207,12 @@ try:
         json.dump(args, f, indent=2)
     upload_folder(
         folder_path=tmp,
-        path_in_repo=f'mask_pdlm/{model_name}/{run_folder}',
+        path_in_repo=f'bd3lm/{model_name}/{run_folder}',
         repo_id='duoduoyeah/eval_results',
         repo_type='dataset',
         token=os.environ.get('HF_TOKEN'),
     )
-    print(f'Uploaded to duoduoyeah/eval_results/mask_pdlm/{model_name}/{run_folder}/eval_result_{timestamp}.json')
+    print(f'Uploaded to duoduoyeah/eval_results/bd3lm/{model_name}/{run_folder}/eval_result_{timestamp}.json')
 finally:
     shutil.rmtree(tmp)
 "

@@ -23,7 +23,7 @@ import torch
 from nanochat.common import compute_init, autodetect_device_type, get_base_dir, print0
 from nanochat.checkpoint_manager import load_checkpoint, find_last_step, find_largest_model
 from nanochat.pdlm import PDLM, PDLMConfig
-from nanochat.pdlm_eval import eval_pdlm, eval_pdlm_stage1_mask, eval_pdlm_stage1_block, eval_pdlm_compatibility, eval_pdlm_full, eval_pdlm_both_block, eval_block_pdlm_inference, eval_mask_pdlm, eval_mask_pdlm_parallel, eval_mask_pdlm_refresh, dump_batch_to_file, dump_stage1_block_batch
+from nanochat.pdlm_eval import eval_pdlm, eval_pdlm_stage1_mask, eval_pdlm_stage1_block, eval_pdlm_compatibility, eval_pdlm_full, eval_pdlm_both_block, eval_block_pdlm_inference, eval_mask_pdlm, eval_mask_pdlm_parallel, eval_mask_pdlm_refresh, eval_mask_pdlm_fresh_mask_g, dump_batch_to_file, dump_stage1_block_batch
 from nanochat.dataloader import get_data_loader
 from nanochat.attn_masks import gen_mask, gen_block_causal_mask
 from nanochat.group_tokenizer.token_map import get_token_map
@@ -121,6 +121,7 @@ def run_eval(
     oracle_accuracy_batches=None,
     parallel_decode=False,
     refresh_decode=False,
+    fresh_mask_decode=False,
 ):
     """
     Run PDLM evaluation (Stage 1 MASK or Stage 2).
@@ -263,6 +264,18 @@ def run_eval(
     elif stage == "mask_pdlm" and refresh_decode:
         print0(f"Running mask_pdlm refresh decode evaluation...")
         eval_result = eval_mask_pdlm_refresh(
+            model=model,
+            val_loader=val_loader,
+            block_size=block_size,
+            num_batches=num_batches,
+            attn_mask=attn_mask,
+            device=device,
+            autocast_ctx=autocast_ctx,
+            prefix_pure_tokens=prefix_pure_tokens,
+        )
+    elif stage == "mask_pdlm" and fresh_mask_decode:
+        print0(f"Running mask_pdlm fresh-mask-G eval (removes G inertia, reports confidence metrics)...")
+        eval_result = eval_mask_pdlm_fresh_mask_g(
             model=model,
             val_loader=val_loader,
             block_size=block_size,
@@ -630,6 +643,8 @@ def main():
                         help="Run parallel decode variants (parallel_mid + parallel_end) instead of standard eval. mask_pdlm only.")
     parser.add_argument("--refresh_decode", action="store_true",
                         help="Run refresh end2end eval: updates group tokens after each teacher-force step. mask_pdlm only.")
+    parser.add_argument("--fresh_mask_decode", action="store_true",
+                        help="Run fresh-mask-G eval: resets remaining positions to MASK before each G collapse, removing G inertia. Also reports top-5 confidence metrics. mask_pdlm only.")
     args = parser.parse_args()
 
     # Handle generation mode (mask_pdlm only)
@@ -729,6 +744,7 @@ def main():
         oracle_accuracy_batches=args.oracle_accuracy_batches,
         parallel_decode=args.parallel_decode,
         refresh_decode=args.refresh_decode,
+        fresh_mask_decode=args.fresh_mask_decode,
     )
 
     # Get block_size for printing

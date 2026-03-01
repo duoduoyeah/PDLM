@@ -8,21 +8,10 @@
 #SBATCH --output=/rhome/sli588/temp/table1_bd3lm_%j.out
 
 # ============================================================
-# Setup
+# Environment setup
 # ============================================================
-export UV_CACHE_DIR=$SCRATCH/.uv_cache
-
-command -v uv &> /dev/null || { curl -LsSf https://astral.sh/uv/install.sh | sh && source $HOME/.local/bin/env; }
-
-# ============================================================
-# Python env (builds rustbpe via maturin; requires Rust)
-# ============================================================
-cd ~/PDLM
-source launch/.env
-export HF_TOKEN
-
-uv sync --extra gpu
-source .venv/bin/activate
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${REPO_ROOT}/slurms/setup.sh"
 
 # ============================================================
 # Run
