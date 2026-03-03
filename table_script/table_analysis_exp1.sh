@@ -19,6 +19,12 @@
 set -e
 
 # ============================================================
+# Environment setup (venv, credentials)
+# ============================================================
+REPO_ROOT="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+source "${REPO_ROOT}/slurms/setup.sh"
+
+# ============================================================
 # Load secrets (HF_TOKEN etc.)
 # ============================================================
 if [ -f "launch/.env" ]; then
@@ -95,9 +101,8 @@ else
         --progress
     bash launch/eval_gpt.sh \
         --ckpt_path="${AR_TS3_LOCAL}" \
-        --total_sequences=${TOTAL_SEQ} \
-        --local_dir="${AR_TS3_LOCAL}"
-    cp "${AR_TS3_LOCAL}/eval_result.json" "${AR_TS3_JSON}"
+        --total_sequences=${TOTAL_SEQ}
+    cp "/tmp/gpt_eval/${AR_TS3_MODEL}/eval_result.json" "${AR_TS3_JSON}"
 fi
 
 # ============================================================

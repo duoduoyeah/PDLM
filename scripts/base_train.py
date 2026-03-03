@@ -177,6 +177,7 @@ if model_type == "next_token_ar":
         n_head=num_heads,
         n_kv_head=num_kv_heads,
         n_embd=model_dim,
+        target_shift=target_shift,
     )
 elif model_type == "bd3lm":
     ModelConfig, Model = BDLMConfig, BDLM

@@ -176,7 +176,7 @@ def _eval_left_to_right_mode(
             }
         }
     """
-    nll_data = {k: {"nll": 0.0, "entropy": 0.0, "tokens": 0} for k in range(block_size)}
+    nll_data = {k: {"nll": 0.0, "entropy": 0.0, "argmax_prob": 0.0, "tokens": 0} for k in range(block_size)}
     acc_data = {k: {"correct": 0, "total": 0} for k in range(block_size)}
 
     # Collect all batches (need to iterate block_size times)
@@ -195,7 +195,9 @@ def _eval_left_to_right_mode(
             with autocast_ctx:
                 logits = model.forward_for_eval(inputs, targets_batch, attn_mask=attn_mask)
                 log_probs = F.log_softmax(logits.float(), dim=-1)
-                entropy = -(log_probs.exp() * log_probs).sum(dim=-1)  # (B, L)
+                probs = log_probs.exp()
+                entropy = -(probs * log_probs).sum(dim=-1)  # (B, L)
+                argmax_prob = probs.max(dim=-1)[0]           # (B, L)
 
                 # Evaluate position k in each block, skipping block 0
                 for block_idx in range(1, num_blocks):
@@ -206,6 +208,7 @@ def _eval_left_to_right_mode(
                     ).squeeze(-1)
                     nll_data[k]["nll"] += nll.sum().item()
                     nll_data[k]["entropy"] += entropy[:, pos_in_seq].sum().item()
+                    nll_data[k]["argmax_prob"] += argmax_prob[:, pos_in_seq].sum().item()
                     nll_data[k]["tokens"] += B
 
                     preds = logits[:, pos_in_seq, :].argmax(dim=-1)
@@ -236,6 +239,7 @@ def _eval_left_to_right_mode(
             "loss": loss_k,
             "ppl": torch.exp(torch.tensor(loss_k)).item(),
             "entropy_ppl": torch.exp(torch.tensor(entropy_k)).item(),
+            "argmax_prob": nll_data[k]["argmax_prob"] / tokens_k if tokens_k > 0 else 0.0,
             "accuracy": acc_k,
         }
 
