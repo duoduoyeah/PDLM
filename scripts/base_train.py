@@ -178,6 +178,7 @@ if model_type == "next_token_ar":
         n_head=num_heads,
         n_kv_head=num_kv_heads,
         n_embd=model_dim,
+        target_shift=target_shift,
     )
 elif model_type == "bd3lm":
     ModelConfig, Model = BDLMConfig, BDLM
@@ -811,14 +812,25 @@ while True:
                     "eval/end2end_loss": eval_result["end2end_loss"],
                     "eval/unified_ppl": unified["overall_ppl"],
                     "eval/end2end_ppl": e2e["overall_ppl"],
+                    "eval/end2end_accuracy": e2e.get("overall_accuracy"),
                 }
+                if "overall_entropy_ppl" in unified:
+                    log_data["eval/unified_entropy_ppl"] = unified["overall_entropy_ppl"]
+                if "overall_entropy_ppl" in e2e:
+                    log_data["eval/end2end_entropy_ppl"] = e2e["overall_entropy_ppl"]
                 for pos in range(block_size):
                     up = unified["positions"][pos]
                     log_data[f"eval/unified_pos_{pos}_loss"] = up["loss"]
                     log_data[f"eval/unified_pos_{pos}_ppl"] = up["ppl"]
+                    if "entropy_ppl" in up:
+                        log_data[f"eval/unified_pos_{pos}_entropy_ppl"] = up["entropy_ppl"]
                     ep = e2e["positions"][pos]
                     log_data[f"eval/end2end_pos_{pos}_loss"] = ep["loss"]
                     log_data[f"eval/end2end_pos_{pos}_ppl"] = ep["ppl"]
+                    if "entropy_ppl" in ep:
+                        log_data[f"eval/end2end_pos_{pos}_entropy_ppl"] = ep["entropy_ppl"]
+                    if "accuracy" in ep:
+                        log_data[f"eval/end2end_pos_{pos}_accuracy"] = ep["accuracy"]
                     # Detailed breakdown
                     if pos in mask_bk:
                         log_data[f"eval/unified_pos_{pos}_mask_loss"] = mask_bk[pos]["loss"]

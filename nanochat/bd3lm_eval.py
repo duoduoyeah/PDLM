@@ -40,6 +40,7 @@ def eval_bd3lm(
     device,
     autocast_ctx,
     mask_token_id,
+    left_to_right=False,
 ):
     """
     Evaluate BD3LM model on validation set.
@@ -55,22 +56,28 @@ def eval_bd3lm(
         device: device to run on
         autocast_ctx: autocast context for mixed precision
         mask_token_id: token id for MASK token
+        left_to_right: if True and target_shift < 0, run left-to-right teacher-forced eval
+                       (one forward per position k, reveals prefix 0..k-1 within each block)
 
     Returns:
         dict with evaluation results:
         - target_shift >= 1 (e.g., ts=1, block_size=4):
             {
-                "loss": float, "ppl": float,  # all masked (core metric)
-                "loss_1suffix": float, "ppl_1suffix": float,  # pos 1 clear
-                "loss_2suffix": float, "ppl_2suffix": float,  # pos 1,2 clear
-                "loss_3suffix": float, "ppl_3suffix": float,  # pos 1,2,3 clear
+                "loss": float, "ppl": float,              # all masked (core metric)
+                "entropy_ppl": float,                     # distribution entropy at target pos
+                "argmax_prob": float,                     # avg prob of top-1 prediction
+                "loss_1suffix": float, "ppl_1suffix": float,
+                "entropy_ppl_1suffix": float, "argmax_prob_1suffix": float,
+                ...
             }
-        - target_shift < 0 (normal mode):
+        - target_shift < 0, left_to_right=False (normal mode):
             {
                 "overall_loss": float, "overall_ppl": float,
                 "positions": {
-                    0: {"loss": X, "ppl": Y, "loss_1suffix": A, "ppl_1suffix": B, ...},
-                    1: {"loss": X, "ppl": Y, "loss_1suffix": A, ...},
+                    0: {"loss": X, "ppl": Y, "entropy_ppl": Z, "argmax_prob": W,
+                        "loss_1suffix": A, "ppl_1suffix": B,
+                        "entropy_ppl_1suffix": C, "argmax_prob_1suffix": D, ...},
+                    1: {"loss": X, "ppl": Y, "entropy_ppl": Z, "argmax_prob": W, ...},
                     ...
                 },
                 "suffix_overall": {
@@ -78,12 +85,29 @@ def eval_bd3lm(
                     2: {...}, ...
                 }
             }
+        - target_shift < 0, left_to_right=True:
+            {
+                "stage": "bd3lm",
+                "left_to_right": {
+                    "overall_loss": float, "overall_ppl": float, "overall_accuracy": float,
+                    "positions": {
+                        0: {"loss": float, "ppl": float, "accuracy": float},
+                        ...
+                    }
+                }
+            }
     """
     was_training = model.training
     model.eval()
 
     with torch.no_grad():
-        if target_shift >= 1:
+        if left_to_right and target_shift < 0:
+            ltr_result = _eval_left_to_right_mode(
+                model, val_loader, block_size,
+                num_batches, attn_mask, device, autocast_ctx, mask_token_id
+            )
+            result = {"stage": "bd3lm", "left_to_right": ltr_result}
+        elif target_shift >= 1:
             result = _eval_target_shift_mode(
                 model, val_loader, block_size, target_shift,
                 num_batches, attn_mask, device, autocast_ctx, mask_token_id
@@ -96,6 +120,129 @@ def eval_bd3lm(
 
     if was_training:
         model.train()
+    return result
+
+
+def _prepare_ltr_batch(targets, mask_token_id, block_size, num_prefix):
+    """
+    Prepare left-to-right eval batch: reveal positions 0..num_prefix-1 in each block.
+
+    For each block, the first num_prefix positions are clean (revealed),
+    all remaining positions are MASK.
+
+    Args:
+        targets: (B, L) clean target tokens (already on device)
+        mask_token_id: token id for MASK
+        block_size: size of each block
+        num_prefix: number of prefix positions to reveal (0 = all masked)
+
+    Returns:
+        inputs: (B, L) tokens with prefix positions revealed, rest MASK
+    """
+    B, L = targets.shape
+    num_blocks = L // block_size
+
+    inputs = torch.full((B, L), mask_token_id, dtype=torch.long, device=targets.device)
+
+    if num_prefix > 0:
+        for block_idx in range(num_blocks):
+            block_start = block_idx * block_size
+            for j in range(num_prefix):
+                inputs[:, block_start + j] = targets[:, block_start + j]
+
+    return inputs
+
+
+def _eval_left_to_right_mode(
+    model, val_loader, block_size,
+    num_batches, attn_mask, device, autocast_ctx, mask_token_id
+):
+    """
+    Evaluate BD3LM in left-to-right teacher-forced mode.
+
+    Mirrors PDLM p=0 end2end eval: at each position k within a block, predicts
+    the token given ground-truth prefix (positions 0..k-1 in the block) plus
+    clean tokens from all previous blocks (available via x0 cross-attention).
+
+    One forward pass per k covers all blocks simultaneously (O(block_size) passes).
+    Block 0 is skipped (no previous context).
+
+    Returns:
+        {
+            "overall_loss": float, "overall_ppl": float, "overall_accuracy": float,
+            "positions": {
+                0: {"loss": float, "ppl": float, "accuracy": float},
+                1: {...}, ...
+            }
+        }
+    """
+    nll_data = {k: {"nll": 0.0, "entropy": 0.0, "argmax_prob": 0.0, "tokens": 0} for k in range(block_size)}
+    acc_data = {k: {"correct": 0, "total": 0} for k in range(block_size)}
+
+    # Collect all batches (need to iterate block_size times)
+    all_targets = []
+    for _ in range(num_batches):
+        _, targets_batch, _, _ = next(val_loader)
+        all_targets.append(targets_batch)
+
+    for k in range(block_size):
+        for targets_batch in all_targets:
+            B, L = targets_batch.shape
+            num_blocks = L // block_size
+
+            inputs = _prepare_ltr_batch(targets_batch, mask_token_id, block_size, num_prefix=k)
+
+            with autocast_ctx:
+                logits = model.forward_for_eval(inputs, targets_batch, attn_mask=attn_mask)
+                log_probs = F.log_softmax(logits.float(), dim=-1)
+                probs = log_probs.exp()
+                entropy = -(probs * log_probs).sum(dim=-1)  # (B, L)
+                argmax_prob = probs.max(dim=-1)[0]           # (B, L)
+
+                # Evaluate position k in each block, skipping block 0
+                for block_idx in range(1, num_blocks):
+                    pos_in_seq = block_idx * block_size + k
+
+                    nll = -log_probs[:, pos_in_seq, :].gather(
+                        -1, targets_batch[:, pos_in_seq].unsqueeze(-1)
+                    ).squeeze(-1)
+                    nll_data[k]["nll"] += nll.sum().item()
+                    nll_data[k]["entropy"] += entropy[:, pos_in_seq].sum().item()
+                    nll_data[k]["argmax_prob"] += argmax_prob[:, pos_in_seq].sum().item()
+                    nll_data[k]["tokens"] += B
+
+                    preds = logits[:, pos_in_seq, :].argmax(dim=-1)
+                    acc_data[k]["correct"] += (preds == targets_batch[:, pos_in_seq]).sum().item()
+                    acc_data[k]["total"] += B
+
+    total_nll = sum(nll_data[k]["nll"] for k in range(block_size))
+    total_tokens = sum(nll_data[k]["tokens"] for k in range(block_size))
+    total_correct = sum(acc_data[k]["correct"] for k in range(block_size))
+
+    total_entropy = sum(nll_data[k]["entropy"] for k in range(block_size))
+    overall_loss = total_nll / total_tokens if total_tokens > 0 else 0.0
+    overall_entropy = total_entropy / total_tokens if total_tokens > 0 else 0.0
+    result = {
+        "overall_loss": overall_loss,
+        "overall_ppl": torch.exp(torch.tensor(overall_loss)).item(),
+        "overall_entropy_ppl": torch.exp(torch.tensor(overall_entropy)).item(),
+        "overall_accuracy": total_correct / total_tokens if total_tokens > 0 else 0.0,
+        "positions": {},
+    }
+
+    for k in range(block_size):
+        tokens_k = nll_data[k]["tokens"]
+        loss_k = nll_data[k]["nll"] / tokens_k if tokens_k > 0 else 0.0
+        entropy_k = nll_data[k]["entropy"] / tokens_k if tokens_k > 0 else 0.0
+        acc_k = acc_data[k]["correct"] / acc_data[k]["total"] if acc_data[k]["total"] > 0 else 0.0
+        result["positions"][k] = {
+            "loss": loss_k,
+            "ppl": torch.exp(torch.tensor(loss_k)).item(),
+            "entropy_ppl": torch.exp(torch.tensor(entropy_k)).item(),
+            "argmax_prob": nll_data[k]["argmax_prob"] / tokens_k if tokens_k > 0 else 0.0,
+            "accuracy": acc_k,
+        }
+
     return result
 
 
@@ -177,6 +324,8 @@ def _eval_target_shift_mode(
 
     # Accumulators for each suffix count (0 = all masked, 1 = 1 suffix clear, etc.)
     nll_by_suffix = {s: 0.0 for s in range(max_suffix + 1)}
+    entropy_by_suffix = {s: 0.0 for s in range(max_suffix + 1)}
+    argmax_prob_by_suffix = {s: 0.0 for s in range(max_suffix + 1)}
     tokens_by_suffix = {s: 0 for s in range(max_suffix + 1)}
 
     # Collect all batches first (we need to iterate multiple times for different suffix counts)
@@ -209,27 +358,42 @@ def _eval_target_shift_mode(
                 # Gather log probs for target tokens
                 target_log_probs = log_probs.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
 
-                # Compute NLL for the specific position in each block
+                # Entropy and argmax prob over the full distribution
+                probs = log_probs.exp()
+                entropy = -(probs * log_probs).sum(dim=-1)  # (B, L)
+                argmax_prob = probs.max(dim=-1)[0]           # (B, L)
+
+                # Compute metrics for the specific position in each block
                 # Skip block 0, compute from blocks 1 onwards
                 for block_idx in range(1, num_blocks):
                     pos_in_seq = block_idx * block_size + position
                     nll = -target_log_probs[:, pos_in_seq]
                     nll_by_suffix[num_suffix] += nll.sum().item()
+                    entropy_by_suffix[num_suffix] += entropy[:, pos_in_seq].sum().item()
+                    argmax_prob_by_suffix[num_suffix] += argmax_prob[:, pos_in_seq].sum().item()
                     tokens_by_suffix[num_suffix] += B
 
     # Build result dict
     result = {}
 
     # Core metrics (all masked)
-    avg_loss = nll_by_suffix[0] / tokens_by_suffix[0] if tokens_by_suffix[0] > 0 else 0.0
+    n = tokens_by_suffix[0]
+    avg_loss = nll_by_suffix[0] / n if n > 0 else 0.0
+    avg_entropy = entropy_by_suffix[0] / n if n > 0 else 0.0
     result["loss"] = avg_loss
     result["ppl"] = torch.exp(torch.tensor(avg_loss)).item()
+    result["entropy_ppl"] = torch.exp(torch.tensor(avg_entropy)).item()
+    result["argmax_prob"] = argmax_prob_by_suffix[0] / n if n > 0 else 0.0
 
     # Suffix metrics
     for num_suffix in range(1, max_suffix + 1):
-        avg_loss_suffix = nll_by_suffix[num_suffix] / tokens_by_suffix[num_suffix] if tokens_by_suffix[num_suffix] > 0 else 0.0
-        result[f"loss_{num_suffix}suffix"] = avg_loss_suffix
-        result[f"ppl_{num_suffix}suffix"] = torch.exp(torch.tensor(avg_loss_suffix)).item()
+        n_s = tokens_by_suffix[num_suffix]
+        avg_loss_s = nll_by_suffix[num_suffix] / n_s if n_s > 0 else 0.0
+        avg_entropy_s = entropy_by_suffix[num_suffix] / n_s if n_s > 0 else 0.0
+        result[f"loss_{num_suffix}suffix"] = avg_loss_s
+        result[f"ppl_{num_suffix}suffix"] = torch.exp(torch.tensor(avg_loss_s)).item()
+        result[f"entropy_ppl_{num_suffix}suffix"] = torch.exp(torch.tensor(avg_entropy_s)).item()
+        result[f"argmax_prob_{num_suffix}suffix"] = argmax_prob_by_suffix[num_suffix] / n_s if n_s > 0 else 0.0
 
     return result
 
@@ -256,10 +420,11 @@ def _eval_normal_mode(
         _, targets_batch, _, _ = next(val_loader)
         all_targets.append(targets_batch)
 
-    # Track metrics: nll_data[num_suffix][pos] = (total_nll, total_tokens)
+    # Track metrics: nll_data[num_suffix][pos]
     # num_suffix=0 means all masked (original eval)
     nll_data = {
-        s: {p: {"nll": 0.0, "tokens": 0} for p in range(block_size)}
+        s: {p: {"nll": 0.0, "entropy": 0.0, "argmax_prob": 0.0, "tokens": 0}
+            for p in range(block_size)}
         for s in range(max_suffix + 1)
     }
 
@@ -295,11 +460,18 @@ def _eval_normal_mode(
                     # Gather log probs for target tokens
                     target_log_probs = log_probs.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
 
-                    # Compute NLL at this position in each block (skip block 0)
+                    # Entropy and argmax prob over the full distribution
+                    probs = log_probs.exp()
+                    entropy = -(probs * log_probs).sum(dim=-1)  # (B, L)
+                    argmax_prob = probs.max(dim=-1)[0]           # (B, L)
+
+                    # Compute metrics at this position in each block (skip block 0)
                     for block_idx in range(1, num_blocks):
                         pos_in_seq = block_idx * block_size + pred_pos
                         nll = -target_log_probs[:, pos_in_seq]
                         nll_data[num_suffix][pred_pos]["nll"] += nll.sum().item()
+                        nll_data[num_suffix][pred_pos]["entropy"] += entropy[:, pos_in_seq].sum().item()
+                        nll_data[num_suffix][pred_pos]["argmax_prob"] += argmax_prob[:, pos_in_seq].sum().item()
                         nll_data[num_suffix][pred_pos]["tokens"] += B
 
     # Build position-centric result dict
@@ -317,17 +489,25 @@ def _eval_normal_mode(
         pos_data = {}
 
         # Base metrics (all masked)
-        base_loss = nll_data[0][pos]["nll"] / nll_data[0][pos]["tokens"] if nll_data[0][pos]["tokens"] > 0 else 0.0
+        n = nll_data[0][pos]["tokens"]
+        base_loss = nll_data[0][pos]["nll"] / n if n > 0 else 0.0
+        base_entropy = nll_data[0][pos]["entropy"] / n if n > 0 else 0.0
         pos_data["loss"] = base_loss
         pos_data["ppl"] = torch.exp(torch.tensor(base_loss)).item()
+        pos_data["entropy_ppl"] = torch.exp(torch.tensor(base_entropy)).item()
+        pos_data["argmax_prob"] = nll_data[0][pos]["argmax_prob"] / n if n > 0 else 0.0
 
         # Suffix metrics for this position
         # Position pos has (block_size - 1 - pos) suffixes available
         max_suffix_for_pos = block_size - 1 - pos
         for s in range(1, max_suffix_for_pos + 1):
-            suffix_loss = nll_data[s][pos]["nll"] / nll_data[s][pos]["tokens"] if nll_data[s][pos]["tokens"] > 0 else 0.0
+            n_s = nll_data[s][pos]["tokens"]
+            suffix_loss = nll_data[s][pos]["nll"] / n_s if n_s > 0 else 0.0
+            suffix_entropy = nll_data[s][pos]["entropy"] / n_s if n_s > 0 else 0.0
             pos_data[f"loss_{s}suffix"] = suffix_loss
             pos_data[f"ppl_{s}suffix"] = torch.exp(torch.tensor(suffix_loss)).item()
+            pos_data[f"entropy_ppl_{s}suffix"] = torch.exp(torch.tensor(suffix_entropy)).item()
+            pos_data[f"argmax_prob_{s}suffix"] = nll_data[s][pos]["argmax_prob"] / n_s if n_s > 0 else 0.0
 
         result["positions"][pos] = pos_data
 

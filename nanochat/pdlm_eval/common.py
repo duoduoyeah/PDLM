@@ -16,6 +16,9 @@ def model_eval_context(model):
             model.train()
 
 
+_CONFIDENCE_KEYS = ("argmax_prob", "second_prob", "third_prob", "top3_sum", "top5_sum")
+
+
 def build_result_dict(metrics_by_pos, block_size, include_accuracy=False):
     """Build standard result dict from per-position metrics."""
     total_nll = sum(metrics_by_pos[p]["nll"] for p in range(block_size))
@@ -37,6 +40,12 @@ def build_result_dict(metrics_by_pos, block_size, include_accuracy=False):
     if include_accuracy:
         total_correct = sum(metrics_by_pos[p]["correct"] for p in range(block_size))
         result["overall_accuracy"] = total_correct / total_tokens if total_tokens > 0 else 0.0
+
+    # Overall confidence metrics (averaged across all positions)
+    for key in _CONFIDENCE_KEYS:
+        if key in metrics_by_pos[0]:
+            total = sum(metrics_by_pos[p][key] for p in range(block_size))
+            result[f"overall_{key}"] = total / total_tokens if total_tokens > 0 else 0.0
 
     for pos in range(block_size):
         result["positions"][pos] = build_position_result(metrics_by_pos[pos], include_accuracy)
@@ -63,5 +72,10 @@ def build_position_result(pos_metrics, include_accuracy=False):
     if include_accuracy:
         correct = pos_metrics["correct"]
         result["accuracy"] = correct / tokens if tokens > 0 else 0.0
+
+    # Confidence metrics (optional, only present when tracked)
+    for key in _CONFIDENCE_KEYS:
+        if key in pos_metrics:
+            result[key] = pos_metrics[key] / tokens if tokens > 0 else 0.0
 
     return result

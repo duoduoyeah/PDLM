@@ -21,7 +21,7 @@
 # Environment setup
 # ============================================================
 REPO_ROOT="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-source "$REPO_ROOT/slurms/setup.sh"
+source "${REPO_ROOT}/slurms/setup.sh"
 
 # ============================================================
 # Default parameters

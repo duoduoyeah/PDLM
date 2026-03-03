@@ -100,6 +100,7 @@ def run_eval(
     total_sequences=None,
     device_type="auto",
     ckpt_dir=None,
+    left_to_right=False,
 ):
     """
     Run BD3LM evaluation.
@@ -113,6 +114,7 @@ def run_eval(
             num_batches is derived as total_sequences // device_batch_size.
         device_type: Device type
         ckpt_dir: Direct path to checkpoint directory. If provided, overrides model_tag.
+        left_to_right: If True, run left-to-right teacher-forced eval (target_shift must be < 0).
 
     Returns:
         eval_result: Dict with evaluation metrics
@@ -197,6 +199,7 @@ def run_eval(
         device=device,
         autocast_ctx=autocast_ctx,
         mask_token_id=mask_token_id,
+        left_to_right=left_to_right,
     )
 
     return eval_result
@@ -207,6 +210,25 @@ def print_results(eval_result, target_shift, block_size):
     print0("\n" + "=" * 60)
     print0("EVALUATION RESULTS")
     print0("=" * 60)
+
+    # Left-to-right mode result
+    if "left_to_right" in eval_result:
+        ltr = eval_result["left_to_right"]
+        eppl = f", overall_entropy_ppl={ltr['overall_entropy_ppl']:.2f}" if "overall_entropy_ppl" in ltr else ""
+        print0(f"\n[left_to_right] overall_loss={ltr['overall_loss']:.4f}, "
+               f"overall_ppl={ltr['overall_ppl']:.2f}{eppl}, "
+               f"overall_accuracy={ltr['overall_accuracy']:.2%}")
+        print0(f"\nPer-position metrics (ppl / entropy_ppl / accuracy):")
+        positions = ltr.get("positions", {})
+        for k in range(block_size):
+            pos_data = positions.get(k, positions.get(str(k), {}))
+            ppl  = pos_data.get("ppl", float("nan"))
+            eppl = pos_data.get("entropy_ppl", float("nan"))
+            acc  = pos_data.get("accuracy", float("nan"))
+            print0(f"  pos {k}: loss={pos_data.get('loss', float('nan')):.4f}, "
+                   f"ppl={ppl:.2f}, entropy_ppl={eppl:.2f}, accuracy={acc:.2%}")
+        print0("\n" + "=" * 60)
+        return
 
     if target_shift >= 1:
         # Target shift mode
@@ -252,6 +274,9 @@ def main():
     parser.add_argument("--total_sequences", type=int, default=None, help="Total sequences to evaluate (overrides --num_batches); num_batches = total_sequences // device_batch_size")
     parser.add_argument("--device", type=str, default="auto", help="Device type (cuda/cpu/mps/auto)")
     parser.add_argument("--output_json", type=str, default=None, help="Optional: save results to JSON file")
+    parser.add_argument("--left_to_right", action="store_true",
+                        help="Run left-to-right teacher-forced eval: at each position k, reveal "
+                             "ground-truth prefix 0..k-1 within each block. Requires target_shift < 0.")
     args = parser.parse_args()
 
     # Run evaluation
@@ -263,6 +288,7 @@ def main():
         total_sequences=args.total_sequences,
         device_type=args.device,
         ckpt_dir=args.ckpt_dir,
+        left_to_right=args.left_to_right,
     )
 
     # Get block_size and target_shift for printing (re-load meta to get it)

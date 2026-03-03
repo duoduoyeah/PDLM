@@ -1,3 +1,7 @@
+02/25
+* we need to find some confidence related metrics? like entrophy-ppl?
+* use reference model to judge free-decode block quality
+
 02/24
 * we are going add the padding to the mask pdlm
 

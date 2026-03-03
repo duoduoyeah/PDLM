@@ -23,7 +23,7 @@ import torch
 from nanochat.common import compute_init, autodetect_device_type, get_base_dir, print0
 from nanochat.checkpoint_manager import load_checkpoint, find_last_step, find_largest_model
 from nanochat.pdlm import PDLM, PDLMConfig
-from nanochat.pdlm_eval import eval_pdlm, eval_pdlm_stage1_mask, eval_pdlm_stage1_block, eval_pdlm_compatibility, eval_pdlm_full, eval_pdlm_both_block, eval_block_pdlm_inference, eval_mask_pdlm, dump_batch_to_file, dump_stage1_block_batch
+from nanochat.pdlm_eval import eval_pdlm, eval_pdlm_stage1_mask, eval_pdlm_stage1_block, eval_pdlm_compatibility, eval_pdlm_full, eval_pdlm_both_block, eval_block_pdlm_inference, eval_mask_pdlm, eval_mask_pdlm_parallel, eval_mask_pdlm_refresh, eval_mask_pdlm_fresh_mask_g, dump_batch_to_file, dump_stage1_block_batch
 from nanochat.dataloader import get_data_loader
 from nanochat.attn_masks import gen_mask, gen_block_causal_mask
 from nanochat.group_tokenizer.token_map import get_token_map
@@ -112,12 +112,16 @@ def run_eval(
     model_tag=None,
     step=None,
     num_batches=20,
+    total_sequences=None,
     device_type="auto",
     ckpt_dir=None,
     run_compatibility=False,
     compatibility_batches=None,
     run_oracle_accuracy=False,
     oracle_accuracy_batches=None,
+    parallel_decode=False,
+    refresh_decode=False,
+    fresh_mask_decode=False,
 ):
     """
     Run PDLM evaluation (Stage 1 MASK or Stage 2).
@@ -125,7 +129,9 @@ def run_eval(
     Args:
         model_tag: Model directory name
         step: Checkpoint step
-        num_batches: Number of validation batches to evaluate
+        num_batches: Number of validation batches to evaluate (ignored if total_sequences is set)
+        total_sequences: Total number of sequences to evaluate (overrides num_batches).
+            num_batches is derived as total_sequences // device_batch_size.
         device_type: Device type
         ckpt_dir: Direct path to checkpoint directory. If provided, overrides model_tag.
         run_compatibility: Whether to run compatibility evaluation (Stage 2 only)
@@ -156,6 +162,17 @@ def run_eval(
 
     # Create validation dataloader
     device_batch_size = user_config.get("device_batch_size", 32)
+
+    # Resolve num_batches from total_sequences if provided
+    if total_sequences is not None:
+        num_batches = total_sequences // device_batch_size
+        if num_batches == 0:
+            raise ValueError(f"total_sequences={total_sequences} < device_batch_size={device_batch_size}")
+        actual_sequences = num_batches * device_batch_size
+        if actual_sequences != total_sequences:
+            print0(f"Warning: total_sequences={total_sequences} not divisible by device_batch_size={device_batch_size}, "
+                   f"evaluating {actual_sequences} sequences ({num_batches} batches)")
+
     val_loader = get_data_loader(
         device_batch_size,
         max_seq_len,
@@ -244,6 +261,42 @@ def run_eval(
             autocast_ctx=autocast_ctx, prefix_pure_tokens=prefix_pure_tokens,
             mtp_loss_weight=mtp_loss_weight,
         )
+    elif stage == "mask_pdlm" and refresh_decode:
+        print0(f"Running mask_pdlm refresh decode evaluation...")
+        eval_result = eval_mask_pdlm_refresh(
+            model=model,
+            val_loader=val_loader,
+            block_size=block_size,
+            num_batches=num_batches,
+            attn_mask=attn_mask,
+            device=device,
+            autocast_ctx=autocast_ctx,
+            prefix_pure_tokens=prefix_pure_tokens,
+        )
+    elif stage == "mask_pdlm" and fresh_mask_decode:
+        print0(f"Running mask_pdlm fresh-mask-G eval (removes G inertia, reports confidence metrics)...")
+        eval_result = eval_mask_pdlm_fresh_mask_g(
+            model=model,
+            val_loader=val_loader,
+            block_size=block_size,
+            num_batches=num_batches,
+            attn_mask=attn_mask,
+            device=device,
+            autocast_ctx=autocast_ctx,
+            prefix_pure_tokens=prefix_pure_tokens,
+        )
+    elif stage == "mask_pdlm" and parallel_decode:
+        print0(f"Running mask_pdlm parallel decode evaluation (parallel_mid + parallel_end)...")
+        eval_result = eval_mask_pdlm_parallel(
+            model=model,
+            val_loader=val_loader,
+            block_size=block_size,
+            num_batches=num_batches,
+            attn_mask=attn_mask,
+            device=device,
+            autocast_ctx=autocast_ctx,
+            prefix_pure_tokens=prefix_pure_tokens,
+        )
     elif stage == "mask_pdlm":
         print0(f"Running mask_pdlm evaluation...")
         eval_result = eval_mask_pdlm(
@@ -303,6 +356,28 @@ def print_results(eval_result, block_size):
     if stage == "mask_pdlm":
         print0("PDLM MASK_PDLM EVALUATION RESULTS")
         print0("=" * 60)
+
+        if "unified" not in eval_result:
+            # parallel or refresh decode result — print per-variant summary
+            variants = []
+            if "parallel_mid" in eval_result or "parallel_end" in eval_result:
+                variants = [("parallel_mid", "parallel_mid"), ("parallel_end", "parallel_end")]
+            elif "end2end_refresh" in eval_result:
+                variants = [("end2end_refresh", "end2end_refresh")]
+            for key, label in variants:
+                res = eval_result.get(key)
+                if res is None:
+                    continue
+                e_eppl = f", entropy_ppl={res['overall_entropy_ppl']:.2f}" if "overall_entropy_ppl" in res else ""
+                acc = f", accuracy={res['overall_accuracy']:.2%}" if "overall_accuracy" in res else ""
+                print0(f"\n[{label}]: loss={res['overall_loss']:.4f}, ppl={res['overall_ppl']:.2f}{e_eppl}{acc}")
+                for pos in range(block_size):
+                    pos_data = res["positions"][pos]
+                    eppl = f", entropy_ppl={pos_data['entropy_ppl']:.2f}" if "entropy_ppl" in pos_data else ""
+                    pacc = f", accuracy={pos_data['accuracy']:.2%}" if "accuracy" in pos_data else ""
+                    print0(f"    pos {pos}: loss={pos_data['loss']:.4f}, ppl={pos_data['ppl']:.2f}{eppl}{pacc}")
+            print0("\n" + "=" * 60)
+            return
 
         unified = eval_result["unified"]
         e2e = eval_result["end2end"]
@@ -546,7 +621,8 @@ def main():
     parser.add_argument("--model_tag", type=str, default=None, help="Model directory name (e.g., d8)")
     parser.add_argument("--ckpt_dir", type=str, default=None, help="Direct path to checkpoint directory (overrides model_tag)")
     parser.add_argument("--step", type=int, default=None, help="Checkpoint step (default: last)")
-    parser.add_argument("--num_batches", type=int, default=20, help="Number of validation batches")
+    parser.add_argument("--num_batches", type=int, default=20, help="Number of validation batches (ignored if --total_sequences is set)")
+    parser.add_argument("--total_sequences", type=int, default=None, help="Total sequences to evaluate (overrides --num_batches); num_batches = total_sequences // device_batch_size")
     parser.add_argument("--device", type=str, default="auto", help="Device type (cuda/cpu/mps/auto)")
     parser.add_argument("--output_json", type=str, default=None, help="Optional: save results to JSON file")
     parser.add_argument("--run_compatibility", action="store_true", help="Run compatibility evaluation (also enables oracle accuracy unless --no_oracle_accuracy)")
@@ -563,6 +639,12 @@ def main():
     parser.add_argument("--dump_batch", type=str, default=None, help="Dump one batch to file for debugging (path to output txt)")
     parser.add_argument("--dump_stage1_block", type=str, default=None, help="Dump stage1_block predictions to file (path to output txt)")
     parser.add_argument("--dump_sequences", type=int, default=5, help="Number of sequences to dump (default: 5)")
+    parser.add_argument("--parallel_decode", action="store_true",
+                        help="Run parallel decode variants (parallel_mid + parallel_end) instead of standard eval. mask_pdlm only.")
+    parser.add_argument("--refresh_decode", action="store_true",
+                        help="Run refresh end2end eval: updates group tokens after each teacher-force step. mask_pdlm only.")
+    parser.add_argument("--fresh_mask_decode", action="store_true",
+                        help="Run fresh-mask-G eval: resets remaining positions to MASK before each G collapse, removing G inertia. Also reports top-5 confidence metrics. mask_pdlm only.")
     args = parser.parse_args()
 
     # Handle generation mode (mask_pdlm only)
@@ -653,12 +735,16 @@ def main():
         model_tag=args.model_tag,
         step=args.step,
         num_batches=args.num_batches,
+        total_sequences=args.total_sequences,
         device_type=args.device,
         ckpt_dir=args.ckpt_dir,
         run_compatibility=args.run_compatibility,
         compatibility_batches=args.compatibility_batches,
         run_oracle_accuracy=run_oracle,
         oracle_accuracy_batches=args.oracle_accuracy_batches,
+        parallel_decode=args.parallel_decode,
+        refresh_decode=args.refresh_decode,
+        fresh_mask_decode=args.fresh_mask_decode,
     )
 
     # Get block_size for printing
