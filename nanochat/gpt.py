@@ -33,6 +33,7 @@ class GPTConfig:
     n_embd: int = 768
     target_shift: int = 1 # 1 means normal next token predictor
     n_future_tokens: int = 1 #this is the multiple token predictor sutff
+    loss_mask_block_size: int = 0 # >0: 4-state block loss mask (e.g. 4 → 10/16 effective)
 
 def norm(x):
     # Purely functional rmsnorm with no learnable params

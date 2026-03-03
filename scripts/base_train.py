@@ -52,6 +52,7 @@ mtp_loss_weight = 1.0 # both_mtp: Stage 1 MTP loss weight relative to Stage 2
 soft_p_within = 1.0 # stage2: prob of correct group mapping (1.0 = hard, <1.0 = soft noise)
 noise_count = 64 # pdlm_emb: total tokens in noise average (including target)
 mask_pdlm_4state = "false" # mask_pdlm: use 4-state variant (k states instead of k+1)
+loss_mask_block_size = 0 # AR: >0 enables 4-state block loss mask (e.g. 4 → 10/16 effective tokens)
 loss_weight_mode = "manual" # "manual" or "fixed" - fixed computes weight from warmup batches
 loss_weight_warmup_steps = 10 # number of batches for estimating loss ratio (used when loss_weight_mode="fixed")
 stage1_target_mode = "pure" # MTP: "pure" (default) or "group" (legacy) - determines target format and loss
@@ -179,6 +180,7 @@ if model_type == "next_token_ar":
         n_kv_head=num_kv_heads,
         n_embd=model_dim,
         target_shift=target_shift,
+        loss_mask_block_size=loss_mask_block_size,
     )
 elif model_type == "bd3lm":
     ModelConfig, Model = BDLMConfig, BDLM
@@ -1077,7 +1079,12 @@ while True:
             else:
                 # next_token_ar: GPT forward doesn't take attn_mask
                 loss = model(x, y)
-                total_effective_tokens += x.numel() * ddp_world_size
+                if loss_extras is not None and "loss_mask" in loss_extras:
+                    batch_effective_tokens = loss_extras["loss_mask"].sum().item() * ddp_world_size
+                    step_effective_tokens += batch_effective_tokens
+                    total_effective_tokens += batch_effective_tokens
+                else:
+                    total_effective_tokens += x.numel() * ddp_world_size
         train_loss = loss.detach() # for logging
         loss = loss / grad_accum_steps # each .backward() is a grad sum => normalize loss here
         loss.backward()
