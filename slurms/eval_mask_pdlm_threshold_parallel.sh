@@ -130,8 +130,9 @@ echo "============================================================"
 echo ""
 
 # ============================================================
-# Run in batches of $PARALLEL
+# Run in batches of $PARALLEL (stagger launches to avoid cargo build races)
 # ============================================================
+STAGGER_SECS=15
 PIDS=()
 RUNNING_MODELS=()
 FAILED=0
@@ -176,6 +177,11 @@ wait_for_batch() {
 
 for i in "${!MODELS[@]}"; do
     launch_model "${MODELS[$i]}"
+
+    # Stagger launches to avoid parallel cargo build races on same node
+    if [ $(( (i + 1) % PARALLEL )) -ne 0 ]; then
+        sleep "${STAGGER_SECS}"
+    fi
 
     # When we've launched $PARALLEL jobs, wait for them all
     if [ $(( (i + 1) % PARALLEL )) -eq 0 ]; then
