@@ -92,6 +92,7 @@ class PDLMConfig:
     soft_p_within: float = 1.0  # 1.0 = hard mapping, <1.0 = soft (prob of correct group)
     stage1_target_mode: str = "pure"  # "pure" (CE over pure_vocab) or "group" (any_correct_ce over num_groups)
     noise_count: int = 64  # pdlm_emb: total tokens in noise average (including target)
+    mask_pdlm_4state: bool = False  # mask_pdlm: use 4-state variant (k states instead of k+1)
 
     # MTP (Multi-Token Prediction) config for both_mtp stage
     n_future_tokens: int = 4       # K: number of group tokens to predict for Stage 1
@@ -1164,22 +1165,47 @@ class PDLM(nn.Module):
             # Get pure logits at mask positions (xt half, positions T:T+K)
             block_logits = logits_2l[:, T:T+K, :]  # (1, K, pure_vocab_size)
 
-            # Collapse to groups
-            initial_groups = self.collapse_pure_to_group(block_logits, collapse_topk=collapse_topk)  # (1, K)
-
             # Initialize block state
             block_pure = torch.full((1, K), -1, dtype=torch.long, device=device)
-            block_groups = initial_groups  # (1, K)
+
+            if self.config.mask_pdlm_4state:
+                # 4-state: step 1 samples p0 directly + collapses rest to groups
+                pos_logits = block_logits[:, 0, :]
+                if temperature > 0:
+                    if topk > 0:
+                        v, _ = torch.topk(pos_logits, min(topk, pos_logits.size(-1)), dim=-1)
+                        pos_logits[pos_logits < v[:, [-1]]] = float('-inf')
+                    probs = F.softmax(pos_logits / temperature, dim=-1)
+                    sampled = torch.multinomial(probs, num_samples=1, generator=rng)
+                else:
+                    sampled = pos_logits.argmax(dim=-1, keepdim=True)
+                block_pure[:, 0] = sampled.squeeze(-1)
+
+                # Collapse remaining positions (1..K-1) to groups
+                if K > 1:
+                    remaining_logits = block_logits[:, 1:, :]
+                    remaining_groups = self.collapse_pure_to_group(remaining_logits, collapse_topk=collapse_topk)
+                    block_groups = torch.full((1, K), -1, dtype=torch.long, device=device)
+                    block_groups[:, 1:] = remaining_groups
+                else:
+                    block_groups = torch.full((1, K), -1, dtype=torch.long, device=device)
+
+                denoise_start = 1
+            else:
+                # 5-state: step 1 collapses all to groups, no sampling
+                initial_groups = self.collapse_pure_to_group(block_logits, collapse_topk=collapse_topk)
+                block_groups = initial_groups
+                denoise_start = 0
 
             debug_info = {
                 "block_step": block_step,
                 "context_len": current_len,
-                "initial_groups": initial_groups.cpu().tolist()[0],
+                "initial_groups": block_groups.cpu().tolist()[0] if denoise_start == 0 else None,
                 "denoise_steps": [],
             }
 
-            # === Steps 2..num_denoise_steps+1: Iterative denoising ===
-            for denoise_step in range(num_denoise_steps):
+            # === Iterative denoising ===
+            for denoise_step in range(denoise_start, num_denoise_steps):
                 # Build xt: pure context + current block (mix of pure and group tokens)
                 block_tokens = torch.where(
                     block_pure >= 0,

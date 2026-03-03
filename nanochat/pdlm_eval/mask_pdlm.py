@@ -148,11 +148,8 @@ def _eval_end2end(model, cached_batches, block_size, attn_mask, device, autocast
     End-to-end iterative inference evaluation for mask_pdlm.
 
     Processes ALL target blocks (2..N-1) simultaneously:
-    1. Mask all target blocks → forward → collapse to groups
-    2. Iterative denoising (block_size steps): sample one position per step,
-       capture CE from that step's logits, collapse rest
-
-    Total forward passes per batch: 1 + block_size.
+    5-state: 1 collapse pass + block_size denoising passes = block_size + 1 total.
+    4-state: step 1 captures pos 0 CE + collapses rest, then block_size - 1 denoising = block_size total.
     """
     nll_by_pos = {p: {
         "nll": 0.0, "entropy": 0.0, "correct": 0, "tokens": 0,
@@ -186,15 +183,36 @@ def _eval_end2end(model, cached_batches, block_size, attn_mask, device, autocast
             eval_inputs = targets.clone()
             eval_inputs[target_mask] = mask_token_id
 
-            # Step 1: Forward with mask tokens → collapse to groups
+            # Step 1: Forward with mask tokens → collapse (+ sample pos 0 for 4-state)
             logits = model.forward_for_eval_mask_pdlm(
                 eval_inputs, targets, attn_mask=attn_mask)
-            all_groups = model.collapse_pure_to_group(logits)  # (B, T)
-            eval_inputs[target_mask] = all_groups[target_mask] + group_offset
 
-            # Steps 2..block_size+1: Iterative denoising (all blocks simultaneously)
+            mask_pdlm_4state = getattr(model.config, 'mask_pdlm_4state', False)
+            if mask_pdlm_4state:
+                # 4-state: capture CE for pos 0 from mask logits, teacher-force, collapse rest
+                log_probs_s1 = F.log_softmax(logits.float(), dim=-1)
+                target_lp_s1 = log_probs_s1.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
+                entropy_s1 = -(log_probs_s1.exp() * log_probs_s1).sum(dim=-1)
+                nll_p0 = -target_lp_s1[pos_masks[0]]
+                nll_by_pos[0]["nll"] += nll_p0.sum().item()
+                nll_by_pos[0]["entropy"] += entropy_s1[pos_masks[0]].sum().item()
+                nll_by_pos[0]["tokens"] += pos_masks[0].sum().item()
+
+                eval_inputs[pos_masks[0]] = targets[pos_masks[0]]
+                all_groups = model.collapse_pure_to_group(logits)
+                for rp in range(1, block_size):
+                    eval_inputs[pos_masks[rp]] = all_groups[pos_masks[rp]] + group_offset
+
+                denoise_start = 1
+            else:
+                # 5-state: collapse all to groups, no CE capture in step 1
+                all_groups = model.collapse_pure_to_group(logits)
+                eval_inputs[target_mask] = all_groups[target_mask] + group_offset
+                denoise_start = 0
+
+            # Iterative denoising (all blocks simultaneously)
             # Capture CE from each step's logits (when the position is actually predicted)
-            for denoise_step in range(block_size):
+            for denoise_step in range(denoise_start, block_size):
                 logits = model.forward_for_eval_mask_pdlm(
                     eval_inputs, targets, attn_mask=attn_mask)
 
