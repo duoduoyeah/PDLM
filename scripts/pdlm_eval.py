@@ -23,7 +23,7 @@ import torch
 from nanochat.common import compute_init, autodetect_device_type, get_base_dir, print0
 from nanochat.checkpoint_manager import load_checkpoint, find_last_step, find_largest_model
 from nanochat.pdlm import PDLM, PDLMConfig
-from nanochat.pdlm_eval import eval_pdlm, eval_pdlm_stage1_mask, eval_pdlm_stage1_block, eval_pdlm_compatibility, eval_pdlm_full, eval_pdlm_both_block, eval_block_pdlm_inference, eval_mask_pdlm, eval_mask_pdlm_parallel, eval_mask_pdlm_refresh, eval_mask_pdlm_fresh_mask_g, dump_batch_to_file, dump_stage1_block_batch
+from nanochat.pdlm_eval import eval_pdlm, eval_pdlm_stage1_mask, eval_pdlm_stage1_block, eval_pdlm_compatibility, eval_pdlm_full, eval_pdlm_both_block, eval_block_pdlm_inference, eval_mask_pdlm, eval_mask_pdlm_parallel, eval_mask_pdlm_refresh, eval_mask_pdlm_fresh_mask_g, eval_mask_pdlm_threshold, dump_batch_to_file, dump_stage1_block_batch
 from nanochat.dataloader import get_data_loader
 from nanochat.attn_masks import gen_mask, gen_block_causal_mask
 from nanochat.group_tokenizer.token_map import get_token_map
@@ -122,6 +122,7 @@ def run_eval(
     parallel_decode=False,
     refresh_decode=False,
     fresh_mask_decode=False,
+    threshold_decode=False,
 ):
     """
     Run PDLM evaluation (Stage 1 MASK or Stage 2).
@@ -261,6 +262,18 @@ def run_eval(
             autocast_ctx=autocast_ctx, prefix_pure_tokens=prefix_pure_tokens,
             mtp_loss_weight=mtp_loss_weight,
         )
+    elif stage == "mask_pdlm" and threshold_decode:
+        print0(f"Running mask_pdlm threshold decode evaluation...")
+        eval_result = eval_mask_pdlm_threshold(
+            model=model,
+            val_loader=val_loader,
+            block_size=block_size,
+            num_batches=num_batches,
+            attn_mask=attn_mask,
+            device=device,
+            autocast_ctx=autocast_ctx,
+            prefix_pure_tokens=prefix_pure_tokens,
+        )
     elif stage == "mask_pdlm" and refresh_decode:
         print0(f"Running mask_pdlm refresh decode evaluation...")
         eval_result = eval_mask_pdlm_refresh(
@@ -356,6 +369,16 @@ def print_results(eval_result, block_size):
     if stage == "mask_pdlm":
         print0("PDLM MASK_PDLM EVALUATION RESULTS")
         print0("=" * 60)
+
+        if "threshold_decode" in eval_result:
+            td = eval_result["threshold_decode"]
+            print0(f"\n[threshold_decode] mask_pdlm avg_steps by threshold τ:")
+            print0(f"  {'τ':>6s}  {'avg_steps':>10s}")
+            print0(f"  {'------':>6s}  {'----------':>10s}")
+            for tau in sorted(td.keys(), key=float):
+                print0(f"  {float(tau):6.2f}  {td[tau]['avg_steps']:10.4f}")
+            print0("\n" + "=" * 60)
+            return
 
         if "unified" not in eval_result:
             # parallel or refresh decode result — print per-variant summary
@@ -645,6 +668,8 @@ def main():
                         help="Run refresh end2end eval: updates group tokens after each teacher-force step. mask_pdlm only.")
     parser.add_argument("--fresh_mask_decode", action="store_true",
                         help="Run fresh-mask-G eval: resets remaining positions to MASK before each G collapse, removing G inertia. Also reports top-5 confidence metrics. mask_pdlm only.")
+    parser.add_argument("--threshold_decode", action="store_true",
+                        help="Run threshold-based parallel decoding: sweep τ from 0.0 to 1.0, report avg_steps per threshold. mask_pdlm only.")
     args = parser.parse_args()
 
     # Handle generation mode (mask_pdlm only)
@@ -745,6 +770,7 @@ def main():
         parallel_decode=args.parallel_decode,
         refresh_decode=args.refresh_decode,
         fresh_mask_decode=args.fresh_mask_decode,
+        threshold_decode=args.threshold_decode,
     )
 
     # Get block_size for printing

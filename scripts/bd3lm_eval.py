@@ -19,7 +19,7 @@ import torch
 from nanochat.common import compute_init, autodetect_device_type, get_base_dir, print0
 from nanochat.checkpoint_manager import load_checkpoint, find_last_step, find_largest_model
 from nanochat.bd3lm import BDLM, BDLMConfig
-from nanochat.bd3lm_eval import eval_bd3lm
+from nanochat.bd3lm_eval import eval_bd3lm, eval_bd3lm_threshold
 from nanochat.dataloader import tokenizing_distributed_data_loader_with_state
 from nanochat.attn_masks import gen_mask
 from nanochat.tokenizer import get_tokenizer, get_tokenizer_from_dir
@@ -101,6 +101,7 @@ def run_eval(
     device_type="auto",
     ckpt_dir=None,
     left_to_right=False,
+    threshold_decode=False,
 ):
     """
     Run BD3LM evaluation.
@@ -189,18 +190,31 @@ def run_eval(
     total_eval_blocks = total_sequences * eval_blocks_per_seq
     print0(f"Running evaluation: {num_batches} batches × {device_batch_size} seqs = {total_sequences} sequences")
     print0(f"  {blocks_per_seq} blocks/seq, {eval_blocks_per_seq} evaluated (skip block 0) = {total_eval_blocks:,} total blocks")
-    eval_result = eval_bd3lm(
-        model=model,
-        val_loader=val_loader,
-        block_size=block_size,
-        target_shift=target_shift,
-        num_batches=num_batches,
-        attn_mask=attn_mask,
-        device=device,
-        autocast_ctx=autocast_ctx,
-        mask_token_id=mask_token_id,
-        left_to_right=left_to_right,
-    )
+    if threshold_decode:
+        print0(f"Running BD3LM threshold decode evaluation...")
+        eval_result = eval_bd3lm_threshold(
+            model=model,
+            val_loader=val_loader,
+            block_size=block_size,
+            num_batches=num_batches,
+            attn_mask=attn_mask,
+            device=device,
+            autocast_ctx=autocast_ctx,
+            mask_token_id=mask_token_id,
+        )
+    else:
+        eval_result = eval_bd3lm(
+            model=model,
+            val_loader=val_loader,
+            block_size=block_size,
+            target_shift=target_shift,
+            num_batches=num_batches,
+            attn_mask=attn_mask,
+            device=device,
+            autocast_ctx=autocast_ctx,
+            mask_token_id=mask_token_id,
+            left_to_right=left_to_right,
+        )
 
     return eval_result
 
@@ -210,6 +224,18 @@ def print_results(eval_result, target_shift, block_size):
     print0("\n" + "=" * 60)
     print0("EVALUATION RESULTS")
     print0("=" * 60)
+
+    # Threshold decode result
+    if "threshold_decode" in eval_result:
+        td = eval_result["threshold_decode"]
+        print0(f"\n[threshold_decode] BD3-LM avg_steps by threshold τ:")
+        print0(f"  {'τ':>6s}  {'avg_steps':>10s}")
+        print0(f"  {'------':>6s}  {'----------':>10s}")
+        for tau in sorted(td.keys(), key=float):
+            print0(f"  {float(tau):6.2f}  {td[tau]['avg_steps']:10.4f}")
+        print0("\n" + "=" * 60)
+        return
+
 
     # Left-to-right mode result
     if "left_to_right" in eval_result:
@@ -277,6 +303,9 @@ def main():
     parser.add_argument("--left_to_right", action="store_true",
                         help="Run left-to-right teacher-forced eval: at each position k, reveal "
                              "ground-truth prefix 0..k-1 within each block. Requires target_shift < 0.")
+    parser.add_argument("--threshold_decode", action="store_true",
+                        help="Run threshold-based parallel decoding: sweep τ from 0.0 to 1.0, "
+                             "report avg_steps per threshold.")
     args = parser.parse_args()
 
     # Run evaluation
@@ -289,6 +318,7 @@ def main():
         device_type=args.device,
         ckpt_dir=args.ckpt_dir,
         left_to_right=args.left_to_right,
+        threshold_decode=args.threshold_decode,
     )
 
     # Get block_size and target_shift for printing (re-load meta to get it)

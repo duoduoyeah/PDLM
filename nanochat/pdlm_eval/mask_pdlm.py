@@ -647,6 +647,154 @@ def eval_mask_pdlm_fresh_mask_g(
     }
 
 
+def _eval_threshold_decode(
+    model, cached_batches, block_size, attn_mask, device, autocast_ctx, threshold,
+):
+    """
+    Threshold-based parallel decoding evaluation for 4-state mask_pdlm.
+
+    At each step:
+    - Forward pass → get argmax_prob at all remaining positions
+    - Decode all positions where argmax_prob > threshold (teacher-force to GT)
+    - Fallback: if no position in a block passes threshold, decode the leftmost
+      remaining position in that block (not most confident — matches mask_pdlm L→R bias)
+    - Collapse remaining positions to group tokens
+    - Repeat until all positions decoded
+
+    Key differences from BD3-LM version:
+    - eval_inputs init: targets.clone() + mask target blocks (not all-MASK)
+    - After decode: collapse remaining to groups (not leave as MASK)
+    - Fallback: leftmost (argmin on position indices) not most confident (argmax on probs)
+    - Target blocks start at 2 (not 1)
+
+    Tracks avg_steps: average number of forward passes to fully decode a block.
+    """
+    pure_vocab_size = model.config.pure_vocab_size
+    num_groups = model.config.num_groups
+    mask_token_id = pure_vocab_size + num_groups
+    group_offset = pure_vocab_size
+
+    total_steps = 0.0
+    total_blocks = 0
+
+    for inputs, targets, loss_extras, _ in cached_batches:
+        B, T = targets.shape
+        num_blocks = T // block_size
+        num_target_blocks = num_blocks - 2  # skip blocks 0 and 1
+
+        if num_target_blocks <= 0:
+            continue
+
+        with autocast_ctx:
+            # remaining_blk[b, bi, p] = True if position p in block bi is not yet decoded
+            remaining_blk = torch.zeros(B, num_blocks, block_size, dtype=torch.bool, device=device)
+            remaining_blk[:, 2:, :] = True  # target blocks: 2..N-1
+
+            # Init: teacher-force with ground truth, mask target blocks
+            eval_inputs = targets.clone()
+            target_mask = remaining_blk.view(B, T)
+            eval_inputs[target_mask] = mask_token_id
+
+            # Track steps per block: (B, num_target_blocks)
+            block_steps = torch.zeros(B, num_target_blocks, device=device)
+            block_done = torch.zeros(B, num_target_blocks, dtype=torch.bool, device=device)
+
+            for step in range(1, block_size + 1):
+                if not remaining_blk.any():
+                    break
+
+                logits = model.forward_for_eval_mask_pdlm(eval_inputs, targets, attn_mask=attn_mask)
+                probs = torch.softmax(logits.float(), dim=-1)
+                argmax_probs = probs.max(dim=-1).values  # (B, T)
+                del probs
+
+                # Reshape to block view: (B, num_blocks, block_size)
+                argmax_probs_blk = argmax_probs.view(B, num_blocks, block_size)
+
+                # Positions passing threshold (only within remaining)
+                decode_blk = remaining_blk & (argmax_probs_blk > threshold)
+
+                # Fallback: for blocks with remaining positions but none passing threshold,
+                # decode the leftmost remaining position
+                has_remaining = remaining_blk[:, 2:, :].any(dim=-1)  # (B, num_target_blocks)
+                has_decoded = decode_blk[:, 2:, :].any(dim=-1)       # (B, num_target_blocks)
+                needs_fallback = has_remaining & ~has_decoded          # (B, num_target_blocks)
+
+                if needs_fallback.any():
+                    # For fallback blocks: find leftmost remaining position
+                    # Set non-remaining positions to inf, take argmin to get leftmost
+                    fb_pos = torch.arange(block_size, device=device).float()
+                    fb_pos = fb_pos.unsqueeze(0).unsqueeze(0).expand(B, num_target_blocks, block_size)
+                    fb_pos = fb_pos.clone()
+                    fb_pos[~remaining_blk[:, 2:, :]] = float('inf')
+                    fb_leftmost = fb_pos.argmin(dim=-1)               # (B, num_target_blocks)
+                    # One-hot for the leftmost position per block
+                    fb_onehot = F.one_hot(fb_leftmost, block_size).bool()  # (B, num_target_blocks, block_size)
+                    # Only apply fallback where needed
+                    fb_mask = needs_fallback.unsqueeze(-1) & fb_onehot
+                    decode_blk[:, 2:, :] |= fb_mask
+
+                # Flatten back to (B, T) for teacher-forcing
+                decode_flat = decode_blk.view(B, T)
+                eval_inputs[decode_flat] = targets[decode_flat]
+                remaining_blk[decode_blk] = False
+
+                # Collapse remaining positions to groups (only remaining, to save memory)
+                remaining_flat = remaining_blk.view(B, T)
+                if remaining_flat.any():
+                    remaining_logits = logits[remaining_flat]  # (num_remaining, vocab)
+                    remaining_groups = model.collapse_pure_to_group(remaining_logits)
+                    eval_inputs[remaining_flat] = remaining_groups + group_offset
+
+                # Update block_steps for blocks that just finished
+                newly_done = has_remaining & ~remaining_blk[:, 2:, :].any(dim=-1) & ~block_done
+                block_steps[newly_done] = step
+                block_done |= newly_done
+
+        total_steps += block_steps.sum().item()
+        total_blocks += B * num_target_blocks
+
+    avg_steps = total_steps / total_blocks if total_blocks > 0 else 0.0
+    return {"threshold": threshold, "avg_steps": avg_steps, "total_blocks": total_blocks}
+
+
+def eval_mask_pdlm_threshold(
+    model,
+    val_loader,
+    block_size,
+    num_batches,
+    attn_mask,
+    device,
+    autocast_ctx,
+    prefix_pure_tokens=0,
+    thresholds=None,
+):
+    """
+    Run threshold-based parallel decoding evaluation for mask_pdlm across multiple thresholds.
+
+    Caches batches once, then sweeps over all threshold values.
+
+    Returns:
+        {"stage": "mask_pdlm", "threshold_decode": {tau: {"avg_steps": X, "total_blocks": N}}}
+    """
+    if thresholds is None:
+        thresholds = [i / 10.0 for i in range(11)]  # 0.0, 0.1, ..., 1.0
+
+    with model_eval_context(model):
+        with torch.no_grad():
+            cached_batches = [next(val_loader) for _ in range(num_batches)]
+
+            results = {}
+            for tau in thresholds:
+                result = _eval_threshold_decode(
+                    model, cached_batches, block_size,
+                    attn_mask, device, autocast_ctx, tau,
+                )
+                results[tau] = result
+
+    return {"stage": "mask_pdlm", "threshold_decode": results}
+
+
 def eval_mask_pdlm_parallel(
     model,
     val_loader,
