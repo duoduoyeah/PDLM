@@ -706,6 +706,7 @@ def _eval_threshold_decode(
                 logits = model.forward_for_eval_mask_pdlm(eval_inputs, targets, attn_mask=attn_mask)
                 probs = torch.softmax(logits.float(), dim=-1)
                 argmax_probs = probs.max(dim=-1).values  # (B, T)
+                del probs
 
                 # Reshape to block view: (B, num_blocks, block_size)
                 argmax_probs_blk = argmax_probs.view(B, num_blocks, block_size)
@@ -738,11 +739,12 @@ def _eval_threshold_decode(
                 eval_inputs[decode_flat] = targets[decode_flat]
                 remaining_blk[decode_blk] = False
 
-                # Collapse remaining positions to groups
-                if remaining_blk.any():
-                    all_groups = model.collapse_pure_to_group(logits)
-                    remaining_flat = remaining_blk.view(B, T)
-                    eval_inputs[remaining_flat] = all_groups[remaining_flat] + group_offset
+                # Collapse remaining positions to groups (only remaining, to save memory)
+                remaining_flat = remaining_blk.view(B, T)
+                if remaining_flat.any():
+                    remaining_logits = logits[remaining_flat]  # (num_remaining, vocab)
+                    remaining_groups = model.collapse_pure_to_group(remaining_logits)
+                    eval_inputs[remaining_flat] = remaining_groups + group_offset
 
                 # Update block_steps for blocks that just finished
                 newly_done = has_remaining & ~remaining_blk[:, 2:, :].any(dim=-1) & ~block_done

@@ -12,7 +12,7 @@
 
 set -e
 
-REPO_ROOT="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)}"
+REPO_ROOT="${SLURM_SUBMIT_DIR:-$(pwd)}"
 
 # ============================================================
 # Default values
@@ -20,9 +20,11 @@ REPO_ROOT="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}
 TOTAL_SEQUENCES="3200"
 PUSH_FLAG=""
 PARALLEL=4
-PARTITION="ada6000"
+PARTITION="short_gpu"
+QOS="short_gpu"
+GRES="gpu:ada6000:1"
 TIME="0:20:00"
-MEM="32G"
+MEM="100G"
 FILTER="all"   # "all", "4s", "5s"
 
 # Parse arguments
@@ -111,6 +113,8 @@ case $FILTER in
 esac
 
 NUM_MODELS=${#MODELS[@]}
+LOG_DIR="${REPO_ROOT}/slurms/logs"
+mkdir -p "${LOG_DIR}"
 
 echo "============================================================"
 echo "Mask PDLM Threshold Decode — Parallel Evaluation"
@@ -118,7 +122,7 @@ echo "============================================================"
 echo "Filter:          ${FILTER}"
 echo "Models:          ${NUM_MODELS}"
 echo "Parallel jobs:   ${PARALLEL}"
-echo "Partition:       ${PARTITION}"
+echo "Partition:       ${PARTITION} (${GRES})"
 echo "Time limit:      ${TIME}"
 echo "Total sequences: ${TOTAL_SEQUENCES}"
 echo "Push results:    ${PUSH_FLAG:-no}"
@@ -135,10 +139,10 @@ SUCCEEDED=0
 
 launch_model() {
     local model=$1
-    local log_file="/tmp/threshold_eval_${model}.log"
+    local log_file="${LOG_DIR}/threshold_eval_${model}.log"
 
     echo "[launch] ${model}"
-    srun -p "${PARTITION}" --gres=gpu:1 --time="${TIME}" --mem="${MEM}" \
+    SLURM_SUBMIT_DIR="${REPO_ROOT}" srun -p "${PARTITION}" --qos="${QOS}" --gres="${GRES}" --time="${TIME}" --mem="${MEM}" \
         bash "${REPO_ROOT}/slurms/eval_mask_pdlm_threshold.sh" \
             --gdrive_folder="${GDRIVE_FOLDER}" \
             --model="${model}" \
@@ -156,7 +160,7 @@ wait_for_batch() {
     for i in "${!PIDS[@]}"; do
         local pid=${PIDS[$i]}
         local model=${RUNNING_MODELS[$i]}
-        local log_file="/tmp/threshold_eval_${model}.log"
+        local log_file="${LOG_DIR}/threshold_eval_${model}.log"
 
         if wait "${pid}"; then
             echo "[done]   ${model}"

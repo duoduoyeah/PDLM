@@ -20,3 +20,4 @@ wandb_export/**/*.csv
 wandb_export/**/*.md
 table_script/results
 wandb/out/
+slurms/logs/
