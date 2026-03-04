@@ -189,14 +189,27 @@ def _eval_end2end(model, cached_batches, block_size, attn_mask, device, autocast
 
             mask_pdlm_4state = getattr(model.config, 'mask_pdlm_4state', False)
             if mask_pdlm_4state:
-                # 4-state: capture CE for pos 0 from mask logits, teacher-force, collapse rest
+                # 4-state: capture CE + accuracy for pos 0 from mask logits, teacher-force, collapse rest
                 log_probs_s1 = F.log_softmax(logits.float(), dim=-1)
+                probs_s1 = log_probs_s1.exp()
                 target_lp_s1 = log_probs_s1.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
-                entropy_s1 = -(log_probs_s1.exp() * log_probs_s1).sum(dim=-1)
+                entropy_s1 = -(probs_s1 * log_probs_s1).sum(dim=-1)
                 nll_p0 = -target_lp_s1[pos_masks[0]]
                 nll_by_pos[0]["nll"] += nll_p0.sum().item()
                 nll_by_pos[0]["entropy"] += entropy_s1[pos_masks[0]].sum().item()
                 nll_by_pos[0]["tokens"] += pos_masks[0].sum().item()
+                preds_p0 = logits[pos_masks[0]].argmax(dim=-1)
+                nll_by_pos[0]["correct"] += (preds_p0 == targets[pos_masks[0]]).sum().item()
+
+                # Top-5 confidence metrics for pos 0
+                top5_probs_s1, _ = probs_s1.topk(5, dim=-1)
+                pos0_top5 = top5_probs_s1[pos_masks[0]]
+                nll_by_pos[0]["argmax_prob"] += pos0_top5[:, 0].sum().item()
+                nll_by_pos[0]["second_prob"] += pos0_top5[:, 1].sum().item()
+                nll_by_pos[0]["third_prob"]  += pos0_top5[:, 2].sum().item()
+                nll_by_pos[0]["top3_sum"]    += pos0_top5[:, :3].sum().item()
+                nll_by_pos[0]["top5_sum"]    += pos0_top5[:, :5].sum().item()
+                del log_probs_s1, probs_s1, target_lp_s1, entropy_s1, top5_probs_s1, pos0_top5
 
                 eval_inputs[pos_masks[0]] = targets[pos_masks[0]]
                 all_groups = model.collapse_pure_to_group(logits)
