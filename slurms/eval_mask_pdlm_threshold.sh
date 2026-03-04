@@ -196,42 +196,10 @@ echo "Results saved to: ${OUT_JSON}"
 if [ "${PUSH_RESULTS}" = "true" ]; then
     echo ""
     echo "Step 5: Uploading results to duoduoyeah/eval_results..."
-
-    python -c "
-import json, os, tempfile, shutil
-from huggingface_hub import upload_folder
-
-model_name    = '${MODEL}'
-gdrive_folder = '${GDRIVE_FOLDER}'
-run_folder    = '${RUN_FOLDER}'
-model_dir     = '${MODEL_DIR}'
-timestamp     = '${TIMESTAMP}'
-
-args = {k: v for k, v in {
-    'script':          'slurms/eval_mask_pdlm_threshold.sh',
-    'gdrive_folder':   gdrive_folder,
-    'model':           model_name,
-    'total_sequences': '${TOTAL_SEQUENCES}',
-    'local_dir':       '${LOCAL_DIR}',
-    'timestamp':       timestamp,
-}.items() if v}
-
-tmp = tempfile.mkdtemp()
-try:
-    shutil.copy(f'{model_dir}/eval_threshold.json', f'{tmp}/eval_threshold_{timestamp}.json')
-    with open(f'{tmp}/args_{timestamp}.json', 'w') as f:
-        json.dump(args, f, indent=2)
-    upload_folder(
-        folder_path=tmp,
-        path_in_repo=f'mask_pdlm/{model_name}/{run_folder}',
-        repo_id='duoduoyeah/eval_results',
-        repo_type='dataset',
-        token=os.environ.get('HF_TOKEN'),
-    )
-    print(f'Uploaded to duoduoyeah/eval_results/mask_pdlm/{model_name}/{run_folder}/eval_threshold_{timestamp}.json')
-finally:
-    shutil.rmtree(tmp)
-"
+    bash "${REPO_ROOT}/slurms/hf_upload.sh" \
+        --repo_prefix=mask_pdlm \
+        --run_folder="${RUN_FOLDER}" \
+        --result_dirs="${MODEL_DIR}"
     if [ $? -ne 0 ]; then
         echo "Warning: Upload to HuggingFace failed (results still saved locally)"
     fi
