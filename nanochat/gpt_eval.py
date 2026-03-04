@@ -66,11 +66,17 @@ def eval_gpt(
                 # Forward without targets to get logits
                 logits = model(inputs)  # (B, T, vocab_size)
 
+                # Mask for valid targets (targets == -1 means ignored, e.g. loss_mask_block_size)
+                valid_mask = (targets >= 0)  # (B, T)
+
+                # Clamp targets so gather doesn't crash on -1 indices
+                safe_targets = targets.clamp(min=0)
+
                 # Compute log probabilities
                 log_probs = F.log_softmax(logits.float(), dim=-1)  # (B, T, V)
 
                 # NLL: gather log prob of each target token
-                target_log_probs = log_probs.gather(-1, targets.unsqueeze(-1)).squeeze(-1)  # (B, T)
+                target_log_probs = log_probs.gather(-1, safe_targets.unsqueeze(-1)).squeeze(-1)  # (B, T)
                 nll = -target_log_probs  # (B, T)
 
                 # Entropy: -sum(p * log_p) over vocab dimension
@@ -84,11 +90,13 @@ def eval_gpt(
                 # Argmax prob: probability mass on the top-1 predicted token
                 argmax_prob = probs.max(dim=-1)[0]  # (B, T)
 
-            total_nll += nll.sum().item()
-            total_entropy += entropy.sum().item()
-            total_correct += correct.sum().item()
-            total_argmax_prob += argmax_prob.sum().item()
-            total_tokens += B * T
+            # Only accumulate metrics for valid (non-masked) positions
+            num_valid = valid_mask.sum().item()
+            total_nll += nll[valid_mask].sum().item()
+            total_entropy += entropy[valid_mask].sum().item()
+            total_correct += correct[valid_mask].sum().item()
+            total_argmax_prob += argmax_prob[valid_mask].sum().item()
+            total_tokens += num_valid
 
     if was_training:
         model.train()

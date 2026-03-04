@@ -220,6 +220,7 @@ def _eval_left_to_right_mode(
     total_correct = sum(acc_data[k]["correct"] for k in range(block_size))
 
     total_entropy = sum(nll_data[k]["entropy"] for k in range(block_size))
+    total_argmax_prob = sum(nll_data[k]["argmax_prob"] for k in range(block_size))
     overall_loss = total_nll / total_tokens if total_tokens > 0 else 0.0
     overall_entropy = total_entropy / total_tokens if total_tokens > 0 else 0.0
     result = {
@@ -227,6 +228,7 @@ def _eval_left_to_right_mode(
         "overall_ppl": torch.exp(torch.tensor(overall_loss)).item(),
         "overall_entropy_ppl": torch.exp(torch.tensor(overall_entropy)).item(),
         "overall_accuracy": total_correct / total_tokens if total_tokens > 0 else 0.0,
+        "overall_argmax_prob": total_argmax_prob / total_tokens if total_tokens > 0 else 0.0,
         "positions": {},
     }
 
