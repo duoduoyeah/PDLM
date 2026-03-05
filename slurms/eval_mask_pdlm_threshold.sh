@@ -143,10 +143,7 @@ TOKENIZER_LINK="${BASE_DIR}/tokenizer"
 MODEL_TOKENIZER="${MODEL_DIR}/tokenizer"
 
 if [ -d "${MODEL_TOKENIZER}" ]; then
-    if [ -L "${TOKENIZER_LINK}" ]; then
-        rm "${TOKENIZER_LINK}"
-    fi
-    ln -s "${MODEL_TOKENIZER}" "${TOKENIZER_LINK}"
+    ln -sfn "${MODEL_TOKENIZER}" "${TOKENIZER_LINK}"
     echo "  Created symlink: ${TOKENIZER_LINK} -> ${MODEL_TOKENIZER}"
 fi
 

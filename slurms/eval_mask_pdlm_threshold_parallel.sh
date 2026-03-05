@@ -30,6 +30,7 @@ GRES="gpu:ada6000:1"
 TIME="0:20:00"
 MEM="100G"
 FILTER="all"   # "all", "4s", "5s"
+LOCAL_DIR="/rhome/sli588/slurms_output/mask_pdlm_eval"
 
 # Parse arguments
 for arg in "$@"; do
@@ -153,6 +154,7 @@ launch_model() {
             --gdrive_folder="${GDRIVE_FOLDER}" \
             --model="${model}" \
             --total_sequences="${TOTAL_SEQUENCES}" \
+            --local_dir="${LOCAL_DIR}" \
         > "${log_file}" 2>&1 &
 
     PIDS+=($!)
@@ -206,7 +208,7 @@ echo "============================================================"
 # Push results to HuggingFace (single upload for all succeeded)
 # ============================================================
 if [ -n "${PUSH_FLAG}" ] && [ ${#SUCCEEDED_MODELS[@]} -gt 0 ]; then
-    LOCAL_DIR="${SCRATCH:-/tmp}/mask_pdlm_eval"
+    LOCAL_DIR="/rhome/sli588/slurms_output/mask_pdlm_eval"
     RUN_FOLDER="seq${TOTAL_SEQUENCES}_threshold"
 
     # Build space-separated list of result dirs
