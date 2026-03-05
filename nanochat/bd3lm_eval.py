@@ -257,7 +257,7 @@ def _eval_threshold_decode(
 
     At each step:
     - Forward pass → get argmax_prob at all remaining positions
-    - Decode all positions where argmax_prob > threshold (teacher-force to GT)
+    - Decode all positions where argmax_prob > threshold (use model's argmax prediction)
     - Fallback: if no position in a block passes threshold, decode the most
       confident remaining position in that block
     - Remaining positions stay as MASK (no group collapse in BD3LM)
@@ -330,9 +330,9 @@ def _eval_threshold_decode(
                     fb_mask = needs_fallback.unsqueeze(-1) & fb_onehot
                     decode_blk[:, 1:, :] |= fb_mask
 
-                # Flatten back to (B, L) for teacher-forcing
+                # Flatten back to (B, L) — use model's argmax prediction (non-oracle)
                 decode_flat = decode_blk.view(B, L)
-                eval_inputs[decode_flat] = targets_batch[decode_flat]
+                eval_inputs[decode_flat] = logits.argmax(dim=-1)[decode_flat]
                 remaining_blk[decode_blk] = False
 
                 # Update block_steps for blocks that just finished

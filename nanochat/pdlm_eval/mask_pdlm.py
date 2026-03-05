@@ -668,7 +668,7 @@ def _eval_threshold_decode(
 
     At each step:
     - Forward pass → get argmax_prob at all remaining positions
-    - Decode all positions where argmax_prob > threshold (teacher-force to GT)
+    - Decode all positions where argmax_prob > threshold (use model's argmax prediction)
     - Fallback: if no position in a block passes threshold, decode the leftmost
       remaining position in that block (not most confident — matches mask_pdlm L→R bias)
     - Collapse remaining positions to group tokens
@@ -678,7 +678,7 @@ def _eval_threshold_decode(
     - eval_inputs init: targets.clone() + mask target blocks (not all-MASK)
     - After decode: collapse remaining to groups (not leave as MASK)
     - Fallback: leftmost (argmin on position indices) not most confident (argmax on probs)
-    - Target blocks start at 2 (not 1)
+    - Target blocks start at 1 (same as BD3-LM)
 
     Tracks avg_steps: average number of forward passes to fully decode a block.
     """
@@ -693,7 +693,7 @@ def _eval_threshold_decode(
     for inputs, targets, loss_extras, _ in cached_batches:
         B, T = targets.shape
         num_blocks = T // block_size
-        num_target_blocks = num_blocks - 2  # skip blocks 0 and 1
+        num_target_blocks = num_blocks - 1  # skip block 0 only (match BD3-LM)
 
         if num_target_blocks <= 0:
             continue
@@ -701,7 +701,7 @@ def _eval_threshold_decode(
         with autocast_ctx:
             # remaining_blk[b, bi, p] = True if position p in block bi is not yet decoded
             remaining_blk = torch.zeros(B, num_blocks, block_size, dtype=torch.bool, device=device)
-            remaining_blk[:, 2:, :] = True  # target blocks: 2..N-1
+            remaining_blk[:, 1:, :] = True  # target blocks: 1..N-1 (skip block 0 only)
 
             # Init: teacher-force with ground truth, mask target blocks
             eval_inputs = targets.clone()
@@ -729,8 +729,8 @@ def _eval_threshold_decode(
 
                 # Fallback: for blocks with remaining positions but none passing threshold,
                 # decode the leftmost remaining position
-                has_remaining = remaining_blk[:, 2:, :].any(dim=-1)  # (B, num_target_blocks)
-                has_decoded = decode_blk[:, 2:, :].any(dim=-1)       # (B, num_target_blocks)
+                has_remaining = remaining_blk[:, 1:, :].any(dim=-1)  # (B, num_target_blocks)
+                has_decoded = decode_blk[:, 1:, :].any(dim=-1)       # (B, num_target_blocks)
                 needs_fallback = has_remaining & ~has_decoded          # (B, num_target_blocks)
 
                 if needs_fallback.any():
@@ -739,17 +739,17 @@ def _eval_threshold_decode(
                     fb_pos = torch.arange(block_size, device=device).float()
                     fb_pos = fb_pos.unsqueeze(0).unsqueeze(0).expand(B, num_target_blocks, block_size)
                     fb_pos = fb_pos.clone()
-                    fb_pos[~remaining_blk[:, 2:, :]] = float('inf')
+                    fb_pos[~remaining_blk[:, 1:, :]] = float('inf')
                     fb_leftmost = fb_pos.argmin(dim=-1)               # (B, num_target_blocks)
                     # One-hot for the leftmost position per block
                     fb_onehot = F.one_hot(fb_leftmost, block_size).bool()  # (B, num_target_blocks, block_size)
                     # Only apply fallback where needed
                     fb_mask = needs_fallback.unsqueeze(-1) & fb_onehot
-                    decode_blk[:, 2:, :] |= fb_mask
+                    decode_blk[:, 1:, :] |= fb_mask
 
-                # Flatten back to (B, T) for teacher-forcing
+                # Flatten back to (B, T) — use model's argmax prediction (non-oracle)
                 decode_flat = decode_blk.view(B, T)
-                eval_inputs[decode_flat] = targets[decode_flat]
+                eval_inputs[decode_flat] = logits.argmax(dim=-1)[decode_flat]
                 remaining_blk[decode_blk] = False
 
                 # Collapse remaining positions to groups (only remaining, to save memory)
@@ -760,7 +760,7 @@ def _eval_threshold_decode(
                     eval_inputs[remaining_flat] = remaining_groups + group_offset
 
                 # Update block_steps for blocks that just finished
-                newly_done = has_remaining & ~remaining_blk[:, 2:, :].any(dim=-1) & ~block_done
+                newly_done = has_remaining & ~remaining_blk[:, 1:, :].any(dim=-1) & ~block_done
                 block_steps[newly_done] = step
                 block_done |= newly_done
 

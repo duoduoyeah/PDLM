@@ -12,7 +12,11 @@
 
 set -e
 
-REPO_ROOT="${SLURM_SUBMIT_DIR:-$(pwd)}"
+# ============================================================
+# Environment setup (uv sync once, export GPU_VENV for children)
+# ============================================================
+REPO_ROOT="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+source "${REPO_ROOT}/slurms/setup.sh"
 
 # ============================================================
 # Default values
@@ -55,7 +59,7 @@ for arg in "$@"; do
             echo "Unknown argument: $arg"
             echo "Usage: bash slurms/eval_mask_pdlm_threshold_parallel.sh \\"
             echo "    [--total_sequences=3200] [--push_results] [--parallel=4] \\"
-            echo "    [--partition=ada6000] [--time=0:20:00] [--only_4s] [--only_5s]"
+            echo "    [--partition=short_gpu] [--time=0:20:00] [--only_4s] [--only_5s]"
             exit 1
             ;;
     esac
@@ -130,25 +134,25 @@ echo "============================================================"
 echo ""
 
 # ============================================================
-# Run in batches of $PARALLEL (stagger launches to avoid cargo build races)
+# Run in batches of $PARALLEL
 # ============================================================
-STAGGER_SECS=15
 PIDS=()
 RUNNING_MODELS=()
 FAILED=0
 SUCCEEDED=0
+SUCCEEDED_MODELS=()
 
 launch_model() {
     local model=$1
     local log_file="${LOG_DIR}/threshold_eval_${model}.log"
 
     echo "[launch] ${model}"
-    SLURM_SUBMIT_DIR="${REPO_ROOT}" srun -p "${PARTITION}" --qos="${QOS}" --gres="${GRES}" --time="${TIME}" --mem="${MEM}" \
+    srun --export="ALL,GPU_VENV=${GPU_VENV},SLURM_SUBMIT_DIR=${REPO_ROOT}" \
+        -p "${PARTITION}" --qos="${QOS}" --gres="${GRES}" --time="${TIME}" --mem="${MEM}" \
         bash "${REPO_ROOT}/slurms/eval_mask_pdlm_threshold.sh" \
             --gdrive_folder="${GDRIVE_FOLDER}" \
             --model="${model}" \
             --total_sequences="${TOTAL_SEQUENCES}" \
-            ${PUSH_FLAG} \
         > "${log_file}" 2>&1 &
 
     PIDS+=($!)
@@ -166,6 +170,7 @@ wait_for_batch() {
         if wait "${pid}"; then
             echo "[done]   ${model}"
             SUCCEEDED=$((SUCCEEDED + 1))
+            SUCCEEDED_MODELS+=("${model}")
         else
             echo "[FAILED] ${model} (see ${log_file})"
             FAILED=$((FAILED + 1))
@@ -177,11 +182,6 @@ wait_for_batch() {
 
 for i in "${!MODELS[@]}"; do
     launch_model "${MODELS[$i]}"
-
-    # Stagger launches to avoid parallel cargo build races on same node
-    if [ $(( (i + 1) % PARALLEL )) -ne 0 ]; then
-        sleep "${STAGGER_SECS}"
-    fi
 
     # When we've launched $PARALLEL jobs, wait for them all
     if [ $(( (i + 1) % PARALLEL )) -eq 0 ]; then
@@ -201,6 +201,28 @@ echo ""
 echo "============================================================"
 echo "All done: ${SUCCEEDED} succeeded, ${FAILED} failed out of ${NUM_MODELS}"
 echo "============================================================"
+
+# ============================================================
+# Push results to HuggingFace (single upload for all succeeded)
+# ============================================================
+if [ -n "${PUSH_FLAG}" ] && [ ${#SUCCEEDED_MODELS[@]} -gt 0 ]; then
+    LOCAL_DIR="${SCRATCH:-/tmp}/mask_pdlm_eval"
+    RUN_FOLDER="seq${TOTAL_SEQUENCES}_threshold"
+
+    # Build space-separated list of result dirs
+    RESULT_DIRS=""
+    for model in "${SUCCEEDED_MODELS[@]}"; do
+        RESULT_DIRS="${RESULT_DIRS} ${LOCAL_DIR}/${model}"
+    done
+
+    bash "${REPO_ROOT}/slurms/hf_upload.sh" \
+        --repo_prefix=mask_pdlm \
+        --run_folder="${RUN_FOLDER}" \
+        --result_dirs="${RESULT_DIRS}"
+    if [ $? -ne 0 ]; then
+        echo "Warning: HuggingFace upload failed (results still saved locally in ${LOCAL_DIR})"
+    fi
+fi
 
 if [ ${FAILED} -gt 0 ]; then
     exit 1
