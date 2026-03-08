@@ -115,7 +115,10 @@ def main():
     fig.tight_layout()
     os.makedirs(os.path.dirname(args.output), exist_ok=True)
     fig.savefig(args.output, bbox_inches="tight", dpi=150)
+    png_output = args.output.rsplit(".", 1)[0] + ".png"
+    fig.savefig(png_output, bbox_inches="tight", dpi=150)
     print(f"Saved: {args.output}")
+    print(f"Saved: {png_output}")
 
     # Summary table
     print(f"\n{'Model':<22} {'τ=0.2':>8} {'τ=0.3':>8} {'τ=0.5':>8}")
