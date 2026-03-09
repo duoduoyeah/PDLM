@@ -148,7 +148,6 @@ def _eval_end2end(model, cached_batches, block_size, attn_mask, device, autocast
     End-to-end iterative inference evaluation for mask_pdlm.
 
     Processes ALL target blocks (2..N-1) simultaneously:
-    5-state: 1 collapse pass + block_size denoising passes = block_size + 1 total.
     4-state: step 1 captures pos 0 CE + collapses rest, then block_size - 1 denoising = block_size total.
     """
     nll_by_pos = {p: {
@@ -187,41 +186,34 @@ def _eval_end2end(model, cached_batches, block_size, attn_mask, device, autocast
             logits = model.forward_for_eval_mask_pdlm(
                 eval_inputs, targets, attn_mask=attn_mask)
 
-            mask_pdlm_4state = getattr(model.config, 'mask_pdlm_4state', False)
-            if mask_pdlm_4state:
-                # 4-state: capture CE + accuracy for pos 0 from mask logits, teacher-force, collapse rest
-                log_probs_s1 = F.log_softmax(logits.float(), dim=-1)
-                probs_s1 = log_probs_s1.exp()
-                target_lp_s1 = log_probs_s1.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
-                entropy_s1 = -(probs_s1 * log_probs_s1).sum(dim=-1)
-                nll_p0 = -target_lp_s1[pos_masks[0]]
-                nll_by_pos[0]["nll"] += nll_p0.sum().item()
-                nll_by_pos[0]["entropy"] += entropy_s1[pos_masks[0]].sum().item()
-                nll_by_pos[0]["tokens"] += pos_masks[0].sum().item()
-                preds_p0 = logits[pos_masks[0]].argmax(dim=-1)
-                nll_by_pos[0]["correct"] += (preds_p0 == targets[pos_masks[0]]).sum().item()
+            # 4-state: capture CE + accuracy for pos 0 from mask logits, teacher-force, collapse rest
+            log_probs_s1 = F.log_softmax(logits.float(), dim=-1)
+            probs_s1 = log_probs_s1.exp()
+            target_lp_s1 = log_probs_s1.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
+            entropy_s1 = -(probs_s1 * log_probs_s1).sum(dim=-1)
+            nll_p0 = -target_lp_s1[pos_masks[0]]
+            nll_by_pos[0]["nll"] += nll_p0.sum().item()
+            nll_by_pos[0]["entropy"] += entropy_s1[pos_masks[0]].sum().item()
+            nll_by_pos[0]["tokens"] += pos_masks[0].sum().item()
+            preds_p0 = logits[pos_masks[0]].argmax(dim=-1)
+            nll_by_pos[0]["correct"] += (preds_p0 == targets[pos_masks[0]]).sum().item()
 
-                # Top-5 confidence metrics for pos 0
-                top5_probs_s1, _ = probs_s1.topk(5, dim=-1)
-                pos0_top5 = top5_probs_s1[pos_masks[0]]
-                nll_by_pos[0]["argmax_prob"] += pos0_top5[:, 0].sum().item()
-                nll_by_pos[0]["second_prob"] += pos0_top5[:, 1].sum().item()
-                nll_by_pos[0]["third_prob"]  += pos0_top5[:, 2].sum().item()
-                nll_by_pos[0]["top3_sum"]    += pos0_top5[:, :3].sum().item()
-                nll_by_pos[0]["top5_sum"]    += pos0_top5[:, :5].sum().item()
-                del log_probs_s1, probs_s1, target_lp_s1, entropy_s1, top5_probs_s1, pos0_top5
+            # Top-5 confidence metrics for pos 0
+            top5_probs_s1, _ = probs_s1.topk(5, dim=-1)
+            pos0_top5 = top5_probs_s1[pos_masks[0]]
+            nll_by_pos[0]["argmax_prob"] += pos0_top5[:, 0].sum().item()
+            nll_by_pos[0]["second_prob"] += pos0_top5[:, 1].sum().item()
+            nll_by_pos[0]["third_prob"]  += pos0_top5[:, 2].sum().item()
+            nll_by_pos[0]["top3_sum"]    += pos0_top5[:, :3].sum().item()
+            nll_by_pos[0]["top5_sum"]    += pos0_top5[:, :5].sum().item()
+            del log_probs_s1, probs_s1, target_lp_s1, entropy_s1, top5_probs_s1, pos0_top5
 
-                eval_inputs[pos_masks[0]] = targets[pos_masks[0]]
-                all_groups = model.collapse_pure_to_group(logits)
-                for rp in range(1, block_size):
-                    eval_inputs[pos_masks[rp]] = all_groups[pos_masks[rp]] + group_offset
+            eval_inputs[pos_masks[0]] = targets[pos_masks[0]]
+            all_groups = model.collapse_pure_to_group(logits)
+            for rp in range(1, block_size):
+                eval_inputs[pos_masks[rp]] = all_groups[pos_masks[rp]] + group_offset
 
-                denoise_start = 1
-            else:
-                # 5-state: collapse all to groups, no CE capture in step 1
-                all_groups = model.collapse_pure_to_group(logits)
-                eval_inputs[target_mask] = all_groups[target_mask] + group_offset
-                denoise_start = 0
+            denoise_start = 1
 
             # Iterative denoising (all blocks simultaneously)
             # Capture CE from each step's logits (when the position is actually predicted)
@@ -268,26 +260,27 @@ def _make_parallel_schedules(block_size):
     Generate parallel decode schedules for a given block_size.
 
     Returns (schedule_mid, schedule_end) where each is a list of position tuples.
+    Schedules start from pos 1 since pos 0 is decoded in the 4-state init step.
     - schedule_mid: pair at positions (block_size//2 - 1, block_size//2)
     - schedule_end: pair at last two positions (block_size-2, block_size-1)
 
     For block_size=1: (None, None)
-    For block_size=2: ([(0,1)], [(0,1)])  — only option
-    For block_size=4: ([(0,),(1,2),(3,)], [(0,),(1,),(2,3)])
-    For block_size=8: ([(0,),(1,),(2,),(3,4),(5,),(6,),(7,)], [(0,),...,(6,7)])
+    For block_size=2: ([(1,)], [(1,)])  — only option
+    For block_size=4: ([(1,2),(3,)], [(1,),(2,3)])
+    For block_size=8: ([(1,),(2,),(3,4),(5,),(6,),(7,)], [(1,),...,(6,7)])
     """
     if block_size <= 1:
         return None, None
 
     if block_size == 2:
-        both = [(0, 1)]
+        both = [(1,)]
         return both, both
 
     mid = block_size // 2 - 1  # e.g. 1 for bs=4, 3 for bs=8
 
-    # parallel_mid: pair at (mid, mid+1), all others solo
+    # parallel_mid: pair at (mid, mid+1), all others solo (starting from pos 1)
     schedule_mid = []
-    i = 0
+    i = 1  # pos 0 decoded in 4-state init
     while i < block_size:
         if i == mid:
             schedule_mid.append((mid, mid + 1))
@@ -296,8 +289,8 @@ def _make_parallel_schedules(block_size):
             schedule_mid.append((i,))
             i += 1
 
-    # parallel_end: pair at last two positions, all others solo
-    schedule_end = [(p,) for p in range(block_size - 2)] + [(block_size - 2, block_size - 1)]
+    # parallel_end: pair at last two positions, all others solo (starting from pos 1)
+    schedule_end = [(p,) for p in range(1, block_size - 2)] + [(block_size - 2, block_size - 1)]
 
     return schedule_mid, schedule_end
 
@@ -341,12 +334,14 @@ def _eval_end2end_with_schedule(
             for p in range(block_size):
                 target_mask |= pos_masks[p]
 
-            # Init: MASK → groups (identical to _eval_end2end)
+            # Init (4-state): MASK → decode pos 0, collapse pos 1..K-1 to groups
             eval_inputs = targets.clone()
             eval_inputs[target_mask] = mask_token_id
             logits = model.forward_for_eval_mask_pdlm(eval_inputs, targets, attn_mask=attn_mask)
+            eval_inputs[pos_masks[0]] = targets[pos_masks[0]]  # teacher-force pos 0
             all_groups = model.collapse_pure_to_group(logits)
-            eval_inputs[target_mask] = all_groups[target_mask] + group_offset
+            for rp in range(1, block_size):
+                eval_inputs[pos_masks[rp]] = all_groups[pos_masks[rp]] + group_offset
 
             # Execute decode schedule
             for step_idx, step_positions in enumerate(decode_schedule):
@@ -422,14 +417,16 @@ def _eval_end2end_refresh(model, cached_batches, block_size, attn_mask, device, 
             for p in range(block_size):
                 target_mask |= pos_masks[p]
 
-            # Init: mask all target blocks → forward → collapse to groups
+            # Init (4-state): mask all target blocks → forward → decode pos 0, collapse pos 1..K-1 to groups
             eval_inputs = targets.clone()
             eval_inputs[target_mask] = mask_token_id
             logits = model.forward_for_eval_mask_pdlm(eval_inputs, targets, attn_mask=attn_mask)
+            eval_inputs[pos_masks[0]] = targets[pos_masks[0]]  # teacher-force pos 0
             all_groups = model.collapse_pure_to_group(logits)
-            eval_inputs[target_mask] = all_groups[target_mask] + group_offset
+            for rp in range(1, block_size):
+                eval_inputs[pos_masks[rp]] = all_groups[pos_masks[rp]] + group_offset
 
-            for k in range(block_size):
+            for k in range(1, block_size):  # pos 0 decoded in init
                 # eval_inputs: [P_gt_0..k-1, G_k, ..., G_{n-1}]
                 # G comes from prior step's eval forward collapse
 
@@ -556,14 +553,16 @@ def _eval_end2end_fresh_mask_g(model, cached_batches, block_size, attn_mask, dev
             for p in range(block_size):
                 target_mask |= pos_masks[p]
 
-            # Init: mask all target blocks → forward → collapse to groups (same as other evals)
+            # Init (4-state): mask all target blocks → forward → decode pos 0, collapse pos 1..K-1 to groups
             eval_inputs = targets.clone()
             eval_inputs[target_mask] = mask_token_id
             logits = model.forward_for_eval_mask_pdlm(eval_inputs, targets, attn_mask=attn_mask)
+            eval_inputs[pos_masks[0]] = targets[pos_masks[0]]  # teacher-force pos 0
             all_groups = model.collapse_pure_to_group(logits)
-            eval_inputs[target_mask] = all_groups[target_mask] + group_offset
+            for rp in range(1, block_size):
+                eval_inputs[pos_masks[rp]] = all_groups[pos_masks[rp]] + group_offset
 
-            for k in range(block_size):
+            for k in range(1, block_size):  # pos 0 decoded in init
                 # Step A: Build fresh_inputs with MASK for all remaining positions k..block_size-1.
                 # This removes trajectory inertia: G is derived from [GT_0..k-1, MASK, ...]
                 # rather than [GT_0..k-1, stale_G, ...].

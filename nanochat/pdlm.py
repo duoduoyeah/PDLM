@@ -92,8 +92,6 @@ class PDLMConfig:
     soft_p_within: float = 1.0  # 1.0 = hard mapping, <1.0 = soft (prob of correct group)
     stage1_target_mode: str = "pure"  # "pure" (CE over pure_vocab) or "group" (any_correct_ce over num_groups)
     noise_count: int = 64  # pdlm_emb: total tokens in noise average (including target)
-    mask_pdlm_4state: bool = False  # mask_pdlm: use 4-state variant (k states instead of k+1)
-
     # MTP (Multi-Token Prediction) config for both_mtp stage
     n_future_tokens: int = 4       # K: number of group tokens to predict for Stage 1
     mtp_loss_beta: float = 0.8     # Exponential decay factor for MTP loss weights
@@ -1168,34 +1166,28 @@ class PDLM(nn.Module):
             # Initialize block state
             block_pure = torch.full((1, K), -1, dtype=torch.long, device=device)
 
-            if self.config.mask_pdlm_4state:
-                # 4-state: step 1 samples p0 directly + collapses rest to groups
-                pos_logits = block_logits[:, 0, :]
-                if temperature > 0:
-                    if topk > 0:
-                        v, _ = torch.topk(pos_logits, min(topk, pos_logits.size(-1)), dim=-1)
-                        pos_logits[pos_logits < v[:, [-1]]] = float('-inf')
-                    probs = F.softmax(pos_logits / temperature, dim=-1)
-                    sampled = torch.multinomial(probs, num_samples=1, generator=rng)
-                else:
-                    sampled = pos_logits.argmax(dim=-1, keepdim=True)
-                block_pure[:, 0] = sampled.squeeze(-1)
-
-                # Collapse remaining positions (1..K-1) to groups
-                if K > 1:
-                    remaining_logits = block_logits[:, 1:, :]
-                    remaining_groups = self.collapse_pure_to_group(remaining_logits, collapse_topk=collapse_topk)
-                    block_groups = torch.full((1, K), -1, dtype=torch.long, device=device)
-                    block_groups[:, 1:] = remaining_groups
-                else:
-                    block_groups = torch.full((1, K), -1, dtype=torch.long, device=device)
-
-                denoise_start = 1
+            # 4-state: step 1 samples p0 directly + collapses rest to groups
+            pos_logits = block_logits[:, 0, :]
+            if temperature > 0:
+                if topk > 0:
+                    v, _ = torch.topk(pos_logits, min(topk, pos_logits.size(-1)), dim=-1)
+                    pos_logits[pos_logits < v[:, [-1]]] = float('-inf')
+                probs = F.softmax(pos_logits / temperature, dim=-1)
+                sampled = torch.multinomial(probs, num_samples=1, generator=rng)
             else:
-                # 5-state: step 1 collapses all to groups, no sampling
-                initial_groups = self.collapse_pure_to_group(block_logits, collapse_topk=collapse_topk)
-                block_groups = initial_groups
-                denoise_start = 0
+                sampled = pos_logits.argmax(dim=-1, keepdim=True)
+            block_pure[:, 0] = sampled.squeeze(-1)
+
+            # Collapse remaining positions (1..K-1) to groups
+            if K > 1:
+                remaining_logits = block_logits[:, 1:, :]
+                remaining_groups = self.collapse_pure_to_group(remaining_logits, collapse_topk=collapse_topk)
+                block_groups = torch.full((1, K), -1, dtype=torch.long, device=device)
+                block_groups[:, 1:] = remaining_groups
+            else:
+                block_groups = torch.full((1, K), -1, dtype=torch.long, device=device)
+
+            denoise_start = 1
 
             debug_info = {
                 "block_step": block_step,

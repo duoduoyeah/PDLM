@@ -538,15 +538,9 @@ def pdlm_data_loader(
             inputs_cpu = targets_cpu.clone()
 
             # For each block, sample r (block state index)
-            # 5-state (default): r in {0,..,block_size}, k+1 states
-            #   r=0: all mask; r=1: all group; r=j (j>=2): j-1 pure then group
             # 4-state: r in {0,..,block_size-1}, k states
             #   r=0: all mask; r=j (j>=1): j pure then group
-            mask_pdlm_4state = getattr(model_config, 'mask_pdlm_4state', False)
-            if mask_pdlm_4state:
-                r_per_block = torch.randint(0, block_size, (B, num_blocks))
-            else:
-                r_per_block = torch.randint(0, block_size + 1, (B, num_blocks))
+            r_per_block = torch.randint(0, block_size, (B, num_blocks))
 
             # Vectorized position and r tensors for the block region
             # pos_in_block: (1, block_region_len) — position within each block (0,1,...,K-1,0,1,...)
@@ -556,10 +550,7 @@ def pdlm_data_loader(
 
             # Compute masks vectorized: (B, block_region_len)
             is_mask = (r_expanded == 0)
-            if mask_pdlm_4state:
-                is_group = (~is_mask) & (pos_in_block >= r_expanded)
-            else:
-                is_group = (~is_mask) & (pos_in_block >= r_expanded - 1)
+            is_group = (~is_mask) & (pos_in_block >= r_expanded)
             # (is_pure = everything else — not needed explicitly)
 
             # Get block tokens and convert to group tokens (vectorized, same as both_block)
