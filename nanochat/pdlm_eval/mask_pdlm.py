@@ -859,3 +859,182 @@ def eval_mask_pdlm_parallel(
         "parallel_mid": result_mid,
         "parallel_end": result_end,
     }
+
+
+def _eval_mechanistic(model, cached_batches, block_size, attn_mask, device, autocast_ctx):
+    """
+    Mechanistic validation: group token as prior.
+
+    Three conditions (3 forward passes per batch):
+      1. MASK: all block positions → MASK token (control)
+      2. Random group: all block positions → uniformly random group token
+      3. True group: all block positions → correct group for the target token
+
+    Metric: Group Coverage = sum(softmax[v] for v in members(G)).
+      - MASK & Random: coverage measured against the same random group
+      - True: coverage measured against the true group
+
+    Preceding blocks always have ground-truth pure tokens.
+    """
+    from nanochat.group_tokenizer.token_map import get_token_map
+
+    pure_vocab_size = model.config.pure_vocab_size
+    num_groups = model.config.num_groups
+    mask_token_id = pure_vocab_size + num_groups
+    group_offset = pure_vocab_size
+
+    # group_to_pure_mask: (num_groups, pure_vocab_size) float
+    group_mask = model.group_to_pure_mask  # (G, V)
+
+    # Token map for pure → true group mapping
+    token_map = get_token_map(device=device)
+
+    # Per-position coverage tracking
+    # Two MASK baselines: one measured against random group, one against true group
+    cov_mask_rand = {p: {"sum": 0.0, "count": 0} for p in range(block_size)}
+    cov_mask_true = {p: {"sum": 0.0, "count": 0} for p in range(block_size)}
+    cov_random = {p: {"sum": 0.0, "count": 0} for p in range(block_size)}
+    cov_true = {p: {"sum": 0.0, "count": 0} for p in range(block_size)}
+
+    for inputs, targets, loss_extras, _ in cached_batches:
+        B, T = inputs.shape
+        num_blocks = T // block_size
+
+        with autocast_ctx:
+            # Position masks for target blocks (2..N-1)
+            pos_masks = []
+            for p in range(block_size):
+                mask = torch.zeros(B, T, dtype=torch.bool, device=device)
+                for block_idx in range(2, num_blocks):
+                    mask[:, block_idx * block_size + p] = True
+                pos_masks.append(mask)
+            target_mask = torch.zeros(B, T, dtype=torch.bool, device=device)
+            for p in range(block_size):
+                target_mask |= pos_masks[p]
+
+            # Sample random groups (shared across MASK and Random conditions)
+            random_groups = torch.randint(0, num_groups, (B, T), device=device)
+
+            # True groups for each target token
+            true_group_ids = token_map.noise_to_group(targets)  # (B, T) group token ids
+            true_group_indices = true_group_ids - group_offset  # (B, T) 0-based group indices
+
+            # --- Condition 1: MASK ---
+            mask_inputs = targets.clone()
+            mask_inputs[target_mask] = mask_token_id
+            logits_mask = model.forward_for_eval_mask_pdlm(
+                mask_inputs, targets, attn_mask=attn_mask)
+            probs_mask = F.softmax(logits_mask.float(), dim=-1)  # (B, T, V)
+            del logits_mask
+
+            # --- Condition 2: Random group ---
+            rand_inputs = targets.clone()
+            rand_inputs[target_mask] = random_groups[target_mask] + group_offset
+            logits_rand = model.forward_for_eval_mask_pdlm(
+                rand_inputs, targets, attn_mask=attn_mask)
+            probs_rand = F.softmax(logits_rand.float(), dim=-1)  # (B, T, V)
+            del logits_rand
+
+            # --- Condition 3: True group ---
+            true_inputs = targets.clone()
+            true_inputs[target_mask] = true_group_ids[target_mask]
+            logits_true = model.forward_for_eval_mask_pdlm(
+                true_inputs, targets, attn_mask=attn_mask)
+            probs_true = F.softmax(logits_true.float(), dim=-1)  # (B, T, V)
+            del logits_true
+
+            # Compute coverage per position
+            for pos in range(block_size):
+                pos_idx = pos_masks[pos]  # (B, T) bool
+                count = pos_idx.sum().item()
+
+                # Random group membership for MASK & Random conditions
+                rand_g = random_groups[pos_idx]  # (N,)
+                rand_members = group_mask[rand_g]  # (N, V)
+
+                # True group membership for True condition
+                true_g = true_group_indices[pos_idx]  # (N,)
+                true_members = group_mask[true_g]  # (N, V)
+
+                # Coverage: sum of probs for member tokens
+                pos_probs_mask = probs_mask[pos_idx]  # (N, V)
+                mask_cov_rand = (pos_probs_mask * rand_members).sum(dim=-1)  # (N,)
+                mask_cov_true = (pos_probs_mask * true_members).sum(dim=-1)  # (N,)
+                rand_cov = (probs_rand[pos_idx] * rand_members).sum(dim=-1)  # (N,)
+                true_cov = (probs_true[pos_idx] * true_members).sum(dim=-1)  # (N,)
+
+                cov_mask_rand[pos]["sum"] += mask_cov_rand.sum().item()
+                cov_mask_rand[pos]["count"] += count
+                cov_mask_true[pos]["sum"] += mask_cov_true.sum().item()
+                cov_mask_true[pos]["count"] += count
+                cov_random[pos]["sum"] += rand_cov.sum().item()
+                cov_random[pos]["count"] += count
+                cov_true[pos]["sum"] += true_cov.sum().item()
+                cov_true[pos]["count"] += count
+
+            del probs_mask, probs_rand, probs_true
+
+    # Build result
+    result = {"positions": {}}
+    total_mask_rand = total_mask_true = total_rand = total_true = 0.0
+    total_count = 0
+
+    for pos in range(block_size):
+        count = cov_mask_rand[pos]["count"]
+        mr = cov_mask_rand[pos]["sum"] / count if count > 0 else 0.0
+        mt = cov_mask_true[pos]["sum"] / count if count > 0 else 0.0
+        r = cov_random[pos]["sum"] / count if count > 0 else 0.0
+        t = cov_true[pos]["sum"] / count if count > 0 else 0.0
+        result["positions"][pos] = {
+            "mask_cov_rand": mr,
+            "mask_cov_true": mt,
+            "random_coverage": r,
+            "true_coverage": t,
+            "delta_random": r - mr,
+            "delta_true": t - mt,
+            "count": count,
+        }
+        total_mask_rand += cov_mask_rand[pos]["sum"]
+        total_mask_true += cov_mask_true[pos]["sum"]
+        total_rand += cov_random[pos]["sum"]
+        total_true += cov_true[pos]["sum"]
+        total_count += count
+
+    result["avg_mask_cov_rand"] = total_mask_rand / total_count if total_count > 0 else 0.0
+    result["avg_mask_cov_true"] = total_mask_true / total_count if total_count > 0 else 0.0
+    result["avg_random_coverage"] = total_rand / total_count if total_count > 0 else 0.0
+    result["avg_true_coverage"] = total_true / total_count if total_count > 0 else 0.0
+    result["avg_delta_random"] = result["avg_random_coverage"] - result["avg_mask_cov_rand"]
+    result["avg_delta_true"] = result["avg_true_coverage"] - result["avg_mask_cov_true"]
+
+    return result
+
+
+def eval_mask_pdlm_mechanistic(
+    model,
+    val_loader,
+    block_size,
+    num_batches,
+    attn_mask,
+    device,
+    autocast_ctx,
+    prefix_pure_tokens=0,
+):
+    """
+    Mechanistic validation: group token as prior.
+
+    Three conditions: MASK (control), random group, true group.
+    Measures Group Coverage = sum(softmax[v] for v in members(G)).
+    Positive delta_random confirms the model treats group tokens as priors.
+
+    Returns:
+        {"stage": "mask_pdlm", "mechanistic": result_dict}
+    """
+    with model_eval_context(model):
+        with torch.no_grad():
+            cached_batches = [next(val_loader) for _ in range(num_batches)]
+            result = _eval_mechanistic(
+                model, cached_batches, block_size, attn_mask, device, autocast_ctx,
+            )
+
+    return {"stage": "mask_pdlm", "mechanistic": result}

@@ -23,7 +23,7 @@ import torch
 from nanochat.common import compute_init, autodetect_device_type, get_base_dir, print0
 from nanochat.checkpoint_manager import load_checkpoint, find_last_step, find_largest_model
 from nanochat.pdlm import PDLM, PDLMConfig
-from nanochat.pdlm_eval import eval_pdlm, eval_pdlm_stage1_mask, eval_pdlm_stage1_block, eval_pdlm_compatibility, eval_pdlm_full, eval_pdlm_both_block, eval_block_pdlm_inference, eval_mask_pdlm, eval_mask_pdlm_parallel, eval_mask_pdlm_refresh, eval_mask_pdlm_fresh_mask_g, eval_mask_pdlm_threshold, dump_batch_to_file, dump_stage1_block_batch
+from nanochat.pdlm_eval import eval_pdlm, eval_pdlm_stage1_mask, eval_pdlm_stage1_block, eval_pdlm_compatibility, eval_pdlm_full, eval_pdlm_both_block, eval_block_pdlm_inference, eval_mask_pdlm, eval_mask_pdlm_parallel, eval_mask_pdlm_refresh, eval_mask_pdlm_fresh_mask_g, eval_mask_pdlm_threshold, eval_mask_pdlm_mechanistic, dump_batch_to_file, dump_stage1_block_batch
 from nanochat.dataloader import get_data_loader
 from nanochat.attn_masks import gen_mask, gen_block_causal_mask
 from nanochat.group_tokenizer.token_map import get_token_map
@@ -82,8 +82,10 @@ def load_pdlm_model(model_tag=None, step=None, device_type="auto", ckpt_dir=None
     # Fix torch compile prefix
     model_data = {k.removeprefix("_orig_mod."): v for k, v in model_data.items()}
 
-    # Build model
+    # Build model (filter out legacy keys not in PDLMConfig)
     model_config_kwargs = meta_data["model_config"]
+    valid_fields = {f.name for f in PDLMConfig.__dataclass_fields__.values()}
+    model_config_kwargs = {k: v for k, v in model_config_kwargs.items() if k in valid_fields}
     model_config = PDLMConfig(**model_config_kwargs)
 
     with torch.device("meta"):
@@ -123,6 +125,7 @@ def run_eval(
     refresh_decode=False,
     fresh_mask_decode=False,
     threshold_decode=False,
+    mechanistic_decode=False,
 ):
     """
     Run PDLM evaluation (Stage 1 MASK or Stage 2).
@@ -262,6 +265,18 @@ def run_eval(
             autocast_ctx=autocast_ctx, prefix_pure_tokens=prefix_pure_tokens,
             mtp_loss_weight=mtp_loss_weight,
         )
+    elif stage == "mask_pdlm" and mechanistic_decode:
+        print0(f"Running mask_pdlm mechanistic validation (group token as prior)...")
+        eval_result = eval_mask_pdlm_mechanistic(
+            model=model,
+            val_loader=val_loader,
+            block_size=block_size,
+            num_batches=num_batches,
+            attn_mask=attn_mask,
+            device=device,
+            autocast_ctx=autocast_ctx,
+            prefix_pure_tokens=prefix_pure_tokens,
+        )
     elif stage == "mask_pdlm" and threshold_decode:
         print0(f"Running mask_pdlm threshold decode evaluation...")
         eval_result = eval_mask_pdlm_threshold(
@@ -369,6 +384,18 @@ def print_results(eval_result, block_size):
     if stage == "mask_pdlm":
         print0("PDLM MASK_PDLM EVALUATION RESULTS")
         print0("=" * 60)
+
+        if "mechanistic" in eval_result:
+            mech = eval_result["mechanistic"]
+            print0(f"\n[mechanistic] Group Token as Prior validation:")
+            print0(f"  {'pos':>5s}  {'MASK(rand)':>10s}  {'Random cov':>10s}  {'Δ_rand':>10s}  {'MASK(true)':>10s}  {'True cov':>10s}  {'Δ_true':>10s}")
+            print0(f"  {'-----':>5s}  {'----------':>10s}  {'----------':>10s}  {'----------':>10s}  {'----------':>10s}  {'----------':>10s}  {'----------':>10s}")
+            for pos in range(block_size):
+                p = mech["positions"][pos]
+                print0(f"  {'pos '+str(pos):>5s}  {p['mask_cov_rand']:10.6f}  {p['random_coverage']:10.6f}  {p['delta_random']:10.6f}  {p['mask_cov_true']:10.6f}  {p['true_coverage']:10.6f}  {p['delta_true']:10.6f}")
+            print0(f"  {'avg':>5s}  {mech['avg_mask_cov_rand']:10.6f}  {mech['avg_random_coverage']:10.6f}  {mech['avg_delta_random']:10.6f}  {mech['avg_mask_cov_true']:10.6f}  {mech['avg_true_coverage']:10.6f}  {mech['avg_delta_true']:10.6f}")
+            print0("\n" + "=" * 60)
+            return
 
         if "threshold_decode" in eval_result:
             td = eval_result["threshold_decode"]
@@ -670,6 +697,8 @@ def main():
                         help="Run fresh-mask-G eval: resets remaining positions to MASK before each G collapse, removing G inertia. Also reports top-5 confidence metrics. mask_pdlm only.")
     parser.add_argument("--threshold_decode", action="store_true",
                         help="Run threshold-based parallel decoding: sweep τ from 0.0 to 1.0, report avg_steps per threshold. mask_pdlm only.")
+    parser.add_argument("--mechanistic_decode", action="store_true",
+                        help="Run mechanistic validation: group token as prior. Measures group coverage under MASK, random group, and true group conditions. mask_pdlm only.")
     args = parser.parse_args()
 
     # Handle generation mode (mask_pdlm only)
@@ -771,6 +800,7 @@ def main():
         refresh_decode=args.refresh_decode,
         fresh_mask_decode=args.fresh_mask_decode,
         threshold_decode=args.threshold_decode,
+        mechanistic_decode=args.mechanistic_decode,
     )
 
     # Get block_size for printing

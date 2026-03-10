@@ -1,1 +1,1 @@
-- When slurm run: new file in slurms/ -> call the script in launch/ -> codebase
+- Models and tokenizers are stored on Google Drive at `gdrive:nanochat/` (accessed via rclone)

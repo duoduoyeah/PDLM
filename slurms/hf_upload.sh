@@ -35,6 +35,7 @@ REPO_PREFIX=""
 RUN_FOLDER=""
 RESULT_DIRS=""
 REPO_ID="duoduoyeah/eval_results"
+EVAL_JSON_NAME="eval_threshold.json"
 
 # Parse arguments
 for arg in "$@"; do
@@ -50,6 +51,9 @@ for arg in "$@"; do
             ;;
         --repo_id=*)
             REPO_ID="${arg#*=}"
+            ;;
+        --eval_json=*)
+            EVAL_JSON_NAME="${arg#*=}"
             ;;
         *)
             echo "Unknown argument: $arg"
@@ -83,26 +87,29 @@ python -c "
 import json, os, tempfile, shutil
 from huggingface_hub import upload_folder
 
-repo_prefix = '${REPO_PREFIX}'
-run_folder  = '${RUN_FOLDER}'
-repo_id     = '${REPO_ID}'
-timestamp   = '${TIMESTAMP}'
-result_dirs = '''${RESULT_DIRS}'''.split()
+repo_prefix    = '${REPO_PREFIX}'
+run_folder     = '${RUN_FOLDER}'
+repo_id        = '${REPO_ID}'
+timestamp      = '${TIMESTAMP}'
+eval_json_name = '${EVAL_JSON_NAME}'
+result_dirs    = '''${RESULT_DIRS}'''.split()
+
+eval_json_stem = eval_json_name.replace('.json', '')
 
 tmp = tempfile.mkdtemp()
 staged = 0
 try:
     for result_dir in result_dirs:
         model_name = os.path.basename(result_dir)
-        src_json   = os.path.join(result_dir, 'eval_threshold.json')
+        src_json   = os.path.join(result_dir, eval_json_name)
 
         if not os.path.exists(src_json):
-            print(f'[skip] {model_name}: eval_threshold.json not found')
+            print(f'[skip] {model_name}: {eval_json_name} not found')
             continue
 
         dest_dir = os.path.join(tmp, repo_prefix, model_name, run_folder)
         os.makedirs(dest_dir, exist_ok=True)
-        shutil.copy(src_json, f'{dest_dir}/eval_threshold_{timestamp}.json')
+        shutil.copy(src_json, f'{dest_dir}/{eval_json_stem}_{timestamp}.json')
 
         args = {
             'model':     model_name,
