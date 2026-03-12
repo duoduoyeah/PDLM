@@ -1,7 +1,7 @@
 03/10
 * dynamic soft_p ratio for every position.
 * cv stuff?
-* 
+* bd3lm-prime comparison
 
 02/25
 * we need to find some confidence related metrics? like entrophy-ppl?
