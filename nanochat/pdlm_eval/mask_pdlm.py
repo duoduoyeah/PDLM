@@ -1038,3 +1038,147 @@ def eval_mask_pdlm_mechanistic(
             )
 
     return {"stage": "mask_pdlm", "mechanistic": result}
+
+
+def _eval_oracle(model, cached_batches, block_size, attn_mask, device, autocast_ctx):
+    """
+    Oracle evaluation (exp-c + exp-d).
+
+    Two conditions (2 forward passes per batch):
+      1. Oracle group (exp-c): block positions get ground-truth group tokens → measure PPL.
+      2. MASK (exp-d): block positions get MASK token → check if argmax hits correct group → accuracy.
+
+    Preceding blocks always have ground-truth pure tokens.
+    """
+    from nanochat.group_tokenizer.token_map import get_token_map
+
+    pure_vocab_size = model.config.pure_vocab_size
+    num_groups = model.config.num_groups
+    mask_token_id = pure_vocab_size + num_groups
+    group_offset = pure_vocab_size
+
+    group_mask = model.group_to_pure_mask  # (G, V)
+    token_map = get_token_map(device=device)
+
+    # exp-c: per-position NLL for oracle group input
+    expc_by_pos = {p: {"nll": 0.0, "entropy": 0.0, "tokens": 0} for p in range(block_size)}
+    # exp-d: per-position group accuracy for MASK input
+    expd_by_pos = {p: {"correct": 0, "tokens": 0} for p in range(block_size)}
+
+    for inputs, targets, loss_extras, _ in cached_batches:
+        B, T = inputs.shape
+        num_blocks = T // block_size
+
+        with autocast_ctx:
+            # Position masks for target blocks (2..N-1)
+            pos_masks = []
+            for p in range(block_size):
+                mask = torch.zeros(B, T, dtype=torch.bool, device=device)
+                for block_idx in range(2, num_blocks):
+                    mask[:, block_idx * block_size + p] = True
+                pos_masks.append(mask)
+            target_mask = torch.zeros(B, T, dtype=torch.bool, device=device)
+            for p in range(block_size):
+                target_mask |= pos_masks[p]
+
+            # True groups for each target token
+            true_group_ids = token_map.noise_to_group(targets)  # (B, T) group token ids
+            true_group_indices = true_group_ids - group_offset  # (B, T) 0-based group indices
+
+            # --- exp-c: Oracle group tokens ---
+            oracle_inputs = targets.clone()
+            oracle_inputs[target_mask] = true_group_ids[target_mask]
+            logits_oracle = model.forward_for_eval_mask_pdlm(
+                oracle_inputs, targets, attn_mask=attn_mask)
+            log_probs_oracle = F.log_softmax(logits_oracle.float(), dim=-1)
+
+            for pos in range(block_size):
+                pos_idx = pos_masks[pos]  # (B, T) bool
+                count = pos_idx.sum().item()
+
+                pos_targets = targets[pos_idx]  # (N,)
+                pos_log_probs = log_probs_oracle[pos_idx]  # (N, V)
+
+                nll = -pos_log_probs.gather(-1, pos_targets.unsqueeze(-1)).squeeze(-1)  # (N,)
+                entropy = -(pos_log_probs.exp() * pos_log_probs).sum(dim=-1)  # (N,)
+
+                expc_by_pos[pos]["nll"] += nll.sum().item()
+                expc_by_pos[pos]["entropy"] += entropy.sum().item()
+                expc_by_pos[pos]["tokens"] += count
+
+            del logits_oracle, log_probs_oracle
+
+            # --- exp-d: MASK tokens → group prediction accuracy ---
+            mask_inputs = targets.clone()
+            mask_inputs[target_mask] = mask_token_id
+            logits_mask = model.forward_for_eval_mask_pdlm(
+                mask_inputs, targets, attn_mask=attn_mask)
+
+            for pos in range(block_size):
+                pos_idx = pos_masks[pos]  # (B, T) bool
+                count = pos_idx.sum().item()
+
+                pos_logits = logits_mask[pos_idx]  # (N, V)
+                pos_true_g = true_group_indices[pos_idx]  # (N,) 0-based
+
+                # Check if argmax prediction is in the correct group
+                argmax_preds = pos_logits.argmax(dim=-1)  # (N,) pure token ids
+                # For each prediction, get the group membership
+                true_g_members = group_mask[pos_true_g]  # (N, V) bool
+                hits = true_g_members.gather(-1, argmax_preds.unsqueeze(-1)).squeeze(-1)  # (N,) bool
+
+                expd_by_pos[pos]["correct"] += hits.sum().item()
+                expd_by_pos[pos]["tokens"] += count
+
+            del logits_mask
+
+    # Build exp-c result using build_result_dict
+    expc_result = build_result_dict(expc_by_pos, block_size, include_accuracy=False)
+
+    # Build exp-d result manually
+    total_correct = sum(expd_by_pos[p]["correct"] for p in range(block_size))
+    total_tokens = sum(expd_by_pos[p]["tokens"] for p in range(block_size))
+    expd_result = {
+        "overall_accuracy": total_correct / total_tokens if total_tokens > 0 else 0.0,
+        "num_tokens_evaluated": total_tokens,
+        "positions": {},
+    }
+    for pos in range(block_size):
+        tokens = expd_by_pos[pos]["tokens"]
+        correct = expd_by_pos[pos]["correct"]
+        expd_result["positions"][pos] = {
+            "accuracy": correct / tokens if tokens > 0 else 0.0,
+            "correct": correct,
+            "tokens": tokens,
+        }
+
+    return {"exp_c": expc_result, "exp_d": expd_result}
+
+
+def eval_mask_pdlm_oracle(
+    model,
+    val_loader,
+    block_size,
+    num_batches,
+    attn_mask,
+    device,
+    autocast_ctx,
+    prefix_pure_tokens=0,
+):
+    """
+    Oracle evaluation: exp-c (Oracle PPL) and exp-d (group prediction accuracy).
+
+    exp-c: Feed ground-truth group tokens at block positions, measure PPL (stage 2 in isolation).
+    exp-d: Feed MASK tokens at block positions, check if argmax hits correct group.
+
+    Returns:
+        {"stage": "mask_pdlm", "oracle": {"exp_c": {...}, "exp_d": {...}}}
+    """
+    with model_eval_context(model):
+        with torch.no_grad():
+            cached_batches = [next(val_loader) for _ in range(num_batches)]
+            result = _eval_oracle(
+                model, cached_batches, block_size, attn_mask, device, autocast_ctx,
+            )
+
+    return {"stage": "mask_pdlm", "oracle": result}

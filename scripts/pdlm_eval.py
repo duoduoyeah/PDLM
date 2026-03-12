@@ -23,7 +23,7 @@ import torch
 from nanochat.common import compute_init, autodetect_device_type, get_base_dir, print0
 from nanochat.checkpoint_manager import load_checkpoint, find_last_step, find_largest_model
 from nanochat.pdlm import PDLM, PDLMConfig
-from nanochat.pdlm_eval import eval_pdlm, eval_pdlm_stage1_mask, eval_pdlm_stage1_block, eval_pdlm_compatibility, eval_pdlm_full, eval_pdlm_both_block, eval_block_pdlm_inference, eval_mask_pdlm, eval_mask_pdlm_parallel, eval_mask_pdlm_refresh, eval_mask_pdlm_fresh_mask_g, eval_mask_pdlm_threshold, eval_mask_pdlm_mechanistic, dump_batch_to_file, dump_stage1_block_batch
+from nanochat.pdlm_eval import eval_pdlm, eval_pdlm_stage1_mask, eval_pdlm_stage1_block, eval_pdlm_compatibility, eval_pdlm_full, eval_pdlm_both_block, eval_block_pdlm_inference, eval_mask_pdlm, eval_mask_pdlm_parallel, eval_mask_pdlm_refresh, eval_mask_pdlm_fresh_mask_g, eval_mask_pdlm_threshold, eval_mask_pdlm_mechanistic, eval_mask_pdlm_oracle, dump_batch_to_file, dump_stage1_block_batch
 from nanochat.dataloader import get_data_loader
 from nanochat.attn_masks import gen_mask, gen_block_causal_mask
 from nanochat.group_tokenizer.token_map import get_token_map
@@ -126,6 +126,7 @@ def run_eval(
     fresh_mask_decode=False,
     threshold_decode=False,
     mechanistic_decode=False,
+    oracle_decode=False,
 ):
     """
     Run PDLM evaluation (Stage 1 MASK or Stage 2).
@@ -265,6 +266,18 @@ def run_eval(
             autocast_ctx=autocast_ctx, prefix_pure_tokens=prefix_pure_tokens,
             mtp_loss_weight=mtp_loss_weight,
         )
+    elif stage == "mask_pdlm" and oracle_decode:
+        print0(f"Running mask_pdlm oracle evaluation (exp-c: Oracle PPL, exp-d: group accuracy)...")
+        eval_result = eval_mask_pdlm_oracle(
+            model=model,
+            val_loader=val_loader,
+            block_size=block_size,
+            num_batches=num_batches,
+            attn_mask=attn_mask,
+            device=device,
+            autocast_ctx=autocast_ctx,
+            prefix_pure_tokens=prefix_pure_tokens,
+        )
     elif stage == "mask_pdlm" and mechanistic_decode:
         print0(f"Running mask_pdlm mechanistic validation (group token as prior)...")
         eval_result = eval_mask_pdlm_mechanistic(
@@ -384,6 +397,30 @@ def print_results(eval_result, block_size):
     if stage == "mask_pdlm":
         print0("PDLM MASK_PDLM EVALUATION RESULTS")
         print0("=" * 60)
+
+        if "oracle" in eval_result:
+            oracle = eval_result["oracle"]
+            exp_c = oracle["exp_c"]
+            exp_d = oracle["exp_d"]
+            print0(f"\n[oracle] exp-c: Oracle PPL (ground-truth group tokens):")
+            print0(f"  {'pos':>5s}  {'loss':>8s}  {'PPL':>8s}  {'Ent-PPL':>8s}")
+            print0(f"  {'-----':>5s}  {'--------':>8s}  {'--------':>8s}  {'--------':>8s}")
+            for pos in range(block_size):
+                p = exp_c["positions"][pos]
+                eppl = f"{p['entropy_ppl']:.2f}" if "entropy_ppl" in p else "--"
+                print0(f"  {'pos '+str(pos):>5s}  {p['loss']:.4f}  {p['ppl']:8.2f}  {eppl:>8s}")
+            eppl_avg = f"{exp_c['overall_entropy_ppl']:.2f}" if "overall_entropy_ppl" in exp_c else "--"
+            print0(f"  {'avg':>5s}  {exp_c['overall_loss']:.4f}  {exp_c['overall_ppl']:8.2f}  {eppl_avg:>8s}")
+
+            print0(f"\n[oracle] exp-d: Group prediction accuracy (MASK → argmax in correct group):")
+            print0(f"  {'pos':>5s}  {'accuracy':>10s}  {'correct':>8s}  {'total':>8s}")
+            print0(f"  {'-----':>5s}  {'----------':>10s}  {'--------':>8s}  {'--------':>8s}")
+            for pos in range(block_size):
+                p = exp_d["positions"][pos]
+                print0(f"  {'pos '+str(pos):>5s}  {p['accuracy']:10.2%}  {p['correct']:8.0f}  {p['tokens']:8d}")
+            print0(f"  {'avg':>5s}  {exp_d['overall_accuracy']:10.2%}  {sum(exp_d['positions'][p]['correct'] for p in range(block_size)):8.0f}  {exp_d['num_tokens_evaluated']:8d}")
+            print0("\n" + "=" * 60)
+            return
 
         if "mechanistic" in eval_result:
             mech = eval_result["mechanistic"]
@@ -697,6 +734,8 @@ def main():
                         help="Run fresh-mask-G eval: resets remaining positions to MASK before each G collapse, removing G inertia. Also reports top-5 confidence metrics. mask_pdlm only.")
     parser.add_argument("--threshold_decode", action="store_true",
                         help="Run threshold-based parallel decoding: sweep τ from 0.0 to 1.0, report avg_steps per threshold. mask_pdlm only.")
+    parser.add_argument("--oracle_decode", action="store_true",
+                        help="Run oracle evaluation: exp-c (Oracle PPL with ground-truth group tokens) and exp-d (group prediction accuracy from MASK). mask_pdlm only.")
     parser.add_argument("--mechanistic_decode", action="store_true",
                         help="Run mechanistic validation: group token as prior. Measures group coverage under MASK, random group, and true group conditions. mask_pdlm only.")
     args = parser.parse_args()
@@ -801,6 +840,7 @@ def main():
         fresh_mask_decode=args.fresh_mask_decode,
         threshold_decode=args.threshold_decode,
         mechanistic_decode=args.mechanistic_decode,
+        oracle_decode=args.oracle_decode,
     )
 
     # Get block_size for printing

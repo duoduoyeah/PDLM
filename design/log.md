@@ -1,3 +1,8 @@
+03/10
+* dynamic soft_p ratio for every position.
+* cv stuff?
+* 
+
 02/25
 * we need to find some confidence related metrics? like entrophy-ppl?
 * use reference model to judge free-decode block quality
