@@ -11,11 +11,13 @@ from nanochat.dataloader_ar import ar_data_loader
 from nanochat.dataloader_bd3lm import bd3lm_data_loader
 from nanochat.dataloader_pdlm import pdlm_data_loader
 from nanochat.dataloader_mtp import mtp_data_loader
+from nanochat.dataloader_bd3lm_prime import bd3lm_prime_data_loader
 
 from nanochat.gpt import GPTConfig
 from nanochat.bd3lm import BDLMConfig
 from nanochat.pdlm import PDLMConfig
 from nanochat.gpt_mtp import GPTMTPConfig
+from nanochat.bd3lm_prime import BD3LMPrimeConfig
 
 
 def get_data_loader(
@@ -56,6 +58,11 @@ def get_data_loader(
         )
     elif isinstance(model_config, PDLMConfig):
         return pdlm_data_loader(
+            B, T, split, device, model_config, resume_state_dict,
+            tokenizer_threads, tokenizer_batch_size
+        )
+    elif isinstance(model_config, BD3LMPrimeConfig):
+        return bd3lm_prime_data_loader(
             B, T, split, device, model_config, resume_state_dict,
             tokenizer_threads, tokenizer_batch_size
         )

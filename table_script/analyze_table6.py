@@ -29,6 +29,7 @@ BLOCK_SIZE = 4
 P_VALUES = [0, 30, 50, 70, 90, 100]
 
 BD3LM_MODEL = "bd3lm_d8_b4_normal_r40"
+BD3LM_PRIME_MODEL = "bd3lm_prime_d8_b4_l2_r40"
 
 CONFIGS = {
     "n256": {
@@ -73,11 +74,18 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--bd3lm_dir", default="table_script/results/table6_bd3lm")
     parser.add_argument("--pdlm_dir", default="table_script/results/table6_mask_pdlm")
+    parser.add_argument("--prime_dir", default="table_script/results/table6_bd3lm_prime")
     parser.add_argument("--output", default="table_script/results/table6_threshold_decode_tau0.4_0.9.pdf")
     args = parser.parse_args()
 
     # Load BD3-LM baseline
     bd3lm_data = load_threshold_json(args.bd3lm_dir, BD3LM_MODEL, "bd3lm")
+
+    # Load BD3-LM-Prime
+    prime_data = load_threshold_json(args.prime_dir, BD3LM_PRIME_MODEL, "bd3lm_prime")
+    if not prime_data:
+        # Also try without subfolder prefix (flat directory)
+        prime_data = load_threshold_json(args.prime_dir, BD3LM_PRIME_MODEL, "")
 
     # Color map: p=0 (light) → p=100 (dark)
     cmap = plt.get_cmap("Blues", len(P_VALUES) + 2)
@@ -91,6 +99,12 @@ def main():
             tau, tps = extract_curve(bd3lm_data)
             ax.plot(tau, tps, color="black", linestyle="--", linewidth=2,
                     label="BD3-LM", zorder=10)
+
+        # BD3-LM-Prime
+        if prime_data:
+            tau, tps = extract_curve(prime_data)
+            ax.plot(tau, tps, color="tab:orange", linestyle="--", linewidth=2,
+                    marker="s", markersize=3, label="BD3-LM-Prime", zorder=9)
 
         # PDLM lines
         for p in P_VALUES:
@@ -126,6 +140,10 @@ def main():
     if bd3lm_data:
         td = bd3lm_data["threshold_decode"]
         print(f"{'BD3-LM':<22} {BLOCK_SIZE/td['0.2']['avg_steps']:>8.2f} "
+              f"{BLOCK_SIZE/td['0.3']['avg_steps']:>8.2f} {BLOCK_SIZE/td['0.5']['avg_steps']:>8.2f}")
+    if prime_data:
+        td = prime_data["threshold_decode"]
+        print(f"{'BD3-LM-Prime':<22} {BLOCK_SIZE/td['0.2']['avg_steps']:>8.2f} "
               f"{BLOCK_SIZE/td['0.3']['avg_steps']:>8.2f} {BLOCK_SIZE/td['0.5']['avg_steps']:>8.2f}")
     for config_key, config in CONFIGS.items():
         for p in P_VALUES:

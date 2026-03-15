@@ -13,6 +13,7 @@ import torch
 from nanochat.gpt import GPT, GPTConfig
 from nanochat.pdlm import PDLM, PDLMConfig
 from nanochat.bd3lm import BDLM, BDLMConfig
+from nanochat.bd3lm_prime import BD3LMPrime, BD3LMPrimeConfig
 from nanochat.gpt_mtp import GPTMTP, GPTMTPConfig
 from nanochat.dataloader import get_data_loader
 from nanochat.bd3lm_eval import eval_bd3lm
@@ -52,6 +53,7 @@ mtp_loss_weight = 1.0 # both_mtp: Stage 1 MTP loss weight relative to Stage 2
 soft_p_within = 1.0 # stage2: prob of correct group mapping (1.0 = hard, <1.0 = soft noise)
 noise_count = 64 # pdlm_emb: total tokens in noise average (including target)
 loss_mask_block_size = 0 # AR: >0 enables 4-state block loss mask (e.g. 4 → 10/16 effective tokens)
+target_length = 2 # bd3lm_prime: number of sub-tokens per token (ℓ)
 loss_weight_mode = "manual" # "manual" or "fixed" - fixed computes weight from warmup batches
 loss_weight_warmup_steps = 10 # number of batches for estimating loss ratio (used when loss_weight_mode="fixed")
 stage1_target_mode = "pure" # MTP: "pure" (default) or "group" (legacy) - determines target format and loss
@@ -89,7 +91,7 @@ exec(open(os.path.join('nanochat', 'configurator.py')).read()) # overrides from 
 user_config = {k: globals()[k] for k in config_keys} # will be useful for logging
 # -----------------------------------------------------------------------------
 assert 0 <= prefix_pure_tokens <= block_size <= max_seq_len, "Expected prefix_pure_tokens <= block_size <= max_seq_len"
-assert model_type in {"next_token_ar", "bd3lm", "pdlm", "mtp"}, f"Invalid model_type: {model_type}"
+assert model_type in {"next_token_ar", "bd3lm", "bd3lm_prime", "pdlm", "mtp"}, f"Invalid model_type: {model_type}"
 
 
 # Compute init
@@ -110,7 +112,7 @@ all_vocab_size = tokenizer.get_vocab_size()
 if model_type == "next_token_ar":
     pure_vocab_size = all_vocab_size
     token_map = None
-elif model_type == "bd3lm":
+elif model_type in ("bd3lm", "bd3lm_prime"):
     pure_vocab_size = all_vocab_size - 1  # MASK is the only extra token
     token_map = None
 elif model_type == "pdlm":
@@ -198,6 +200,24 @@ elif model_type == "bd3lm":
         model_name=run,
         target_shift=target_shift,
     )
+elif model_type == "bd3lm_prime":
+    ModelConfig, Model = BD3LMPrimeConfig, BD3LMPrime
+    model_config_kwargs = dict(
+        sequence_len=max_seq_len,
+        pure_vocab_size=pure_vocab_size,
+        all_vocab_size=all_vocab_size,
+        n_layer=num_layers,
+        n_head=num_heads,
+        n_kv_head=num_kv_heads,
+        n_embd=model_dim,
+        prefix_pure_tokens=prefix_pure_tokens,
+        mask_token_id=mask_token_id,
+        is_causal=is_causal,
+        bucket_size=block_size,
+        model_name=run,
+        target_shift=target_shift,
+        target_length=target_length,
+    )
 elif model_type == "pdlm":
     ModelConfig, Model = PDLMConfig, PDLM
     model_config_kwargs = dict(
@@ -274,7 +294,7 @@ if model_type == "pdlm" and pdlm_stage == "mask_pdlm":
 # Generate attention masks
 # For BD3LM: pre-generate block_size masks for prefix_sliding_tokens cycling (both normal and target_shift modes)
 # For other model types: single mask with prefix_sliding_tokens = 0
-if model_type == "bd3lm":
+if model_type in ("bd3lm", "bd3lm_prime"):
     # Pre-generate all masks for cycling prefix_sliding_tokens = 0, 1, ..., block_size-1
     # This ensures block boundaries shift each epoch for better data utilization
     block_diff_masks = [
@@ -327,7 +347,7 @@ else:
 # BD3LM only computes loss on masked positions
 # - bd3lm_compute_matched=True (default): no adjustment, compare at equal compute/FLOPs
 # - bd3lm_compute_matched=False: adjust iterations to match loss tokens (supervision-matched)
-if model_type == "bd3lm":
+if model_type in ("bd3lm", "bd3lm_prime"):
     # Auto-compute bd3lm_effective_ratio if not specified
     if bd3lm_effective_ratio is None:
         if target_shift >= 1:
@@ -378,7 +398,7 @@ x, y, loss_extras, dataloader_state_dict = next(train_loader) # kick off load of
 val_loader = None
 eval_attn_mask = None
 if eval_every > 0:
-    if model_type == "bd3lm":
+    if model_type in ("bd3lm", "bd3lm_prime"):
         val_loader = get_data_loader(
             device_batch_size,
             max_seq_len,
@@ -495,7 +515,7 @@ while True:
     if eval_every > 0 and (last_step or (step > 0 and step % eval_every == 0)):
         # Use more batches for final evaluation
         current_eval_batches = eval_num_batches_final if last_step else eval_num_batches
-        if model_type == "bd3lm":
+        if model_type in ("bd3lm", "bd3lm_prime"):
             print0(f"Running BD3LM evaluation at step {step} ({current_eval_batches} batches)...")
             eval_result = eval_bd3lm(
                 model=orig_model,  # use uncompiled model
@@ -1048,7 +1068,7 @@ while True:
                     handle.write(f"x={x_cpu.tolist()}\n")
                     handle.write(f"y={y_cpu.tolist()}\n")
         with autocast_ctx:
-            if model_type == "bd3lm":
+            if model_type in ("bd3lm", "bd3lm_prime"):
                 # Select attention mask based on epoch (for target_shift cycling)
                 epoch = dataloader_state_dict.get("epoch", 0)
                 block_diff_mask = block_diff_masks[epoch % len(block_diff_masks)]
@@ -1112,7 +1132,7 @@ while True:
     debiased_smooth_loss = smooth_train_loss / (1 - ema_beta**(step + 1)) # debias the EMA
     pct_done = 100 * step / num_iterations
     tok_per_sec = int(total_batch_size / dt)
-    rl_tok_per_sec = int(step_effective_tokens / dt) if model_type == "bd3lm" else None
+    rl_tok_per_sec = int(step_effective_tokens / dt) if model_type in ("bd3lm", "bd3lm_prime") else None
     flops_per_sec = num_flops_per_token * total_batch_size / dt
     promised_flops_per_sec_h100 = 989e12 * ddp_world_size # bfloat16 H100 SXM and without 2:4 sparsity
     mfu = 100 * flops_per_sec / promised_flops_per_sec_h100 # in %

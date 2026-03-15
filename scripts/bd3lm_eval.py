@@ -19,6 +19,7 @@ import torch
 from nanochat.common import compute_init, autodetect_device_type, get_base_dir, print0
 from nanochat.checkpoint_manager import load_checkpoint, find_last_step, find_largest_model
 from nanochat.bd3lm import BDLM, BDLMConfig
+from nanochat.bd3lm_prime import BD3LMPrime, BD3LMPrimeConfig
 from nanochat.bd3lm_eval import eval_bd3lm, eval_bd3lm_threshold
 from nanochat.dataloader import tokenizing_distributed_data_loader_with_state
 from nanochat.attn_masks import gen_mask
@@ -74,12 +75,21 @@ def load_bd3lm_model(model_tag=None, step=None, device_type="auto", ckpt_dir=Non
     # Fix torch compile prefix
     model_data = {k.removeprefix("_orig_mod."): v for k, v in model_data.items()}
 
-    # Build model
+    # Build model — detect BD3-LM vs BD3-LM-Prime from metadata
     model_config_kwargs = meta_data["model_config"]
-    model_config = BDLMConfig(**model_config_kwargs)
+    model_type = meta_data.get("user_config", {}).get("model_type", "bd3lm")
+    is_prime = model_type == "bd3lm_prime" or model_config_kwargs.get("target_length", 1) > 1
+
+    if is_prime:
+        model_config = BD3LMPrimeConfig(**model_config_kwargs)
+        ModelClass = BD3LMPrime
+        print0(f"Detected BD3-LM-Prime (target_length={model_config.target_length}, base={model_config.base})")
+    else:
+        model_config = BDLMConfig(**model_config_kwargs)
+        ModelClass = BDLM
 
     with torch.device("meta"):
-        model = BDLM(model_config)
+        model = ModelClass(model_config)
 
     model.to_empty(device=device)
     model.init_weights()
@@ -170,7 +180,11 @@ def run_eval(
     print0(f"Batch: device_batch_size={device_batch_size}, num_batches={num_batches}, "
            f"total_sequences={num_batches * device_batch_size}")
 
-    bdlm_config = BDLMConfig(**{**model_config, "target_shift": target_shift, "mask_token_id": mask_token_id})
+    # Detect model type for val_loader config
+    model_type = meta_data.get("user_config", {}).get("model_type", "bd3lm")
+    is_prime = model_type == "bd3lm_prime" or model_config.get("target_length", 1) > 1
+    ConfigClass = BD3LMPrimeConfig if is_prime else BDLMConfig
+    bdlm_config = ConfigClass(**{**model_config, "target_shift": target_shift, "mask_token_id": mask_token_id})
     val_loader = tokenizing_distributed_data_loader_with_state(
         device_batch_size,
         max_seq_len,

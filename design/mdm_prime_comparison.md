@@ -109,8 +109,41 @@ BD3-LM-Prime might even look similar to BD3-LM on this metric if arbitrary digit
 
 **Punchline**: Intermediate states help PPL broadly, but only semantically structured intermediate states help confidence/parallel decoding.
 
+## BD3-LM-Prime Implementation
+
+### Settings Rationale
+
+**target_length (ℓ) = 2**: The only free design choice. Constrained by:
+1. `base^ℓ >= vocab_size` must hold exactly (no wasted sub-token combos)
+2. `n_embd % ℓ == 0` (embedding dimension must split evenly)
+
+For vocab=4096, n_embd=512: ℓ=2 gives base=64 (64²=4096 exact, 512/2=256 clean). ℓ=3 gives base=16 (16³=4096 exact, but 512/3≈170.67 — breaks). ℓ=2 also matches MDM-Prime's own text experiments.
+
+**base=64, sub_token_vocab=65**: Mechanically derived, no design choices:
+- base = ceil(4096^(1/2)) = 64 (only valid value)
+- mask sub-token ID = 64 (next available after valid range 0–63)
+- embedding size = 64+1 = 65
+
+Analogous to BD3-LM: valid tokens 0–4095, mask token 4096, vocab 4097.
+
+### Files Created
+- `nanochat/bd3lm_utils/prime_encoding.py` — base-b encode/decode (arithmetic, no learning)
+- `nanochat/bd3lm_prime.py` — BD3LMPrime model + BD3LMPrimeConfig
+- `nanochat/dataloader_bd3lm_prime.py` — sub-token-level masking dataloader
+- `slurms/slurm_bd3lm_prime.sh` — SLURM training script
+
+### Files Modified
+- `nanochat/dataloader.py` — added BD3LMPrimeConfig dispatch
+- `scripts/base_train.py` — added `bd3lm_prime` model type
+
+### Model Architecture
+- Input embedding: `nn.Embedding(65, 256)` — embeds sub-tokens, pairs concatenated to 512-dim
+- Output head: `nn.Linear(512, 4096)` — predicts full tokens (same as BD3-LM)
+- Transformer: identical to BD3-LM (shared Block/Attention/MLP code)
+- Params: ~27.3M (vs ~29M BD3-LM, due to smaller embedding table)
+
 ## TODO
 - [x] Explore their GitHub repo
 - [x] Design comparison experiments
-- [ ] Implement BD3-LM-Prime model
+- [x] Implement BD3-LM-Prime model
 - [ ] Run experiments
