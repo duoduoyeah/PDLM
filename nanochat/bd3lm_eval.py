@@ -29,6 +29,8 @@ Example (L=16, block_size=4, 4 blocks, target_shift=1):
 import torch
 import torch.nn.functional as F
 
+from nanochat.bd3lm_utils.prime_encoding import encode as prime_encode
+
 
 def eval_bd3lm(
     model,
@@ -347,10 +349,193 @@ def _eval_threshold_decode(
     return {"threshold": threshold, "avg_steps": avg_steps, "total_blocks": total_blocks}
 
 
+def _eval_threshold_decode_two_tier(
+    model, cached_batches, block_size,
+    attn_mask, device, autocast_ctx, mask_token_id,
+    tau1, tau2, base, mask_sub_token, target_length,
+):
+    """
+    Two-tier threshold decode for BD3-LM-Prime.
+
+    Three states per position:
+    - 0: fully masked (both sub-tokens = mask_sub_token)
+    - 1: half-decoded (sub-token 0 revealed, sub-token 1 = mask_sub_token)
+    - 2: fully decoded (both sub-tokens clean)
+
+    High confidence (> tau1): full decode.
+    Medium confidence (tau2 < prob <= tau1, state==0): half decode (reveal MSB only).
+    Half-decoded positions promoted to full on subsequent passes with consistency filtering.
+
+    Args:
+        model: BD3-LM-Prime model (must have forward_for_eval_sub)
+        cached_batches: list of (targets,) tuples
+        block_size: block size
+        attn_mask: attention mask
+        device: device
+        autocast_ctx: autocast context
+        mask_token_id: MASK token id (original token space)
+        tau1: high confidence threshold
+        tau2: low confidence threshold
+        base: sub-token base
+        mask_sub_token: sub-token mask id
+        target_length: number of sub-tokens per token (l)
+
+    Returns:
+        {"threshold_high": tau1, "threshold_low": tau2, "avg_steps": float, "total_blocks": int}
+    """
+    l = target_length
+    pure_vocab_size = model.config.pure_vocab_size
+
+    # Precompute: token -> sub-token 0 mapping for consistency filtering
+    token_to_s0 = torch.arange(pure_vocab_size, device=device) // base  # (pure_vocab_size,)
+
+    total_steps = 0.0
+    total_blocks = 0
+
+    for (targets_batch,) in cached_batches:
+        B, L = targets_batch.shape
+        num_blocks = L // block_size
+        num_target_blocks = num_blocks - 1  # skip block 0
+
+        with autocast_ctx:
+            # Sub-token level inputs: (B, L * l)
+            eval_sub = torch.full((B, L * l), mask_sub_token, dtype=torch.long, device=device)
+
+            # Set block 0 to clean sub-tokens
+            targets_sub = prime_encode(targets_batch, base, l,
+                                       mask_token_id=mask_token_id,
+                                       mask_sub_token=mask_sub_token)  # (B, L*l)
+            eval_sub[:, :block_size * l] = targets_sub[:, :block_size * l]
+
+            # State tracking: (B, num_blocks, block_size) with values {0, 1, 2}
+            state_blk = torch.zeros(B, num_blocks, block_size, dtype=torch.long, device=device)
+            state_blk[:, 0, :] = 2  # block 0 is fully decoded
+
+            # Precompute position -> sub-token index mappings
+            pos_L = torch.arange(L, device=device)
+            sub0_idx = pos_L * l        # (L,) indices of sub-token 0
+            sub1_idx = pos_L * l + 1    # (L,) indices of sub-token 1
+
+            # Track steps per block
+            block_steps = torch.zeros(B, num_target_blocks, device=device)
+            block_done = torch.zeros(B, num_target_blocks, dtype=torch.bool, device=device)
+
+            for step in range(1, block_size + 1):
+                # Check if all target blocks are done
+                remaining = (state_blk[:, 1:, :] < 2)  # (B, num_target_blocks, block_size)
+                if not remaining.any():
+                    break
+                had_remaining_blk = remaining.any(dim=-1)  # (B, num_target_blocks) — snapshot before updates
+
+                # Forward pass with sub-token inputs
+                logits = model.forward_for_eval_sub(eval_sub, targets_batch, attn_mask=attn_mask)
+                probs = torch.softmax(logits.float(), dim=-1)  # (B, L, pure_vocab_size)
+                argmax_probs, argmax_tokens = probs.max(dim=-1)  # (B, L)
+
+                # Reshape to block view: (B, num_blocks, block_size)
+                argmax_probs_blk = argmax_probs.view(B, num_blocks, block_size)
+
+                # === Decision masks (all over target blocks only) ===
+                state_tgt = state_blk[:, 1:, :]  # (B, num_target_blocks, block_size)
+                probs_tgt = argmax_probs_blk[:, 1:, :]
+
+                full_from_0 = (state_tgt == 0) & (probs_tgt > tau1)
+                half_to_full_mask = (state_tgt == 1) & (probs_tgt > tau1)
+                half_decode_mask = (state_tgt == 0) & (probs_tgt > tau2) & (probs_tgt <= tau1)
+
+                # Helper: map (batch, target_block, pos) -> flat L-space position
+                # target block i -> actual block i+1 -> flat_pos = (i+1)*block_size + p
+                def _to_flat(batch_idx, tbi_idx, p_idx):
+                    return (tbi_idx + 1) * block_size + p_idx
+
+                # === Full decode from state 0 (vectorized) ===
+                if full_from_0.any():
+                    bi, tbi, pi = full_from_0.nonzero(as_tuple=True)
+                    fp = _to_flat(bi, tbi, pi)
+                    tokens = argmax_tokens[bi, fp]
+                    eval_sub[bi, sub0_idx[fp]] = tokens // base
+                    eval_sub[bi, sub1_idx[fp]] = tokens % base
+                    state_blk[bi, tbi + 1, pi] = 2
+
+                # === Half→full with consistency filter (vectorized) ===
+                if half_to_full_mask.any():
+                    bi, tbi, pi = half_to_full_mask.nonzero(as_tuple=True)
+                    fp = _to_flat(bi, tbi, pi)
+                    committed_s0 = eval_sub[bi, sub0_idx[fp]]  # (N,)
+                    # Batch consistency filter: mask invalid tokens per position
+                    pos_logits = logits[bi, fp, :].clone()  # (N, pure_vocab_size)
+                    invalid = token_to_s0.unsqueeze(0) != committed_s0.unsqueeze(1)  # (N, V)
+                    pos_logits[invalid] = float('-inf')
+                    consistent_tokens = pos_logits.argmax(dim=-1)  # (N,)
+                    eval_sub[bi, sub0_idx[fp]] = consistent_tokens // base
+                    eval_sub[bi, sub1_idx[fp]] = consistent_tokens % base
+                    state_blk[bi, tbi + 1, pi] = 2
+
+                # === Half decode: write sub-token 0 only (vectorized) ===
+                if half_decode_mask.any():
+                    bi, tbi, pi = half_decode_mask.nonzero(as_tuple=True)
+                    fp = _to_flat(bi, tbi, pi)
+                    tokens = argmax_tokens[bi, fp]
+                    eval_sub[bi, sub0_idx[fp]] = tokens // base
+                    # sub1 stays as mask_sub_token
+                    state_blk[bi, tbi + 1, pi] = 1
+
+                # === Fallback: full-decode most confident remaining if no full decode happened ===
+                any_full_decode = full_from_0 | half_to_full_mask
+                has_remaining_after = (state_blk[:, 1:, :] < 2)
+                has_remaining_blk = has_remaining_after.any(dim=-1)
+                needs_fallback = has_remaining_blk & ~any_full_decode.any(dim=-1)
+
+                if needs_fallback.any():
+                    fb_probs = argmax_probs_blk[:, 1:, :].clone()
+                    fb_probs[~has_remaining_after] = -1.0
+                    fb_best = fb_probs.argmax(dim=-1)  # (B, num_target_blocks)
+
+                    fb_bi, fb_tbi = needs_fallback.nonzero(as_tuple=True)
+                    fb_pi = fb_best[fb_bi, fb_tbi]
+                    fb_fp = _to_flat(fb_bi, fb_tbi, fb_pi)
+                    fb_state = state_blk[fb_bi, fb_tbi + 1, fb_pi]
+
+                    # Split into state==0 (direct full) and state==1 (consistency filter)
+                    is_s0 = (fb_state == 0)
+                    is_s1 = (fb_state == 1)
+
+                    if is_s0.any():
+                        s0_bi, s0_fp = fb_bi[is_s0], fb_fp[is_s0]
+                        s0_tbi, s0_pi = fb_tbi[is_s0], fb_pi[is_s0]
+                        tokens = argmax_tokens[s0_bi, s0_fp]
+                        eval_sub[s0_bi, sub0_idx[s0_fp]] = tokens // base
+                        eval_sub[s0_bi, sub1_idx[s0_fp]] = tokens % base
+                        state_blk[s0_bi, s0_tbi + 1, s0_pi] = 2
+
+                    if is_s1.any():
+                        s1_bi, s1_fp = fb_bi[is_s1], fb_fp[is_s1]
+                        s1_tbi, s1_pi = fb_tbi[is_s1], fb_pi[is_s1]
+                        committed_s0 = eval_sub[s1_bi, sub0_idx[s1_fp]]
+                        pos_logits = logits[s1_bi, s1_fp, :].clone()
+                        invalid = token_to_s0.unsqueeze(0) != committed_s0.unsqueeze(1)
+                        pos_logits[invalid] = float('-inf')
+                        consistent_tokens = pos_logits.argmax(dim=-1)
+                        eval_sub[s1_bi, sub0_idx[s1_fp]] = consistent_tokens // base
+                        eval_sub[s1_bi, sub1_idx[s1_fp]] = consistent_tokens % base
+                        state_blk[s1_bi, s1_tbi + 1, s1_pi] = 2
+
+                # Update block_steps for blocks that just finished
+                newly_done = had_remaining_blk & ~(state_blk[:, 1:, :] < 2).any(dim=-1) & ~block_done
+                block_steps[newly_done] = step
+                block_done |= newly_done
+
+        total_steps += block_steps.sum().item()
+        total_blocks += B * num_target_blocks
+
+    avg_steps = total_steps / total_blocks if total_blocks > 0 else 0.0
+    return {"threshold_high": tau1, "threshold_low": tau2, "avg_steps": avg_steps, "total_blocks": total_blocks}
+
+
 def eval_bd3lm_threshold(
     model, val_loader, block_size, num_batches,
     attn_mask, device, autocast_ctx, mask_token_id,
-    thresholds=None,
+    thresholds=None, two_tier=False, tau2_delta=0.2,
 ):
     """
     Run threshold-based parallel decoding evaluation across multiple thresholds.
@@ -367,6 +552,8 @@ def eval_bd3lm_threshold(
         autocast_ctx: autocast context
         mask_token_id: MASK token id
         thresholds: list of threshold values (default: 0.0 to 1.0 in steps of 0.1)
+        two_tier: if True, use two-tier threshold decode for BD3-LM-Prime
+        tau2_delta: delta between tau1 and tau2 (tau2 = max(0, tau1 - tau2_delta))
 
     Returns:
         {"stage": "bd3lm", "threshold_decode": {tau: {"avg_steps": X, "total_blocks": N}}}
@@ -385,8 +572,294 @@ def eval_bd3lm_threshold(
 
     results = {}
     with torch.no_grad():
+        if two_tier:
+            # Two-tier threshold decode for BD3-LM-Prime
+            # Skip tau1 <= tau2_delta: tau2 would be 0, making two-tier degenerate
+            config = model.config
+            for tau1 in thresholds:
+                if tau1 <= tau2_delta:
+                    continue
+                tau2 = max(0.0, tau1 - tau2_delta)
+                result = _eval_threshold_decode_two_tier(
+                    model, cached_batches, block_size,
+                    attn_mask, device, autocast_ctx, mask_token_id,
+                    tau1, tau2, config.base, config.mask_sub_token, config.target_length,
+                )
+                results[tau1] = result
+        else:
+            for tau in thresholds:
+                result = _eval_threshold_decode(
+                    model, cached_batches, block_size,
+                    attn_mask, device, autocast_ctx, mask_token_id, tau,
+                )
+                results[tau] = result
+
+    if was_training:
+        model.train()
+    return {"stage": "bd3lm", "threshold_decode": results}
+
+
+def _build_ltr_sub_input(targets_sub, block_size, l, mask_sub_token, k, half_state, half_s0):
+    """Build sub-token input for L2R measurement forward.
+
+    Args:
+        targets_sub: (B, L*l) clean sub-token IDs
+        block_size: block size
+        l: target_length (sub-tokens per token)
+        mask_sub_token: mask sub-token ID
+        k: current position being decoded (0-indexed within block)
+        half_state: (B, num_blocks, block_size) bool — True if position is half-decoded
+        half_s0: (B, num_blocks, block_size) long — committed MSB sub-token values
+
+    Returns:
+        eval_sub: (B, L*l) sub-token input
+            - Block 0: clean from targets_sub
+            - Positions [0..k-1] in blocks 1+: clean (teacher forcing)
+            - Position k in blocks 1+: MASK (both sub-tokens)
+            - Positions [k+1..end] in blocks 1+: half-decoded or fully masked
+    """
+    B = targets_sub.shape[0]
+    L_sub = targets_sub.shape[1]
+    L = L_sub // l
+    num_blocks = L // block_size
+    device = targets_sub.device
+
+    # Start all masked
+    eval_sub = torch.full((B, L_sub), mask_sub_token, dtype=torch.long, device=device)
+
+    # Block 0: fully clean
+    eval_sub[:, :block_size * l] = targets_sub[:, :block_size * l]
+
+    # Positions [0..k-1] in blocks 1+: ground truth (teacher forcing)
+    if k > 0:
+        # Build mask for prefix positions in all target blocks
+        pos_in_block = torch.arange(block_size, device=device)
+        block_starts = torch.arange(1, num_blocks, device=device) * block_size  # (num_target_blocks,)
+        # Flat token positions for prefix: block_start + p for p in [0, k)
+        prefix_positions = (block_starts.unsqueeze(1) + pos_in_block[:k].unsqueeze(0)).reshape(-1)  # (num_target_blocks * k,)
+        # Sub-token indices
+        for si in range(l):
+            sub_idx = prefix_positions * l + si
+            eval_sub[:, sub_idx] = targets_sub[:, sub_idx]
+
+    # Positions [k+1..end] in blocks 1+: apply half-decodes where half_state is True
+    if k < block_size - 1:
+        # half_state: (B, num_blocks, block_size)
+        # Only target blocks (1:), future positions (k+1:)
+        for p in range(k + 1, block_size):
+            # half_state[:, 1:, p] gives (B, num_target_blocks) mask
+            hs = half_state[:, 1:, p]  # (B, num_target_blocks)
+            if hs.any():
+                block_starts = torch.arange(1, num_blocks, device=device)  # (num_target_blocks,)
+                flat_pos = block_starts + p  # (num_target_blocks,) token positions
+                sub0 = flat_pos * l  # sub-token 0 indices
+
+                # Expand for batch: (B, num_target_blocks)
+                b_idx, tb_idx = hs.nonzero(as_tuple=True)
+                eval_sub[b_idx, sub0[tb_idx]] = half_s0[b_idx, tb_idx + 1, p]
+
+    return eval_sub
+
+
+def _build_ltr_sub_input_clean(targets_sub, block_size, l, mask_sub_token, k):
+    """Build clean sub-token input for L2R lookahead forward (no half-decodes).
+
+    Args:
+        targets_sub: (B, L*l) clean sub-token IDs
+        block_size: block size
+        l: target_length
+        mask_sub_token: mask sub-token ID
+        k: current position (positions [0..k-1] are ground truth prefix)
+
+    Returns:
+        eval_sub: (B, L*l) sub-token input
+            - Block 0: clean
+            - Positions [0..k-1] in blocks 1+: clean
+            - Positions [k..end] in blocks 1+: all MASK
+    """
+    B = targets_sub.shape[0]
+    L_sub = targets_sub.shape[1]
+    L = L_sub // l
+    num_blocks = L // block_size
+    device = targets_sub.device
+
+    # Start all masked
+    eval_sub = torch.full((B, L_sub), mask_sub_token, dtype=torch.long, device=device)
+
+    # Block 0: fully clean
+    eval_sub[:, :block_size * l] = targets_sub[:, :block_size * l]
+
+    # Positions [0..k-1] in blocks 1+: ground truth
+    if k > 0:
+        pos_in_block = torch.arange(block_size, device=device)
+        block_starts = torch.arange(1, num_blocks, device=device) * block_size
+        prefix_positions = (block_starts.unsqueeze(1) + pos_in_block[:k].unsqueeze(0)).reshape(-1)
+        for si in range(l):
+            sub_idx = prefix_positions * l + si
+            eval_sub[:, sub_idx] = targets_sub[:, sub_idx]
+
+    return eval_sub
+
+
+def _eval_ltr_sub_token_lookahead(
+    model, cached_batches, block_size,
+    attn_mask, device, autocast_ctx, mask_token_id, threshold,
+):
+    """Teacher-forced L2R eval with sub-token lookahead half-decoding.
+
+    At each step k, two forwards:
+    1. Measurement: [gt_prefix, half?/mask future] → record loss/accuracy at position k
+    2. Lookahead: [gt_prefix, clean MASK future] → decide half-decodes for next step
+
+    Args:
+        model: BD3-LM-Prime model
+        cached_batches: list of (targets,) tuples
+        block_size: block size
+        attn_mask: attention mask
+        device: device
+        autocast_ctx: autocast context
+        mask_token_id: MASK token id
+        threshold: τ for half-decode decisions (float('inf') = baseline, no half-decodes)
+
+    Returns:
+        {"overall_loss": float, "overall_ppl": float, "overall_accuracy": float,
+         "positions": {k: {"loss", "ppl", "accuracy", "argmax_prob"}}}
+    """
+    config = model.config
+    base = config.base
+    l = config.target_length
+    mask_sub_token = config.mask_sub_token
+
+    nll_data = {k: {"nll": 0.0, "entropy": 0.0, "argmax_prob": 0.0, "tokens": 0} for k in range(block_size)}
+    acc_data = {k: {"correct": 0, "total": 0} for k in range(block_size)}
+
+    is_baseline = threshold == float('inf')
+
+    for (targets_batch,) in cached_batches:
+        B, L = targets_batch.shape
+        num_blocks = L // block_size
+
+        with autocast_ctx:
+            targets_sub = prime_encode(targets_batch, base, l,
+                                       mask_token_id=mask_token_id,
+                                       mask_sub_token=mask_sub_token)
+
+            # Half-decode state (reset per batch, accumulates across k)
+            half_state = torch.zeros(B, num_blocks, block_size, dtype=torch.bool, device=device)
+            half_s0 = torch.zeros(B, num_blocks, block_size, dtype=torch.long, device=device)
+
+            for k in range(block_size):
+                # --- Forward 1 (measurement) ---
+                if is_baseline:
+                    eval_sub_meas = _build_ltr_sub_input_clean(targets_sub, block_size, l, mask_sub_token, k)
+                else:
+                    eval_sub_meas = _build_ltr_sub_input(targets_sub, block_size, l, mask_sub_token, k, half_state, half_s0)
+
+                logits = model.forward_for_eval_sub(eval_sub_meas, targets_batch, attn_mask=attn_mask)
+                log_probs = F.log_softmax(logits.float(), dim=-1)
+                probs = log_probs.exp()
+                entropy = -(probs * log_probs).sum(dim=-1)
+                argmax_prob_all = probs.max(dim=-1)[0]
+
+                # Record metrics at position k in blocks 1+
+                for block_idx in range(1, num_blocks):
+                    pos_in_seq = block_idx * block_size + k
+                    nll = -log_probs[:, pos_in_seq, :].gather(
+                        -1, targets_batch[:, pos_in_seq].unsqueeze(-1)
+                    ).squeeze(-1)
+                    nll_data[k]["nll"] += nll.sum().item()
+                    nll_data[k]["entropy"] += entropy[:, pos_in_seq].sum().item()
+                    nll_data[k]["argmax_prob"] += argmax_prob_all[:, pos_in_seq].sum().item()
+                    nll_data[k]["tokens"] += B
+
+                    preds = logits[:, pos_in_seq, :].argmax(dim=-1)
+                    acc_data[k]["correct"] += (preds == targets_batch[:, pos_in_seq]).sum().item()
+                    acc_data[k]["total"] += B
+
+                # --- Forward 2 (lookahead) — skip if baseline or last position ---
+                if not is_baseline and k < block_size - 1:
+                    eval_sub_look = _build_ltr_sub_input_clean(targets_sub, block_size, l, mask_sub_token, k)
+                    logits_look = model.forward_for_eval_sub(eval_sub_look, targets_batch, attn_mask=attn_mask)
+                    probs_look = torch.softmax(logits_look.float(), dim=-1)
+                    argmax_probs_look, argmax_tokens_look = probs_look.max(dim=-1)
+
+                    # Decide half-decodes for future positions [k+1, block_size-1]
+                    for p in range(k + 1, block_size):
+                        for block_idx in range(1, num_blocks):
+                            pos_in_seq = block_idx * block_size + p
+                            # Vectorize over batch
+                            should_half = (argmax_probs_look[:, pos_in_seq] > threshold) & ~half_state[:, block_idx, p]
+                            if should_half.any():
+                                half_state[should_half, block_idx, p] = True
+                                half_s0[should_half, block_idx, p] = argmax_tokens_look[should_half, pos_in_seq] // base
+
+    # Aggregate results
+    total_nll = sum(nll_data[k]["nll"] for k in range(block_size))
+    total_tokens = sum(nll_data[k]["tokens"] for k in range(block_size))
+    total_correct = sum(acc_data[k]["correct"] for k in range(block_size))
+    total_entropy = sum(nll_data[k]["entropy"] for k in range(block_size))
+    total_argmax_prob = sum(nll_data[k]["argmax_prob"] for k in range(block_size))
+
+    overall_loss = total_nll / total_tokens if total_tokens > 0 else 0.0
+    result = {
+        "overall_loss": overall_loss,
+        "overall_ppl": torch.exp(torch.tensor(overall_loss)).item(),
+        "overall_entropy_ppl": torch.exp(torch.tensor(total_entropy / total_tokens)).item() if total_tokens > 0 else 0.0,
+        "overall_accuracy": total_correct / total_tokens if total_tokens > 0 else 0.0,
+        "overall_argmax_prob": total_argmax_prob / total_tokens if total_tokens > 0 else 0.0,
+        "positions": {},
+    }
+
+    for k in range(block_size):
+        tokens_k = nll_data[k]["tokens"]
+        loss_k = nll_data[k]["nll"] / tokens_k if tokens_k > 0 else 0.0
+        entropy_k = nll_data[k]["entropy"] / tokens_k if tokens_k > 0 else 0.0
+        acc_k = acc_data[k]["correct"] / acc_data[k]["total"] if acc_data[k]["total"] > 0 else 0.0
+        result["positions"][k] = {
+            "loss": loss_k,
+            "ppl": torch.exp(torch.tensor(loss_k)).item(),
+            "entropy_ppl": torch.exp(torch.tensor(entropy_k)).item(),
+            "argmax_prob": nll_data[k]["argmax_prob"] / tokens_k if tokens_k > 0 else 0.0,
+            "accuracy": acc_k,
+        }
+
+    return result
+
+
+def eval_bd3lm_ltr_lookahead(
+    model, val_loader, block_size, num_batches,
+    attn_mask, device, autocast_ctx, mask_token_id,
+    thresholds=None,
+):
+    """Run sub-token lookahead L2R eval across multiple thresholds.
+
+    Caches batches once, then sweeps thresholds. Includes baseline (τ=∞).
+
+    Returns:
+        {"stage": "bd3lm", "ltr_sub_lookahead": {tau: {results}}}
+    """
+    if thresholds is None:
+        thresholds = [i / 10.0 for i in range(11)]
+
+    was_training = model.training
+    model.eval()
+
+    cached_batches = []
+    for _ in range(num_batches):
+        _, targets_batch, _, _ = next(val_loader)
+        cached_batches.append((targets_batch,))
+
+    results = {}
+    with torch.no_grad():
+        # Baseline first (τ=∞, no half-decodes)
+        result = _eval_ltr_sub_token_lookahead(
+            model, cached_batches, block_size,
+            attn_mask, device, autocast_ctx, mask_token_id, float('inf'),
+        )
+        results["inf"] = result
+
         for tau in thresholds:
-            result = _eval_threshold_decode(
+            result = _eval_ltr_sub_token_lookahead(
                 model, cached_batches, block_size,
                 attn_mask, device, autocast_ctx, mask_token_id, tau,
             )
@@ -394,7 +867,7 @@ def eval_bd3lm_threshold(
 
     if was_training:
         model.train()
-    return {"stage": "bd3lm", "threshold_decode": results}
+    return {"stage": "bd3lm", "ltr_sub_lookahead": results}
 
 
 def _prepare_eval_batch(targets, mask_token_id):

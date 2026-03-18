@@ -20,7 +20,7 @@ from nanochat.common import compute_init, autodetect_device_type, get_base_dir, 
 from nanochat.checkpoint_manager import load_checkpoint, find_last_step, find_largest_model
 from nanochat.bd3lm import BDLM, BDLMConfig
 from nanochat.bd3lm_prime import BD3LMPrime, BD3LMPrimeConfig
-from nanochat.bd3lm_eval import eval_bd3lm, eval_bd3lm_threshold
+from nanochat.bd3lm_eval import eval_bd3lm, eval_bd3lm_threshold, eval_bd3lm_ltr_lookahead
 from nanochat.dataloader import tokenizing_distributed_data_loader_with_state
 from nanochat.attn_masks import gen_mask
 from nanochat.tokenizer import get_tokenizer, get_tokenizer_from_dir
@@ -112,6 +112,9 @@ def run_eval(
     ckpt_dir=None,
     left_to_right=False,
     threshold_decode=False,
+    two_tier=False,
+    tau2_delta=0.2,
+    ltr_sub_lookahead=False,
 ):
     """
     Run BD3LM evaluation.
@@ -204,8 +207,21 @@ def run_eval(
     total_eval_blocks = total_sequences * eval_blocks_per_seq
     print0(f"Running evaluation: {num_batches} batches × {device_batch_size} seqs = {total_sequences} sequences")
     print0(f"  {blocks_per_seq} blocks/seq, {eval_blocks_per_seq} evaluated (skip block 0) = {total_eval_blocks:,} total blocks")
-    if threshold_decode:
-        print0(f"Running BD3LM threshold decode evaluation...")
+    if ltr_sub_lookahead:
+        print0(f"Running BD3LM L2R sub-token lookahead evaluation...")
+        eval_result = eval_bd3lm_ltr_lookahead(
+            model=model,
+            val_loader=val_loader,
+            block_size=block_size,
+            num_batches=num_batches,
+            attn_mask=attn_mask,
+            device=device,
+            autocast_ctx=autocast_ctx,
+            mask_token_id=mask_token_id,
+        )
+    elif threshold_decode:
+        mode_str = "two-tier " if two_tier else ""
+        print0(f"Running BD3LM {mode_str}threshold decode evaluation...")
         eval_result = eval_bd3lm_threshold(
             model=model,
             val_loader=val_loader,
@@ -215,6 +231,8 @@ def run_eval(
             device=device,
             autocast_ctx=autocast_ctx,
             mask_token_id=mask_token_id,
+            two_tier=two_tier,
+            tau2_delta=tau2_delta,
         )
     else:
         eval_result = eval_bd3lm(
@@ -238,6 +256,20 @@ def print_results(eval_result, target_shift, block_size):
     print0("\n" + "=" * 60)
     print0("EVALUATION RESULTS")
     print0("=" * 60)
+
+    # L2R sub-token lookahead result
+    if "ltr_sub_lookahead" in eval_result:
+        la = eval_result["ltr_sub_lookahead"]
+        print0(f"\n[ltr_sub_lookahead] Sub-token lookahead L2R eval:")
+        print0(f"  {'τ':>6s}  {'loss':>8s}  {'ppl':>8s}  {'acc':>8s}  {'argmax_p':>8s}")
+        print0(f"  {'------':>6s}  {'--------':>8s}  {'--------':>8s}  {'--------':>8s}  {'--------':>8s}")
+        for tau in sorted(la.keys(), key=lambda x: float(x)):
+            r = la[tau]
+            tau_str = "inf" if tau == "inf" or tau == float('inf') else f"{float(tau):.2f}"
+            print0(f"  {tau_str:>6s}  {r['overall_loss']:8.4f}  {r['overall_ppl']:8.2f}  "
+                   f"{r['overall_accuracy']:7.2%}  {r['overall_argmax_prob']:8.4f}")
+        print0("\n" + "=" * 60)
+        return
 
     # Threshold decode result
     if "threshold_decode" in eval_result:
@@ -320,6 +352,14 @@ def main():
     parser.add_argument("--threshold_decode", action="store_true",
                         help="Run threshold-based parallel decoding: sweep τ from 0.0 to 1.0, "
                              "report avg_steps per threshold.")
+    parser.add_argument("--two_tier", action="store_true",
+                        help="Use two-tier threshold decode for BD3-LM-Prime: "
+                             "high confidence → full decode, medium → half decode (reveal MSB).")
+    parser.add_argument("--tau2_delta", type=float, default=0.2,
+                        help="Delta between tau1 and tau2 for two-tier decode (tau2 = max(0, tau1 - delta)). Default: 0.2")
+    parser.add_argument("--ltr_sub_lookahead", action="store_true",
+                        help="L2R teacher-forced eval with sub-token lookahead half-decoding. "
+                             "Measures whether partial sub-token reveals help prediction quality.")
     args = parser.parse_args()
 
     # Run evaluation
@@ -333,6 +373,9 @@ def main():
         ckpt_dir=args.ckpt_dir,
         left_to_right=args.left_to_right,
         threshold_decode=args.threshold_decode,
+        two_tier=args.two_tier,
+        tau2_delta=args.tau2_delta,
+        ltr_sub_lookahead=args.ltr_sub_lookahead,
     )
 
     # Get block_size and target_shift for printing (re-load meta to get it)

@@ -2,6 +2,7 @@
 * dynamic soft_p ratio for every position.
 * cv stuff?
 * bd3lm-prime comparison
+* method for citation 
 
 02/25
 * we need to find some confidence related metrics? like entrophy-ppl?

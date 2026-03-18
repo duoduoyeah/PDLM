@@ -85,29 +85,47 @@ Same backbone, only intermediate state differs. Clean comparison.
 - Just "does the model work" — establishing baseline numbers
 
 ### Experiment 2: Threshold-based parallel decoding (extend Table 6 / Figure)
-- Add BD3-LM-Prime curve to the existing figure
-- Same setup: for each threshold tau, measure avg tokens decoded per step
+- Add BD3-LM-Prime curves to the existing figure
+- Metric: avg_steps to fully decode a block (same for all models)
+- Each model uses its intermediate states optimally:
+
+| Model | Decoding strategy | Curve label |
+|---|---|---|
+| BD3-LM | single τ, all-or-nothing | existing |
+| BD3-LM-Prime (single τ) | single τ, all-or-nothing (same algorithm as BD3-LM) | apples-to-apples baseline |
+| BD3-LM-Prime (two-tier) | τ1=full decode, τ2=half decode (reveal 1 sub-token) | Prime's best case |
+| PDLM variants | single τ, but group tokens from stage 1 boost confidence | existing |
+
+**Two-tier threshold decode for Prime:**
+- argmax_prob > τ1: decode full token (reveal both sub-tokens)
+- τ2 < argmax_prob < τ1: half decode (reveal sub-token 0 only, the most-significant digit — narrows 4096→64 candidates)
+- argmax_prob < τ2: leave fully masked
+- On next forward pass, half-decoded positions give partial info (exactly what Prime was trained on), boosting confidence for subsequent steps
+
+**Why this is a fair comparison:**
+Prime's sub-token architecture is training-only by default — the joint output head (lm_head → 4096 logits per position) means the transformer sees 4 token positions, not 8 sub-token positions. There is no per-sub-token argmax_prob; the threshold decision is always based on token-level confidence. The two-tier approach simply uses a softer action (partial reveal) for medium-confidence positions, exploiting Prime's ability to process partially-revealed sub-token inputs.
+
+PDLM's advantage is analogous but different: group tokens from stage 1 provide semantic narrowing at every position before threshold decode even starts. Both models use their unique intermediate states; the metric (avg_steps) is the same.
 
 ### Predicted Results
 
-**PPL (Table 4)**: BD3-LM-Prime lands between BD3-LM and PDLM, probably closer to BD3-LM. Sub-token digits give some information (narrowing from ~4k tokens to ~224 candidates with base-b), but the information is arbitrary — knowing a token ID digit doesn't help predict meaning. Could also roughly match PDLM on PPL; if so, the story becomes "both help PPL, but differ on confidence."
+**PPL (Table 4)**: BD3-LM-Prime PPL is 5.31, worse than BD3-LM (4.82). This is likely due to eval mismatch: during training, Prime sees independently-masked sub-tokens (partial reveals within a token), but LTR eval uses all-or-nothing token masking, so the Prime intermediate states never appear. The compressed embedding (65-entry sub-token table vs 4097-entry token table) may also hurt.
 
 **Parallel Decoding (Table 6)**: PDLM clearly wins. Confidence depends on how much the intermediate state narrows the output distribution in a meaningful way:
 - Group token says "animal noun" → mass concentrates on ~64 semantically related tokens → high argmax prob
-- Sub-token digit says "first base-15 digit is 3" → mass spreads across ~224 semantically unrelated tokens → lower argmax prob
+- Sub-token digit says "first base-64 digit is 3" → mass spreads across 64 semantically unrelated tokens → lower argmax prob
 
-At low thresholds (tau 0.4-0.5): both similar, bar is low.
-At high thresholds (tau 0.7-0.9): PDLM pulls ahead clearly.
-BD3-LM-Prime might even look similar to BD3-LM on this metric if arbitrary digits don't meaningfully sharpen the distribution.
+Single-τ Prime: should look similar to BD3-LM (no intermediate state advantage at decode time).
+Two-tier Prime: might improve over single-τ by allowing partial reveals, but the arbitrary sub-token info is weaker than semantic group info.
 
 **Summary of predictions:**
 
-| | PPL | Parallel Decode |
-|---|---|---|
-| BD3-LM-Prime vs BD3-LM | better | slightly better or similar |
-| BD3-LM-Prime vs PDLM | similar or slightly worse | clearly worse |
+| | PPL | Parallel Decode (single τ) | Parallel Decode (two-tier) |
+|---|---|---|---|
+| BD3-LM-Prime vs BD3-LM | worse (5.31 vs 4.82) | similar | slightly better |
+| BD3-LM-Prime vs PDLM | worse | worse | still worse |
 
-**Punchline**: Intermediate states help PPL broadly, but only semantically structured intermediate states help confidence/parallel decoding.
+**Punchline**: Prime's sub-token intermediate states are a training-time trick that improves PPL in pure MDM settings (where idle steps matter), but in block-AR with threshold decode, they provide no semantic signal — only PDLM's group tokens translate to decoding speedup.
 
 ## BD3-LM-Prime Implementation
 
@@ -146,4 +164,7 @@ Analogous to BD3-LM: valid tokens 0–4095, mask token 4096, vocab 4097.
 - [x] Explore their GitHub repo
 - [x] Design comparison experiments
 - [x] Implement BD3-LM-Prime model
-- [ ] Run experiments
+- [x] Experiment 1: End-to-end PPL (BD3-LM-Prime = 5.31, in Table 4)
+- [x] Experiment 2a: Threshold decode — single τ (same algorithm as BD3-LM)
+- [x] Experiment 2b: Threshold decode — two-tier τ1/τ2 (Prime's best case)
+- [x] Implement two-tier threshold decode in eval code

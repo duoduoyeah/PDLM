@@ -32,6 +32,9 @@ MODEL=""
 TOTAL_SEQUENCES="3200"
 LOCAL_DIR="${SCRATCH:-/tmp}/bd3lm_eval"
 PUSH_RESULTS="false"
+TWO_TIER="false"
+TAU2_DELTA=""
+LTR_SUB_LOOKAHEAD="false"
 
 # Parse named arguments
 for arg in "$@"; do
@@ -51,12 +54,22 @@ for arg in "$@"; do
         --push_results)
             PUSH_RESULTS="true"
             ;;
+        --two_tier)
+            TWO_TIER="true"
+            ;;
+        --tau2_delta=*)
+            TAU2_DELTA="${arg#*=}"
+            ;;
+        --ltr_sub_lookahead)
+            LTR_SUB_LOOKAHEAD="true"
+            ;;
         *)
             echo "Unknown argument: $arg"
             echo "Usage: bash slurms/eval_bd3lm_threshold.sh \\"
             echo "    --gdrive_folder=bd3lm_d8 \\"
             echo "    --model=bd3lm_d8_b4_normal_r40 \\"
             echo "    [--total_sequences=3200] [--local_dir=\$SCRATCH/bd3lm_eval] [--push_results]"
+            echo "    [--two_tier] [--tau2_delta=0.2] [--ltr_sub_lookahead]"
             exit 1
             ;;
     esac
@@ -69,7 +82,13 @@ fi
 
 GDRIVE_PATH="${GDRIVE_ROOT}/${GDRIVE_FOLDER}/${MODEL}"
 MODEL_DIR="${LOCAL_DIR}/${MODEL}"
-RUN_FOLDER="seq${TOTAL_SEQUENCES}_threshold"
+if [ "${LTR_SUB_LOOKAHEAD}" = "true" ]; then
+    RUN_FOLDER="seq${TOTAL_SEQUENCES}_ltr_sub_lookahead"
+elif [ "${TWO_TIER}" = "true" ]; then
+    RUN_FOLDER="seq${TOTAL_SEQUENCES}_threshold_two_tier"
+else
+    RUN_FOLDER="seq${TOTAL_SEQUENCES}_threshold"
+fi
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
 echo "============================================================"
@@ -78,6 +97,11 @@ echo "============================================================"
 echo "GDrive path:     ${GDRIVE_PATH}"
 echo "Local dir:       ${MODEL_DIR}"
 echo "Total sequences: ${TOTAL_SEQUENCES}"
+echo "Two-tier:        ${TWO_TIER}"
+echo "LTR lookahead:   ${LTR_SUB_LOOKAHEAD}"
+if [ -n "${TAU2_DELTA}" ]; then
+echo "Tau2 delta:      ${TAU2_DELTA}"
+fi
 echo "Push results:    ${PUSH_RESULTS}"
 echo "============================================================"
 
@@ -161,13 +185,26 @@ echo "  Checkpoint dir: ${CKPT_DIR}"
 echo ""
 echo "Step 4: Running BD3LM threshold decode evaluation (${TOTAL_SEQUENCES} sequences)..."
 
-OUT_JSON="${MODEL_DIR}/eval_threshold.json"
+EXTRA_ARGS=""
+if [ "${LTR_SUB_LOOKAHEAD}" = "true" ]; then
+    OUT_JSON="${MODEL_DIR}/eval_ltr_sub_lookahead.json"
+    EXTRA_ARGS="${EXTRA_ARGS} --ltr_sub_lookahead"
+elif [ "${TWO_TIER}" = "true" ]; then
+    OUT_JSON="${MODEL_DIR}/eval_threshold_two_tier.json"
+    EXTRA_ARGS="${EXTRA_ARGS} --threshold_decode --two_tier"
+    if [ -n "${TAU2_DELTA}" ]; then
+        EXTRA_ARGS="${EXTRA_ARGS} --tau2_delta=${TAU2_DELTA}"
+    fi
+else
+    OUT_JSON="${MODEL_DIR}/eval_threshold.json"
+    EXTRA_ARGS="${EXTRA_ARGS} --threshold_decode"
+fi
 
 python -m scripts.bd3lm_eval \
     --ckpt_dir="${CKPT_DIR}" \
-    --threshold_decode \
     --total_sequences=${TOTAL_SEQUENCES} \
-    --output_json="${OUT_JSON}"
+    --output_json="${OUT_JSON}" \
+    ${EXTRA_ARGS}
 
 if [ $? -ne 0 ]; then
     echo "Error: Evaluation failed"
@@ -183,10 +220,12 @@ echo "Results saved to: ${OUT_JSON}"
 if [ "${PUSH_RESULTS}" = "true" ]; then
     echo ""
     echo "Step 5: Uploading results to duoduoyeah/eval_results..."
+    EVAL_JSON_NAME=$(basename "${OUT_JSON}")
     bash "${REPO_ROOT}/slurms/hf_upload.sh" \
         --repo_prefix=bd3lm \
         --run_folder="${RUN_FOLDER}" \
-        --result_dirs="${MODEL_DIR}"
+        --result_dirs="${MODEL_DIR}" \
+        --eval_json="${EVAL_JSON_NAME}"
     if [ $? -ne 0 ]; then
         echo "Warning: Upload to HuggingFace failed (results still saved locally)"
     fi

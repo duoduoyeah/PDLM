@@ -284,3 +284,51 @@ class BD3LMPrime(nn.Module):
         logits = softcap * torch.tanh(logits / softcap)
 
         return logits[:, :T, :]
+
+    def forward_for_eval_sub(self, idx_sub, targets, attn_mask):
+        """Eval forward accepting sub-token inputs directly (for half-decoded states).
+
+        Args:
+            idx_sub: (B, T * target_length) sub-token IDs (already in sub-token space).
+            targets: (B, T) clean target tokens (in original token space).
+            attn_mask: attention mask for block diffusion.
+
+        Returns:
+            logits: (B, T, pure_vocab_size)
+        """
+        B = idx_sub.shape[0]
+        l = self.config.target_length
+        T = idx_sub.shape[1] // l
+        assert targets.size(1) == T
+
+        # idx_sub is already in sub-token space — skip encode
+        # Encode targets to sub-tokens for x0 half
+        targets_sub = encode(targets, self.config.base, l,
+                             mask_token_id=self.config.mask_token_id,
+                             mask_sub_token=self.config.mask_sub_token)
+
+        # Embed and reshape to token level
+        xt_emb = self._embed_sub_tokens(idx_sub)       # (B, T, D)
+        x0_emb = self._embed_sub_tokens(targets_sub)   # (B, T, D)
+
+        # Concatenate [xt | x0]
+        x = torch.cat((xt_emb, x0_emb), dim=1)  # (B, 2T, D)
+
+        # Rotary embeddings
+        cos = self.cos[:, :T]
+        sin = self.sin[:, :T]
+        cos_sin = (torch.cat((cos, cos), dim=1), torch.cat((sin, sin), dim=1))
+
+        # Transformer
+        x = norm(x)
+        for block in self.transformer.h:
+            x = block(x, cos_sin, kv_cache=None, attn_mask=attn_mask)
+        x = norm(x)
+
+        # Logits
+        softcap = 15
+        logits = self.lm_head(x)
+        logits = logits.float()
+        logits = softcap * torch.tanh(logits / softcap)
+
+        return logits[:, :T, :]
