@@ -1,3 +1,4 @@
+
 03/10
 * dynamic soft_p ratio for every position.
 * cv stuff?

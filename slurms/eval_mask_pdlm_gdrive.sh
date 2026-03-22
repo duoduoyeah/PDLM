@@ -31,6 +31,7 @@ MODEL=""
 TOTAL_SEQUENCES="3200"
 LOCAL_DIR="${SCRATCH:-/tmp}/mask_pdlm_eval"
 PUSH_RESULTS="false"
+EVAL_EXTRA_ARGS=""
 
 # Parse named arguments
 for arg in "$@"; do
@@ -50,12 +51,16 @@ for arg in "$@"; do
         --push_results)
             PUSH_RESULTS="true"
             ;;
+        --eval_args=*)
+            EVAL_EXTRA_ARGS="${arg#*=}"
+            ;;
         *)
             echo "Unknown argument: $arg"
             echo "Usage: bash slurms/eval_mask_pdlm_gdrive.sh \\"
             echo "    --gdrive_folder=mask_pdlm_soft_sweep \\"
             echo "    --model=mask_pdlm_d8_b4_n512_k15_g120_p50_r40 \\"
             echo "    [--total_sequences=3200] [--local_dir=\$SCRATCH/mask_pdlm_eval] [--push_results]"
+            echo "    [--eval_args='--fresh_mask_decode']"
             exit 1
             ;;
     esac
@@ -176,7 +181,8 @@ echo "Step 4: Running evaluation (${TOTAL_SEQUENCES} sequences)..."
 python -m scripts.pdlm_eval \
     --ckpt_dir="${CKPT_DIR}" \
     --total_sequences=${TOTAL_SEQUENCES} \
-    --output_json="${MODEL_DIR}/eval_result.json"
+    --output_json="${MODEL_DIR}/eval_result.json" \
+    ${EVAL_EXTRA_ARGS}
 
 if [ $? -ne 0 ]; then
     echo "Error: Evaluation failed"
