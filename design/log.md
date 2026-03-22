@@ -7,11 +7,9 @@
   6. Train new models — n64, n128, n1024 (4s, p=50, r=40)
   7. Tokenizer sweep eval — run fresh_mask eval on all 5 granularity settings, fill Table 8 (robustness)
 
-
 03/10
 * dynamic soft_p ratio for every position.
 * bd3lm-prime comparison
-* method for citation 
 
 02/25
 * we need to find some confidence related metrics? like entrophy-ppl?
