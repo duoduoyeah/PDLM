@@ -126,7 +126,6 @@ python -m scripts.base_train \
     --depth=${DEPTH} \
     --block_size=${BLOCK_SIZE} \
     --soft_p_within=${SOFT_P_WITHIN} \
-    --mask_pdlm_4state=${MASK_PDLM_4STATE} \
     --max_seq_len=512 \
     --device_batch_size=64 \
     --target_param_data_ratio=${DATA_RATIO} \
