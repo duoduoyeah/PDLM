@@ -1,17 +1,17 @@
 03/22
- 1. Table 5 full run — running now (3200 seq, fresh_mask, n256 p-sweep)
-2. Appendix: inertia results — report the old stale-eval p-sweep numbers (already have from 320 run) as Appendix~\ref{app:inertia}
-3. Appendix: PPL method explanation — document both eval protocols (stale vs fresh_mask) and why fresh_mask is the main one
-4. BD3-LM-Prime re-eval — implement fresh_mask equivalent for BD3-LM-Prime, re-run eval, update Table 4 (equivalence) and Figure 1 (threshold decode)
-  5. Build new tokenizers — n64_k31_g1984 and n128_k31_g992 (flexible mode)
-  6. Train new models — n64, n128, n1024 (4s, p=50, r=40)
+ 1. [done] Table 5 full run — running now (3200 seq, fresh_mask, n256 p-sweep)
+2. [done] Appendix: inertia results — report the old stale-eval p-sweep numbers (already have from 320 run) as Appendix~\ref{app:inertia}
+3. [done] Appendix: PPL method explanation — document both eval protocols (stale vs fresh_mask) and why fresh_mask is the main one
+4a. BD3-LM-Prime re-eval — implement fresh_mask equivalent for BD3-LM-Prime, re-run eval, update Table 4 (equivalence)
+4b. [no need] Figure 1 (threshold decode) — threshold decode uses model's own predictions, no ground-truth revealed, no inertia issue
+4c. Appendix sub-token reveal — rewrite to account for fresh_mask protocol
+  5. [done] Build new tokenizers — n64_k31_g1984 and n128_k31_g992 (flexible mode)
+  6. [running] Train new models — n64, n128, n1024 (4s, p=50, r=40)
   7. Tokenizer sweep eval — run fresh_mask eval on all 5 granularity settings, fill Table 8 (robustness)
-
 
 03/10
 * dynamic soft_p ratio for every position.
 * bd3lm-prime comparison
-* method for citation 
 
 02/25
 * we need to find some confidence related metrics? like entrophy-ppl?
