@@ -20,7 +20,7 @@ from nanochat.common import compute_init, autodetect_device_type, get_base_dir, 
 from nanochat.checkpoint_manager import load_checkpoint, find_last_step, find_largest_model
 from nanochat.bd3lm import BDLM, BDLMConfig
 from nanochat.bd3lm_prime import BD3LMPrime, BD3LMPrimeConfig
-from nanochat.bd3lm_eval import eval_bd3lm, eval_bd3lm_threshold, eval_bd3lm_ltr_lookahead
+from nanochat.bd3lm_eval import eval_bd3lm, eval_bd3lm_threshold, eval_bd3lm_ltr_lookahead, eval_bd3lm_ltr_lookahead_fresh
 from nanochat.dataloader import tokenizing_distributed_data_loader_with_state
 from nanochat.attn_masks import gen_mask
 from nanochat.tokenizer import get_tokenizer, get_tokenizer_from_dir
@@ -115,6 +115,7 @@ def run_eval(
     two_tier=False,
     tau2_delta=0.2,
     ltr_sub_lookahead=False,
+    ltr_sub_lookahead_fresh=False,
 ):
     """
     Run BD3LM evaluation.
@@ -207,7 +208,19 @@ def run_eval(
     total_eval_blocks = total_sequences * eval_blocks_per_seq
     print0(f"Running evaluation: {num_batches} batches × {device_batch_size} seqs = {total_sequences} sequences")
     print0(f"  {blocks_per_seq} blocks/seq, {eval_blocks_per_seq} evaluated (skip block 0) = {total_eval_blocks:,} total blocks")
-    if ltr_sub_lookahead:
+    if ltr_sub_lookahead_fresh:
+        print0(f"Running BD3LM L2R sub-token lookahead (FRESH) evaluation...")
+        eval_result = eval_bd3lm_ltr_lookahead_fresh(
+            model=model,
+            val_loader=val_loader,
+            block_size=block_size,
+            num_batches=num_batches,
+            attn_mask=attn_mask,
+            device=device,
+            autocast_ctx=autocast_ctx,
+            mask_token_id=mask_token_id,
+        )
+    elif ltr_sub_lookahead:
         print0(f"Running BD3LM L2R sub-token lookahead evaluation...")
         eval_result = eval_bd3lm_ltr_lookahead(
             model=model,
@@ -360,6 +373,9 @@ def main():
     parser.add_argument("--ltr_sub_lookahead", action="store_true",
                         help="L2R teacher-forced eval with sub-token lookahead half-decoding. "
                              "Measures whether partial sub-token reveals help prediction quality.")
+    parser.add_argument("--ltr_sub_lookahead_fresh", action="store_true",
+                        help="Fresh L2R sub-token lookahead: re-derive half-decodes at each step "
+                             "from scratch (no inherited state). Removes trajectory inertia.")
     args = parser.parse_args()
 
     # Run evaluation
@@ -376,6 +392,7 @@ def main():
         two_tier=args.two_tier,
         tau2_delta=args.tau2_delta,
         ltr_sub_lookahead=args.ltr_sub_lookahead,
+        ltr_sub_lookahead_fresh=args.ltr_sub_lookahead_fresh,
     )
 
     # Get block_size and target_shift for printing (re-load meta to get it)

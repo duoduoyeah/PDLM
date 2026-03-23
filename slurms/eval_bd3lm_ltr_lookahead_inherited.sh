@@ -1,9 +1,6 @@
 #!/bin/bash
 
-## BD3-LM-Prime L2R sub-token lookahead evaluation (FRESH — no inherited state).
-## Re-derives half-decode decisions at each step from the current prefix,
-## removing trajectory inertia from inherited sub-token reveals.
-##
+## BD3-LM-Prime L2R sub-token lookahead evaluation.
 ## Downloads model via rclone if needed, runs eval, optionally pushes results.
 ##
 ## Usage:
@@ -45,11 +42,11 @@ fi
 
 GDRIVE_PATH="${GDRIVE_ROOT}/${GDRIVE_FOLDER}/${MODEL}"
 MODEL_DIR="${LOCAL_DIR}/${MODEL}"
-RUN_FOLDER="seq${TOTAL_SEQUENCES}_ltr_sub_lookahead_fresh"
+RUN_FOLDER="seq${TOTAL_SEQUENCES}_ltr_sub_lookahead"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
 echo "============================================================"
-echo "BD3-LM-Prime L2R Sub-Token Lookahead Evaluation (FRESH)"
+echo "BD3-LM-Prime L2R Sub-Token Lookahead Evaluation"
 echo "============================================================"
 echo "Model:           ${MODEL}"
 echo "Total sequences: ${TOTAL_SEQUENCES}"
@@ -91,13 +88,13 @@ fi
 export NANOCHAT_BASE_DIR="${MODEL_DIR}"
 
 # --- Run evaluation ---
-OUT_JSON="${MODEL_DIR}/eval_ltr_sub_lookahead_fresh.json"
+OUT_JSON="${MODEL_DIR}/eval_ltr_sub_lookahead.json"
 echo ""
-echo "Running L2R sub-token lookahead (FRESH) evaluation (${TOTAL_SEQUENCES} sequences)..."
+echo "Running L2R sub-token lookahead evaluation (${TOTAL_SEQUENCES} sequences)..."
 
 python -m scripts.bd3lm_eval \
     --ckpt_dir="${CKPT_DIR}" \
-    --ltr_sub_lookahead_fresh \
+    --ltr_sub_lookahead \
     --total_sequences=${TOTAL_SEQUENCES} \
     --output_json="${OUT_JSON}"
 
@@ -112,7 +109,7 @@ if [ "${PUSH_RESULTS}" = "true" ]; then
         --repo_prefix=bd3lm \
         --run_folder="${RUN_FOLDER}" \
         --result_dirs="${MODEL_DIR}" \
-        --eval_json=eval_ltr_sub_lookahead_fresh.json
+        --eval_json=eval_ltr_sub_lookahead.json
 fi
 
 echo ""
