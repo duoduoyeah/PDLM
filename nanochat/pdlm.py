@@ -1767,17 +1767,20 @@ class PDLM(nn.Module):
             # Scatter into group probs
             # group_to_pure_mask: (num_groups, pure_vocab_size) bool
             num_groups = self.group_to_pure_mask.size(0)
-            group_probs = torch.zeros(flat_logits.size(0), num_groups,
+            N = flat_logits.size(0)
+            group_probs = torch.zeros(N, num_groups,
                                       device=flat_logits.device, dtype=flat_logits.dtype)
 
             # For each top-k token, add its probability to all groups it belongs to
-            # topk_indices: (N, topk) -> look up which groups each token belongs to
-            token_group_membership = self.group_to_pure_mask[:, topk_indices.view(-1)]  # (num_groups, N*topk)
-            token_group_membership = token_group_membership.view(num_groups, flat_logits.size(0), collapse_topk)  # (G, N, topk)
-            token_group_membership = token_group_membership.permute(1, 0, 2)  # (N, G, topk)
-
-            # Weight by probabilities and sum
-            group_probs = (token_group_membership * topk_probs.unsqueeze(1)).sum(dim=-1)  # (N, G)
+            # Chunk along G dimension to avoid huge (G, N*topk) intermediate
+            G_CHUNK = 512
+            flat_topk_indices = topk_indices.view(-1)  # (N*topk,)
+            for g_start in range(0, num_groups, G_CHUNK):
+                g_end = min(g_start + G_CHUNK, num_groups)
+                chunk_mask = self.group_to_pure_mask[g_start:g_end, flat_topk_indices]  # (chunk_G, N*topk)
+                chunk_mask = chunk_mask.view(g_end - g_start, N, collapse_topk)  # (chunk_G, N, topk)
+                chunk_mask = chunk_mask.permute(1, 0, 2)  # (N, chunk_G, topk)
+                group_probs[:, g_start:g_end] = (chunk_mask * topk_probs.unsqueeze(1)).sum(dim=-1)
         else:
             # Dense: softmax over all pure tokens, then aggregate by group
             probs = F.softmax(flat_logits, dim=-1)  # (N, V)

@@ -20,12 +20,12 @@ source "${REPO_ROOT}/slurms/setup.sh"
 # Settings
 # ============================================================
 TOTAL_SEQUENCES="3200"
-OUT_DIR="table_script/results/table5_psweep"
+OUT_DIR="${OUT_DIR-table_script/results/table5_psweep}"
 LOCAL_DIR="${SCRATCH:-/tmp}/mask_pdlm_eval"
 PRINT_ONLY="${PRINT_ONLY:-false}"
 USE_SRUN="${USE_SRUN:-false}"
 SKIP_EXISTING="${SKIP_EXISTING:-false}"
-EVAL_EXTRA_ARGS="--fresh_mask_decode"
+EVAL_EXTRA_ARGS="${EVAL_EXTRA_ARGS---fresh_mask_decode}"
 
 # srun settings (only used when USE_SRUN=true)
 PARTITION="short_gpu"
@@ -192,12 +192,12 @@ from huggingface_hub import upload_folder
 
 upload_folder(
     folder_path='${OUT_DIR}',
-    path_in_repo='table5_psweep/seq${TOTAL_SEQUENCES}_fresh_mask',
+    path_in_repo='table5_psweep/seq${TOTAL_SEQUENCES}_${HF_SUFFIX-fresh_mask}',
     repo_id='duoduoyeah/eval_results',
     repo_type='dataset',
     token=os.environ.get('HF_TOKEN'),
 )
-print('Uploaded to duoduoyeah/eval_results/table5_psweep/seq${TOTAL_SEQUENCES}_fresh_mask/')
+print(f'Uploaded to duoduoyeah/eval_results/table5_psweep/seq${TOTAL_SEQUENCES}_${HF_SUFFIX-fresh_mask}/')
 " || echo "Warning: HuggingFace upload failed (results still saved locally)"
 
 echo ""

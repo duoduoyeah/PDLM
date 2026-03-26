@@ -833,7 +833,7 @@ def eval_bd3lm_ltr_lookahead(
 ):
     """Run sub-token lookahead L2R eval across multiple thresholds.
 
-    Caches batches once, then sweeps thresholds. Includes baseline (τ=∞).
+    Caches batches once, then sweeps thresholds.
 
     Returns:
         {"stage": "bd3lm", "ltr_sub_lookahead": {tau: {results}}}
@@ -851,13 +851,6 @@ def eval_bd3lm_ltr_lookahead(
 
     results = {}
     with torch.no_grad():
-        # Baseline first (τ=∞, no half-decodes)
-        result = _eval_ltr_sub_token_lookahead(
-            model, cached_batches, block_size,
-            attn_mask, device, autocast_ctx, mask_token_id, float('inf'),
-        )
-        results["inf"] = result
-
         for tau in thresholds:
             result = _eval_ltr_sub_token_lookahead(
                 model, cached_batches, block_size,
@@ -1009,7 +1002,7 @@ def eval_bd3lm_ltr_lookahead_fresh(
     Like eval_bd3lm_ltr_lookahead, but re-derives half-decode decisions
     at each step from the current prefix (no inherited state / inertia).
 
-    Caches batches once, then sweeps thresholds. Includes baseline (τ=∞).
+    Caches batches once, then sweeps thresholds.
 
     Returns:
         {"stage": "bd3lm", "ltr_sub_lookahead": {tau: {results}}}
@@ -1027,13 +1020,6 @@ def eval_bd3lm_ltr_lookahead_fresh(
 
     results = {}
     with torch.no_grad():
-        # Baseline first (τ=∞, no half-decodes)
-        result = _eval_ltr_sub_token_lookahead_fresh(
-            model, cached_batches, block_size,
-            attn_mask, device, autocast_ctx, mask_token_id, float('inf'),
-        )
-        results["inf"] = result
-
         for tau in thresholds:
             result = _eval_ltr_sub_token_lookahead_fresh(
                 model, cached_batches, block_size,
