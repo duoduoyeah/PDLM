@@ -23,6 +23,7 @@ MODEL=""
 TOTAL_SEQUENCES="3200"
 LOCAL_DIR="${SCRATCH:-/tmp}/bd3lm_eval"
 PUSH_RESULTS="false"
+THRESHOLD=""
 
 for arg in "$@"; do
     case $arg in
@@ -31,6 +32,7 @@ for arg in "$@"; do
         --total_sequences=*) TOTAL_SEQUENCES="${arg#*=}" ;;
         --local_dir=*) LOCAL_DIR="${arg#*=}" ;;
         --push_results) PUSH_RESULTS="true" ;;
+        --threshold=*) THRESHOLD="${arg#*=}" ;;
         *)
             echo "Unknown argument: $arg"
             exit 1
@@ -48,11 +50,13 @@ MODEL_DIR="${LOCAL_DIR}/${MODEL}"
 RUN_FOLDER="seq${TOTAL_SEQUENCES}_ltr_sub_lookahead_fresh"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
+THRESHOLD_LABEL="${THRESHOLD:-all}"
 echo "============================================================"
 echo "BD3-LM-Prime L2R Sub-Token Lookahead Evaluation (FRESH)"
 echo "============================================================"
 echo "Model:           ${MODEL}"
 echo "Total sequences: ${TOTAL_SEQUENCES}"
+echo "Threshold:       ${THRESHOLD_LABEL}"
 echo "============================================================"
 
 # --- Ensure validation data ---
@@ -91,7 +95,13 @@ fi
 export NANOCHAT_BASE_DIR="${MODEL_DIR}"
 
 # --- Run evaluation ---
-OUT_JSON="${MODEL_DIR}/eval_ltr_sub_lookahead_fresh.json"
+THRESHOLD_ARGS=""
+if [ -n "${THRESHOLD}" ]; then
+    OUT_JSON="${MODEL_DIR}/eval_ltr_sub_lookahead_fresh_tau${THRESHOLD}.json"
+    THRESHOLD_ARGS="--threshold=${THRESHOLD}"
+else
+    OUT_JSON="${MODEL_DIR}/eval_ltr_sub_lookahead_fresh.json"
+fi
 echo ""
 echo "Running L2R sub-token lookahead (FRESH) evaluation (${TOTAL_SEQUENCES} sequences)..."
 
@@ -99,20 +109,22 @@ python -m scripts.bd3lm_eval \
     --ckpt_dir="${CKPT_DIR}" \
     --ltr_sub_lookahead_fresh \
     --total_sequences=${TOTAL_SEQUENCES} \
-    --output_json="${OUT_JSON}"
+    --output_json="${OUT_JSON}" \
+    ${THRESHOLD_ARGS}
 
 echo ""
 echo "Results saved to: ${OUT_JSON}"
 
 # --- Push results (optional) ---
 if [ "${PUSH_RESULTS}" = "true" ]; then
+    EVAL_JSON_NAME=$(basename "${OUT_JSON}")
     echo ""
     echo "Uploading results to HuggingFace..."
     bash "${REPO_ROOT}/slurms/hf_upload.sh" \
         --repo_prefix=bd3lm \
         --run_folder="${RUN_FOLDER}" \
         --result_dirs="${MODEL_DIR}" \
-        --eval_json=eval_ltr_sub_lookahead_fresh.json
+        --eval_json="${EVAL_JSON_NAME}"
 fi
 
 echo ""

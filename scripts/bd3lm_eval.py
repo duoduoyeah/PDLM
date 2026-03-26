@@ -116,6 +116,7 @@ def run_eval(
     tau2_delta=0.2,
     ltr_sub_lookahead=False,
     ltr_sub_lookahead_fresh=False,
+    threshold=None,
 ):
     """
     Run BD3LM evaluation.
@@ -210,6 +211,7 @@ def run_eval(
     print0(f"  {blocks_per_seq} blocks/seq, {eval_blocks_per_seq} evaluated (skip block 0) = {total_eval_blocks:,} total blocks")
     if ltr_sub_lookahead_fresh:
         print0(f"Running BD3LM L2R sub-token lookahead (FRESH) evaluation...")
+        thresholds = [threshold] if threshold is not None else None
         eval_result = eval_bd3lm_ltr_lookahead_fresh(
             model=model,
             val_loader=val_loader,
@@ -219,9 +221,11 @@ def run_eval(
             device=device,
             autocast_ctx=autocast_ctx,
             mask_token_id=mask_token_id,
+            thresholds=thresholds,
         )
     elif ltr_sub_lookahead:
         print0(f"Running BD3LM L2R sub-token lookahead evaluation...")
+        thresholds = [threshold] if threshold is not None else None
         eval_result = eval_bd3lm_ltr_lookahead(
             model=model,
             val_loader=val_loader,
@@ -231,6 +235,7 @@ def run_eval(
             device=device,
             autocast_ctx=autocast_ctx,
             mask_token_id=mask_token_id,
+            thresholds=thresholds,
         )
     elif threshold_decode:
         mode_str = "two-tier " if two_tier else ""
@@ -376,6 +381,9 @@ def main():
     parser.add_argument("--ltr_sub_lookahead_fresh", action="store_true",
                         help="Fresh L2R sub-token lookahead: re-derive half-decodes at each step "
                              "from scratch (no inherited state). Removes trajectory inertia.")
+    parser.add_argument("--threshold", type=float, default=None,
+                        help="Run a single threshold τ (e.g., 0.5) instead of sweeping all. "
+                             "Used with --ltr_sub_lookahead or --ltr_sub_lookahead_fresh.")
     args = parser.parse_args()
 
     # Run evaluation
@@ -393,6 +401,7 @@ def main():
         tau2_delta=args.tau2_delta,
         ltr_sub_lookahead=args.ltr_sub_lookahead,
         ltr_sub_lookahead_fresh=args.ltr_sub_lookahead_fresh,
+        threshold=args.threshold,
     )
 
     # Get block_size and target_shift for printing (re-load meta to get it)
