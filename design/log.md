@@ -1,3 +1,6 @@
+02/21
+1. log for multi branch
+
 02/10
 1. the ppl, re-talking this stuff
 2. the api about wandb?
