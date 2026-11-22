@@ -26,7 +26,7 @@ import matplotlib.cm as cm
 
 
 BLOCK_SIZE = 4
-P_VALUES = [0, 30, 50, 70, 90, 100]
+P_VALUES = [0, 50, 100]
 
 BD3LM_MODEL = "bd3lm_d8_b4_normal_r40"
 BD3LM_PRIME_MODEL = "bd3lm_prime_d8_b4_l2_r40"
@@ -35,23 +35,23 @@ CONFIGS = {
     "n256": {
         "title": r"$n_{\mathrm{groups}}=256$",
         "models": {
-            p: f"mask_pdlm_d8_b4_n256_k31_g496_p{p}_r40" for p in P_VALUES
+            p: f"mask_pdlm_d8_b4_n256_k31_g496_p{p}_4s_r40" for p in P_VALUES
         },
     },
     "n512": {
         "title": r"$n_{\mathrm{groups}}=512$",
         "models": {
-            p: f"mask_pdlm_d8_b4_n512_k15_g120_p{p}_r40" for p in P_VALUES
+            p: f"mask_pdlm_d8_b4_n512_k15_g120_p{p}_4s_r40" for p in P_VALUES
         },
     },
 }
 
 
-def load_threshold_json(result_dir, model_name, subfolder_prefix):
+def load_threshold_json(result_dir, model_name, subfolder_prefix, two_tier=False):
     """Find and load the latest eval_threshold_*.json for a model."""
-    pattern = os.path.join(
-        result_dir, subfolder_prefix, model_name, "seq*_threshold", "eval_threshold_*.json"
-    )
+    suffix = "seq*_threshold_two_tier" if two_tier else "seq*_threshold"
+    prefix = "eval_threshold_two_tier_*.json" if two_tier else "eval_threshold_*.json"
+    pattern = os.path.join(result_dir, subfolder_prefix, model_name, suffix, prefix)
     files = sorted(glob.glob(pattern))
     if not files:
         return None
@@ -59,13 +59,14 @@ def load_threshold_json(result_dir, model_name, subfolder_prefix):
         return json.load(f)
 
 
-def extract_curve(data):
+def extract_curve(data, two_tier=False):
     """Extract (thresholds, tokens_per_step) from eval JSON."""
     td = data["threshold_decode"]
     thresholds = []
     tokens_per_step = []
+    tau_key = "threshold_high" if two_tier else "threshold"
     for key in sorted(td.keys(), key=float):
-        thresholds.append(td[key]["threshold"])
+        thresholds.append(td[key].get(tau_key, float(key)))
         tokens_per_step.append(BLOCK_SIZE / td[key]["avg_steps"])
     return thresholds, tokens_per_step
 
@@ -81,11 +82,19 @@ def main():
     # Load BD3-LM baseline
     bd3lm_data = load_threshold_json(args.bd3lm_dir, BD3LM_MODEL, "bd3lm")
 
-    # Load BD3-LM-Prime
-    prime_data = load_threshold_json(args.prime_dir, BD3LM_PRIME_MODEL, "bd3lm_prime")
+    # Load BD3-LM-Prime (single-tau)
+    prime_data = load_threshold_json(args.prime_dir, BD3LM_PRIME_MODEL, "bd3lm")
     if not prime_data:
-        # Also try without subfolder prefix (flat directory)
+        prime_data = load_threshold_json(args.prime_dir, BD3LM_PRIME_MODEL, "bd3lm_prime")
+    if not prime_data:
         prime_data = load_threshold_json(args.prime_dir, BD3LM_PRIME_MODEL, "")
+
+    # Load BD3-LM-Prime (two-tier)
+    prime_two_tier_data = load_threshold_json(args.prime_dir, BD3LM_PRIME_MODEL, "bd3lm", two_tier=True)
+    if not prime_two_tier_data:
+        prime_two_tier_data = load_threshold_json(args.prime_dir, BD3LM_PRIME_MODEL, "bd3lm_prime", two_tier=True)
+    if not prime_two_tier_data:
+        prime_two_tier_data = load_threshold_json(args.prime_dir, BD3LM_PRIME_MODEL, "", two_tier=True)
 
     # Color map: p=0 (light) → p=100 (dark)
     cmap = plt.get_cmap("Blues", len(P_VALUES) + 2)
@@ -100,11 +109,17 @@ def main():
             ax.plot(tau, tps, color="black", linestyle="--", linewidth=2,
                     label="BD3-LM", zorder=10)
 
-        # BD3-LM-Prime
+        # BD3-LM-Prime (single-tau)
         if prime_data:
             tau, tps = extract_curve(prime_data)
-            ax.plot(tau, tps, color="tab:orange", linestyle="--", linewidth=2,
+            ax.plot(tau, tps, color="tab:orange", linestyle=":", linewidth=2,
                     marker="s", markersize=3, label="BD3-LM-Prime", zorder=9)
+
+        # BD3-LM-Prime (two-tier)
+        if prime_two_tier_data:
+            tau, tps = extract_curve(prime_two_tier_data, two_tier=True)
+            ax.plot(tau, tps, color="tab:red", linestyle="-.", linewidth=2,
+                    marker="^", markersize=3, label=r"BD3-LM-Prime two-tier", zorder=9)
 
         # PDLM lines
         for p in P_VALUES:
@@ -118,8 +133,9 @@ def main():
                     color=p_colors[p], label=f"$p={p}$")
 
         ax.set_xlabel(r"Threshold $\tau$", fontsize=11)
-        ax.set_xlim(0.4, 0.9)
-        ax.set_ylim(1.0, 1.5)
+        ax.set_xlim(0.6, 0.9)
+        ax.set_xticks([0.6, 0.7, 0.8, 0.9])
+        ax.set_ylim(1.0, 1.25)
         ax.set_title(config["title"], fontsize=12)
         ax.grid(True, alpha=0.25)
         ax.legend(fontsize=8, loc="upper right")
